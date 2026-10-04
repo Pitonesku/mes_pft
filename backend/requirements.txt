@@ -1,0 +1,51 @@
+# Production API Backend Requirements
+# Versions aligned to the Python 3.14-compatible working environment.
+
+# Core Framework
+fastapi==0.138.1
+uvicorn[standard]==0.49.0
+pydantic==2.13.4
+pydantic-settings>=2.1
+
+# Database
+sqlalchemy==2.0.51
+psycopg2-binary==2.9.12
+alembic>=1.13
+
+# PDF Generation
+reportlab==4.0.7
+
+# Google Drive Integration
+google-auth==2.25.2
+google-auth-oauthlib==1.2.0
+google-auth-httplib2==0.2.0
+google-api-python-client==2.107.0
+
+# Environment Variables
+python-dotenv==1.0.0
+
+# HTTP Requests
+requests>=2.31
+
+# Password Hashing (bcrypt for server, PBKDF2 for offline sync)
+bcrypt>=4.0.0
+
+# Utilities
+python-multipart==0.0.6
+
+# APK version extraction (for auto-update endpoint)
+androguard==3.3.5
+
+# File serving
+aiofiles==23.2.1
+
+# Admin Panel
+sqladmin==0.18.0
+wtforms==3.1.1
+itsdangerous>=2.1.2
+
+# Telegram Bot (aiogram 3.x)
+aiogram>=3.17.0
+
+# AI Analysis (async HTTP client for OpenAI-compatible APIs)
+httpx>=0.27.0

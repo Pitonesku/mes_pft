@@ -1,0 +1,62 @@
+# Python
+**/venv/
+**/.venv/
+**/__pycache__/
+**/.env
+**/.env.txt
+**/*.pyc
+
+# Secrets / credentials (never commit these)
+**/Gdrive_secret.json
+**/token.json
+**/*.jks
+**/*.keystore
+**/key.properties
+**/.env.test
+
+# Logs
+**/nohup.out
+
+# Flutter/Dart
+**/.dart_tool/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/build/
+**/.pub-cache/
+**/.pub/
+**/Flutter/ephemeral/
+**/android/local.properties
+**/android/.gradle/
+**/.kotlin/
+
+# Runtime artifacts (generated, not source)
+backend/app/web/
+backend/apk_releases/
+frontend/build/
+pdf_archive/
+backend/pdf_archive/
+
+# Database dumps / backups
+backups/
+*.dump
+prod_backup.sql
+
+# Legacy archive folders (kept on disk for history, not part of mes_pft)
+Data_Bridge/
+production_log_dev/
+
+# Data_Bridge station artefacts (now handled by backend/app/services)
+*.db
+*.db-wal
+*.db-shm
+data_bridge.log
+*.spec
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.clineignore
+# Logs (any)
+*.log
+

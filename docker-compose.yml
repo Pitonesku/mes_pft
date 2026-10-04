@@ -1,0 +1,89 @@
+# mes_pft - single unified deployment (PRODUCTION).
+# All secrets come from the environment / a local .env file (never commit it).
+# Required: DB_USER, DB_PASSWORD, DB_NAME, SECRET_KEY.
+# Run:  docker compose --env-file .env up -d
+#
+# PORT ASSIGNMENTS (isolated):
+#   LIVE  db        -> host 127.0.0.1:5432   (remote production server, never touched locally)
+#   LIVE  web       -> host 0.0.0.0:8000
+#   TEST  db_test   -> host 127.0.0.1:5433   (LOCAL dev clone, opt-in via --profile test)
+#   TEST  web_test  -> host 0.0.0.0:8080
+services:
+  db:
+    image: postgres:15-alpine
+    platform: linux/amd64
+    environment:
+      POSTGRES_USER: ${DB_USER:?DB_USER is required}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      POSTGRES_DB: ${DB_NAME:?DB_NAME is required}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web:
+    build: ./backend
+    platform: linux/amd64
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      ENV: ${ENV:-production}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
+
+  # ---------------------------------------------------------------------------
+  # LOCAL TEST database (development only). Starts with:
+  #   docker compose --profile test up -d db_test
+  # Credentials are hardcoded dev defaults (postgres / test_password / mes_test_db).
+  # ---------------------------------------------------------------------------
+  db_test:
+    container_name: mes_db_test
+    image: postgres:15-alpine
+    platform: linux/amd64
+    profiles: ["test"]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: test_password
+      POSTGRES_DB: mes_test_db
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d mes_test_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web_test:
+    container_name: mes_web_test
+    build: ./backend
+    platform: linux/amd64
+    profiles: ["test"]
+    ports:
+      - "8080:8000"
+    depends_on:
+      db_test:
+        condition: service_healthy
+    env_file:
+      - backend/.env.test
+    environment:
+      DB_HOST: db_test
+      DB_PORT: "5432"
+      ENV: development
+      SECRET_KEY: ${TEST_SECRET_KEY:-test-only-secret-key}
+
+volumes:
+  postgres_data:
+  postgres_test_data:
