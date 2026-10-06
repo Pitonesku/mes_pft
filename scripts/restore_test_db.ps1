@@ -1,20 +1,24 @@
-# Restore prod_backup.sql into the LOCAL test PostgreSQL container (mes_db_test).
-# Run LOCALLY on Windows PowerShell after copying prod_backup.sql from the server.
+# Restore the custom-format production dump into the LOCAL test PostgreSQL container.
+# The dump is pg_dump -Fc (custom format), so pg_restore is used (NOT psql).
 #
-# Usage:  powershell -ExecutionPolicy Bypass -File scripts\restore_test_db.ps1 [-Dump prod_backup.sql]
+# Usage:
+#   powershell -ExecutionPolicy Bypass -File scripts\restore_test_db.ps1 [-Dump production_log_db_dump]
+# Requires: docker compose --profile test up -d db_test
 
 param(
-    [string]$Dump = 'prod_backup.sql'
+    [string]$Dump = 'production_log_db_dump'
 )
 
 $ErrorActionPreference = 'Stop'
 
-if (-not (Test-Path $Dump)) {
-    throw "Dump file not found: $Dump"
-}
+if (-not (Test-Path $Dump)) { throw "Dump file not found: $Dump" }
 
-Write-Host "==> Restoring $Dump into mes_db_test (postgres / mes_test_db on 5433) ..."
-Get-Content $Dump -Raw | docker exec -i mes_db_test psql -U postgres -d mes_test_db
-if ($LASTEXITCODE -ne 0) { throw 'psql restore failed' }
+Write-Host "==> Copying $Dump into mes_db_test ..."
+docker cp $Dump mes_db_test:/tmp/prod_dump.dump
+if ($LASTEXITCODE -ne 0) { throw 'docker cp failed' }
+
+Write-Host '==> Restoring into mes_test_db (pg_restore, --no-owner --no-privileges) ...'
+docker exec mes_db_test pg_restore -U postgres -d mes_test_db --no-owner --no-privileges --clean --if-exists /tmp/prod_dump.dump
+if ($LASTEXITCODE -ne 0) { throw 'pg_restore failed' }
 
 Write-Host '==> Done. Test DB restored.'

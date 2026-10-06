@@ -90,6 +90,8 @@ class _LoginScreenState extends State<LoginScreen> {
           canModifyPO: role == UserRole.superAdmin || role == UserRole.manager,
         );
 
+        await ApiService.saveUser(user);
+
         if (mounted) {
           Navigator.pushReplacement(
             context,
@@ -333,6 +335,53 @@ class _LoginScreenState extends State<LoginScreen> {
           child: const Text("Forgot Password?", style: TextStyle(color: Colors.deepPurple))
         )
       ]
+    );
+  }
+}
+
+/// Bootstraps the app: restores a persisted session (token + user) before
+/// deciding whether to show the login screen or the main shell.
+class SessionGate extends StatefulWidget {
+  const SessionGate({super.key});
+  @override
+  State<SessionGate> createState() => _SessionGateState();
+}
+
+class _SessionGateState extends State<SessionGate> {
+  bool _loading = true;
+  User? _user;
+
+  @override
+  void initState() {
+    super.initState();
+    _restore();
+  }
+
+  Future<void> _restore() async {
+    final token = ApiService.authToken;
+    final user = await ApiService.loadSavedUser();
+    if (!mounted) return;
+    setState(() {
+      _user = (token != null && token.isNotEmpty) ? user : null;
+      _loading = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+    final user = _user;
+    if (user == null) return const LoginScreen();
+    return ResponsiveLayout(
+      currentUser: user,
+      mobileBuilder: (ctx, u) => u.role == UserRole.operator
+          ? ReportPage(operator: u)
+          : AdminDashboard(currentUser: u),
+      desktopBuilder: (ctx, u) => u.role == UserRole.operator
+          ? ReportPage(operator: u)
+          : WebShell(currentUser: u),
     );
   }
 }

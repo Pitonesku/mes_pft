@@ -22,6 +22,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
@@ -109,7 +110,10 @@ class StationWatcher:
         try:
             existing = (
                 session.query(models.IngestionFile)
-                .filter((models.IngestionFile.sha256 == digest) | (models.IngestionFile.md5 == md5))
+                .filter(
+                    models.IngestionFile.status == "processed",
+                    (models.IngestionFile.sha256 == digest) | (models.IngestionFile.md5 == md5),
+                )
                 .first()
             )
             if existing:
@@ -121,7 +125,7 @@ class StationWatcher:
             self._move(path, self.config.archive_path)
         except Exception:
             session.rollback()
-            self._record_error(digest, md5, os.path.basename(path))
+            self._record_error(digest, md5, os.path.basename(path), traceback.format_exc())
             self._move(path, self.config.error_path)
             raise
         finally:
@@ -136,7 +140,11 @@ class StationWatcher:
         if produced_at.tzinfo is None:
             produced_at = produced_at.replace(tzinfo=timezone.utc)
 
-        shift_id, link_status = shift_resolver.resolve_shift(session, machine_id, produced_at)
+        kind, is_non_production = shift_resolver.classify_sample(sample.maker)
+        if is_non_production:
+            shift_id, link_status = None, shift_resolver.LINK_NON_PRODUCTION
+        else:
+            shift_id, link_status = shift_resolver.resolve_shift(session, machine_id, produced_at)
 
         run_id: Optional[int] = None
         if shift_id is not None:
@@ -148,7 +156,7 @@ class StationWatcher:
             machine_id=machine_id,
             link_status=link_status,
             link_source="auto",
-            kind="PRODUCTION",
+            kind=kind,
             source_instrument_id=sample.instrument_id,
             source_maker=sample.maker,
             source_team=sample.team,
@@ -185,23 +193,40 @@ class StationWatcher:
                 )
             )
 
-        session.add(
-            models.IngestionFile(
-                sha256=sha256,
-                md5=md5,
-                filename=filename,
-                status="processed",
-                sample_id=db_sample.id,
-                processed_at=datetime.now(timezone.utc),
+        ledger = (
+            session.query(models.IngestionFile)
+            .filter(
+                (models.IngestionFile.sha256 == sha256) | (models.IngestionFile.md5 == md5)
             )
+            .first()
         )
+        if ledger is None:
+            ledger = models.IngestionFile(sha256=sha256, md5=md5, filename=filename)
+            session.add(ledger)
+        ledger.status = "processed"
+        ledger.filename = filename
+        ledger.error = None
+        ledger.attempts = (ledger.attempts or 0) + 1
+        ledger.sample_id = db_sample.id
+        ledger.processed_at = datetime.now(timezone.utc)
 
-    def _record_error(self, sha256: str, md5: str, filename: str) -> None:
+    def _record_error(self, sha256: str, md5: str, filename: str, error: str) -> None:
         session: Session = self.session_factory()
         try:
-            session.add(
-                models.IngestionFile(sha256=sha256, md5=md5, filename=filename, status="error", attempts=1)
+            ledger = (
+                session.query(models.IngestionFile)
+                .filter(
+                    (models.IngestionFile.sha256 == sha256) | (models.IngestionFile.md5 == md5)
+                )
+                .first()
             )
+            if ledger is None:
+                ledger = models.IngestionFile(sha256=sha256, md5=md5, filename=filename)
+                session.add(ledger)
+            ledger.status = "error"
+            ledger.filename = filename
+            ledger.error = error
+            ledger.attempts = (ledger.attempts or 0) + 1
             session.commit()
         finally:
             session.close()

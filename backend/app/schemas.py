@@ -98,6 +98,11 @@ class POBase(BaseModel):
     is_hidden: bool = False
     is_archived: bool = False
 
+class POCreate(POBase):
+    diameter_tolerance: Optional[float] = None  # ± tolerance override for diameter
+    pd_tolerance: Optional[float] = None        # ± tolerance override for pressure drop
+
+
 class PO(POBase):
     id: int
     created_at: datetime

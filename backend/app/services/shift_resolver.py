@@ -37,6 +37,18 @@ DEFAULT_GRACE_MINUTES = 15
 DEFAULT_CLOCK_SKEW_MINUTES = 10
 
 
+def classify_sample(maker: str) -> Tuple[str, bool]:
+    """Classify a station sample by its ``Maker`` field.
+
+    Quantum Neo writes ``Maker = "Other"`` for calibration / maintenance runs.
+    Returns ``(kind, is_non_production)``; non-production samples must not be
+    linked to an open shift.
+    """
+    is_non_production = str(maker).strip() == "Other"
+    kind = "CALIBRATION" if is_non_production else "PRODUCTION"
+    return kind, is_non_production
+
+
 def resolve_machine(session: Session, source: str, alias_field: str, alias_value: str) -> Optional[int]:
     """Return machines.id for a station identifier, or None."""
     alias = (

@@ -41,6 +41,45 @@ class ApiService {
     await prefs.setString(_authTokenPrefKey, token);
   }
 
+  static const String _userPrefKey = 'auth_user';
+
+  /// Persist the authenticated user so the session can be restored on reload.
+  static Future<void> saveUser(User user) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_userPrefKey, jsonEncode({
+      'username': user.name,
+      'email': user.email,
+      'role_id': _roleIdFor(user.role),
+      'is_inactive': user.isInactive,
+    }));
+  }
+
+  /// Load the persisted user (or null when no session was saved).
+  static Future<User?> loadSavedUser() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_userPrefKey);
+      if (raw != null && raw.isNotEmpty) {
+        return User.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Wipe the stored session (token + user) — used by logout.
+  static Future<void> clearSession() async {
+    authToken = null;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_authTokenPrefKey);
+    await prefs.remove(_userPrefKey);
+  }
+
+  static int _roleIdFor(UserRole role) => switch (role) {
+        UserRole.superAdmin => 1,
+        UserRole.manager => 2,
+        UserRole.operator => 3,
+      };
+
   /// Build the standard headers for authenticated JSON requests.
   static Map<String, String> _authHeaders() => {
     'Content-Type': 'application/json',
@@ -82,7 +121,7 @@ class ApiService {
   ) async {
     try {
       final response = await _httpClient.post(
-        Uri.parse('$baseUrl/reports'),
+        Uri.parse('$effectiveBaseUrl/reports'),
         headers: _authHeaders(),
         body: jsonEncode(reportData),
       );
@@ -105,9 +144,9 @@ class ApiService {
   // --- VERSION SYNC ---
   static Future<String?> fetchServerVersion() async {
     try {
-      AppLog.i("🔄 Checking server version at $baseUrl/version");
+      AppLog.i("🔄 Checking server version at $effectiveBaseUrl/version");
       final response = await _httpClient
-          .get(Uri.parse('$baseUrl/version'))
+          .get(Uri.parse('$effectiveBaseUrl/version'))
           .timeout(const Duration(seconds: 3));
       if (response.statusCode == 200) {
         return jsonDecode(response.body)['version'];
@@ -124,10 +163,10 @@ class ApiService {
     String password,
   ) async {
     try {
-      AppLog.i("🔐 Attempting login for user: $username at $baseUrl/auth/login");
+      AppLog.i("🔐 Attempting login for user: $username at $effectiveBaseUrl/auth/login");
       final response = await _httpClient
           .post(
-            Uri.parse('$baseUrl/auth/login'),
+            Uri.parse('$effectiveBaseUrl/auth/login'),
             headers: _authHeaders(),
             body: jsonEncode({'username': username, 'password': password}),
           )
@@ -154,9 +193,9 @@ class ApiService {
   // --- USERS SYNC ---
   static Future<List<dynamic>?> fetchUsersSync() async {
     try {
-      AppLog.i("👥 Fetching users for sync from $baseUrl/users-sync");
+      AppLog.i("👥 Fetching users for sync from $effectiveBaseUrl/users-sync");
       final response = await _httpClient
-          .get(Uri.parse('$baseUrl/users-sync'), headers: _authHeaders())
+          .get(Uri.parse('$effectiveBaseUrl/users-sync'), headers: _authHeaders())
           .timeout(const Duration(seconds: 5));
       if (response.statusCode == 200) {
         final users = jsonDecode(response.body) as List<dynamic>;
@@ -176,7 +215,7 @@ class ApiService {
   static Future<Map<String, dynamic>?> getPoAudit(int poId) async {
     try {
       final response = await _httpClient.get(
-        Uri.parse('$baseUrl/stats/po-audit/$poId'),
+        Uri.parse('$effectiveBaseUrl/stats/po-audit/$poId'),
       );
       if (response.statusCode == 200) {
         // Return parsed JSON (Map)
@@ -191,7 +230,7 @@ class ApiService {
 
   static Future<List<dynamic>?> fetchMachines() async {
     try {
-      final response = await _httpClient.get(Uri.parse('$baseUrl/machines'));
+      final response = await _httpClient.get(Uri.parse('$effectiveBaseUrl/machines'));
       if (response.statusCode == 200) return jsonDecode(response.body);
       return null;
     } catch (e) {
@@ -202,7 +241,7 @@ class ApiService {
 
   static Future<List<dynamic>?> fetchPurchaseOrders() async {
     try {
-      final response = await _httpClient.get(Uri.parse('$baseUrl/purchase-orders'));
+      final response = await _httpClient.get(Uri.parse('$effectiveBaseUrl/purchase-orders'));
       if (response.statusCode == 200) return jsonDecode(response.body);
       return null;
     } catch (e) {
@@ -216,7 +255,7 @@ class ApiService {
   /// Uses a query parameter to safely handle machine names with special chars (#, /, spaces).
   static Future<Map<String, dynamic>?> fetchLastReportByMachine(String machineName) async {
     try {
-      final uri = Uri.parse('$baseUrl/reports/last-by-machine')
+      final uri = Uri.parse('$effectiveBaseUrl/reports/last-by-machine')
           .replace(queryParameters: {'machine_name': machineName});
       final response = await _httpClient
           .get(uri)
@@ -231,6 +270,22 @@ class ApiService {
     }
   }
 
+  /// Fetch a single production report by id (full detail with material lists).
+  static Future<Map<String, dynamic>?> fetchReport(int id) async {
+    try {
+      final response = await _httpClient
+          .get(Uri.parse('$effectiveBaseUrl/reports/$id'), headers: _authHeaders())
+          .timeout(const Duration(seconds: 20));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      return null;
+    } catch (e) {
+      AppLog.e("Error fetching report $id: $e");
+      return null;
+    }
+  }
+
   static Future<List<dynamic>?> fetchReports({
     required DateTime startDate,
     required DateTime endDate,
@@ -239,7 +294,7 @@ class ApiService {
       final start = startDate.toIso8601String().split('T').first;
       final end = endDate.toIso8601String().split('T').first;
       final response = await _httpClient.get(
-        Uri.parse('$baseUrl/reports?start_date=$start&end_date=$end'),
+        Uri.parse('$effectiveBaseUrl/reports?start_date=$start&end_date=$end'),
       );
       if (response.statusCode == 200) {
         return jsonDecode(response.body) as List<dynamic>;
@@ -253,7 +308,7 @@ class ApiService {
 
   static Future<List<dynamic>?> fetchMaterials() async {
     try {
-      final response = await _httpClient.get(Uri.parse('$baseUrl/materials'));
+      final response = await _httpClient.get(Uri.parse('$effectiveBaseUrl/materials'));
       if (response.statusCode == 200) return jsonDecode(response.body);
       return null;
     } catch (e) {
@@ -265,7 +320,7 @@ class ApiService {
   static Future<List<dynamic>?> fetchUsers() async {
     try {
       final response = await _httpClient.get(
-        Uri.parse('$baseUrl/users'),
+        Uri.parse('$effectiveBaseUrl/users'),
         headers: _authHeaders(),
       );
       if (response.statusCode == 200) return jsonDecode(response.body);
@@ -278,7 +333,7 @@ class ApiService {
 
   static Future<List<dynamic>?> fetchShifts() async {
     try {
-      final response = await _httpClient.get(Uri.parse('$baseUrl/shifts'));
+      final response = await _httpClient.get(Uri.parse('$effectiveBaseUrl/shifts'));
       if (response.statusCode == 200) return jsonDecode(response.body);
       return null;
     } catch (e) {
@@ -293,7 +348,7 @@ class ApiService {
   static Future<bool> addMachine(Machine machine) async {
     try {
       final response = await http.post(
-        Uri.parse('$baseUrl/machines'),
+        Uri.parse('$effectiveBaseUrl/machines'),
         headers: _authHeaders(),
         body: jsonEncode(machine.toJson()),
       );
@@ -307,7 +362,7 @@ class ApiService {
   static Future<bool> updateMachine(String oldName, Machine machine) async {
     try {
       final response = await http.put(
-        Uri.parse('$baseUrl/machines/${Uri.encodeComponent(oldName)}'),
+        Uri.parse('$effectiveBaseUrl/machines/${Uri.encodeComponent(oldName)}'),
         headers: _authHeaders(),
         body: jsonEncode(machine.toJson()),
       );
@@ -321,7 +376,7 @@ class ApiService {
   static Future<bool> deleteMachine(String name) async {
     try {
       final response = await http.delete(
-        Uri.parse('$baseUrl/machines/${Uri.encodeComponent(name)}'),
+        Uri.parse('$effectiveBaseUrl/machines/${Uri.encodeComponent(name)}'),
       );
       return response.statusCode == 200 || response.statusCode == 204;
     } catch (e) {
@@ -335,7 +390,7 @@ class ApiService {
   static Future<PurchaseOrder?> addPurchaseOrder(PurchaseOrder po) async {
     try {
       final response = await http.post(
-        Uri.parse('$baseUrl/purchase-orders'),
+        Uri.parse('$effectiveBaseUrl/purchase-orders'),
         headers: _authHeaders(),
         body: jsonEncode(po.toJson()),
       );
@@ -357,7 +412,7 @@ class ApiService {
   static Future<bool> updatePurchaseOrder(int id, PurchaseOrder po) async {
     try {
       final response = await http.put(
-        Uri.parse('$baseUrl/purchase-orders/$id'),
+        Uri.parse('$effectiveBaseUrl/purchase-orders/$id'),
         headers: _authHeaders(),
         body: jsonEncode(po.toJson()),
       );
@@ -370,7 +425,7 @@ class ApiService {
   static Future<bool> deletePurchaseOrder(int id) async {
     try {
       final response = await http.delete(
-        Uri.parse('$baseUrl/purchase-orders/$id'),
+        Uri.parse('$effectiveBaseUrl/purchase-orders/$id'),
         headers: _authHeaders(),
       );
       return response.statusCode == 200 || response.statusCode == 204;
@@ -386,7 +441,7 @@ class ApiService {
       // print("SENDING: $body"); // Check payload
 
       final response = await http.post(
-        Uri.parse('$baseUrl/materials'),
+        Uri.parse('$effectiveBaseUrl/materials'),
         headers: _authHeaders(),
         body: body,
       );
@@ -410,7 +465,7 @@ class ApiService {
   ) async {
     try {
       final response = await http.put(
-        Uri.parse('$baseUrl/materials/${Uri.encodeComponent(oldName)}'),
+        Uri.parse('$effectiveBaseUrl/materials/${Uri.encodeComponent(oldName)}'),
         headers: _authHeaders(),
         body: jsonEncode(material.toJson()),
       );
@@ -426,7 +481,7 @@ class ApiService {
       // Encode the name to handle special characters like / , . etc.
       final encoded = Uri.encodeComponent(typeName);
       final response = await http.delete(
-        Uri.parse('$baseUrl/materials/$encoded'),
+        Uri.parse('$effectiveBaseUrl/materials/$encoded'),
       );
       return response.statusCode == 200 || response.statusCode == 204;
     } catch (e) {
@@ -442,7 +497,7 @@ class ApiService {
       AppLog.d("📤 Sending user data: $jsonBody");
 
       final response = await http.post(
-        Uri.parse('$baseUrl/users'),
+        Uri.parse('$effectiveBaseUrl/users'),
         headers: _authHeaders(),
         body: jsonEncode(jsonBody),
       );
@@ -475,7 +530,7 @@ class ApiService {
       AppLog.d("🔧 Updating user ${user.id}: $jsonBody");
 
       final response = await http.put(
-        Uri.parse('$baseUrl/users/${user.id}'),
+        Uri.parse('$effectiveBaseUrl/users/${user.id}'),
         headers: _authHeaders(),
         body: jsonEncode(jsonBody),
       );
@@ -499,7 +554,7 @@ class ApiService {
   static Future<bool> addShift(Shift shift) async {
     try {
       final response = await http.post(
-        Uri.parse('$baseUrl/shifts'),
+        Uri.parse('$effectiveBaseUrl/shifts'),
         headers: _authHeaders(),
         body: jsonEncode(shift.toJson()),
       );
@@ -513,7 +568,7 @@ class ApiService {
   static Future<bool> updateShift(String oldName, Shift shift) async {
     try {
       final response = await http.put(
-        Uri.parse('$baseUrl/shifts/${Uri.encodeComponent(oldName)}'),
+        Uri.parse('$effectiveBaseUrl/shifts/${Uri.encodeComponent(oldName)}'),
         headers: _authHeaders(),
         body: jsonEncode(shift.toJson()),
       );
@@ -527,7 +582,7 @@ class ApiService {
   static Future<bool> deleteShift(String name) async {
     try {
       final response = await http.delete(
-        Uri.parse('$baseUrl/shifts/${Uri.encodeComponent(name)}'),
+        Uri.parse('$effectiveBaseUrl/shifts/${Uri.encodeComponent(name)}'),
       );
       return response.statusCode == 200 || response.statusCode == 204;
     } catch (e) {
@@ -540,7 +595,7 @@ class ApiService {
   static Future<bool> archiveReport(int reportId, bool isArchived) async {
     try {
       final response = await _httpClient.put(
-        Uri.parse('$baseUrl/reports/$reportId'),
+        Uri.parse('$effectiveBaseUrl/reports/$reportId'),
         headers: _authHeaders(),
         body: jsonEncode({'is_archived': isArchived}),
       );
@@ -566,7 +621,7 @@ class ApiService {
       }
       final response = await _httpClient
           .post(
-            Uri.parse('$baseUrl/reports/sync'),
+            Uri.parse('$effectiveBaseUrl/reports/sync'),
             headers: _authHeaders(),
             body: jsonEncode(payload),
           )
@@ -594,7 +649,7 @@ class ApiService {
     try {
       final base64Pdf = base64Encode(pdfBytes);
       final response = await http.post(
-        Uri.parse('$baseUrl/reports/upload-pdf'),
+        Uri.parse('$effectiveBaseUrl/reports/upload-pdf'),
         headers: _authHeaders(),
         body: jsonEncode({
           'pdf_base64': base64Pdf,
@@ -692,6 +747,179 @@ class ApiService {
       return null;
     } catch (e) {
       AppLog.e("fetchAIHistory error: $e");
+      return null;
+    }
+  }
+
+  // --- QUALITY (v2) ---
+
+  /// Fetch the pre-computed internal quality summary for a production report.
+  /// The server resolves report -> shift -> run; the frontend never computes stats.
+  static Future<Map<String, dynamic>?> fetchReportQuality(int reportId) async {
+    try {
+      final response = await _httpClient
+          .get(Uri.parse('$effectiveBaseUrl/v2/reports/$reportId/quality'),
+              headers: _authHeaders())
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      return null;
+    } catch (e) {
+      AppLog.e("fetchReportQuality error: $e");
+      return null;
+    }
+  }
+
+  /// Fetch raw rod-level measurements for a shift (JSON). Each rod carries a
+  /// `rejected` boolean computed server-side (3x-tolerance outlier rule).
+  static Future<Map<String, dynamic>?> fetchShiftMeasurements(int shiftId) async {
+    try {
+      final response = await _httpClient
+          .get(Uri.parse('$effectiveBaseUrl/v2/shifts/$shiftId/measurements'),
+              headers: _authHeaders())
+          .timeout(const Duration(seconds: 30));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      return null;
+    } catch (e) {
+      AppLog.e("fetchShiftMeasurements error: $e");
+      return null;
+    }
+  }
+
+  /// Live quality telemetry for the shop-floor kiosk / TV display (no auth).
+  static Future<Map<String, dynamic>?> fetchLiveQuality(
+    String machine, {
+    String windowType = 'rods',
+    int windowValue = 50,
+    String? anchor,
+  }) async {
+    try {
+      final qp = <String, String>{'window_type': windowType, 'window_value': '$windowValue'};
+      if (anchor != null) qp['anchor'] = anchor;
+      final uri = Uri.parse('$effectiveBaseUrl/v2/machines/${Uri.encodeComponent(machine)}/live-quality')
+          .replace(queryParameters: qp);
+      final response = await _httpClient.get(uri).timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      return null;
+    } catch (e) {
+      AppLog.e("fetchLiveQuality error: $e");
+      return null;
+    }
+  }
+
+  /// Quality Control module: filter options (machines, POs, shifts).
+  static Future<Map<String, dynamic>?> fetchQualityFilters() async {
+    try {
+      final response = await _httpClient
+          .get(Uri.parse('$effectiveBaseUrl/v2/quality/filters'))
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      return null;
+    } catch (e) {
+      AppLog.e("fetchQualityFilters error: $e");
+      return null;
+    }
+  }
+
+  /// Quality Control module: KPIs + specs + per-machine series + paginated rods.
+  static Future<Map<String, dynamic>?> fetchQualityData({
+    String? machine,
+    int? poId,
+    int? shiftId,
+    int? reportId,
+    String? date,
+    String? shiftName,
+    String window = 'rods',
+    int windowValue = 50,
+    int page = 1,
+    int pageSize = 50,
+    bool includeRaw = false,
+  }) async {
+    try {
+      final qp = <String, String>{
+        'window': window,
+        'window_value': '$windowValue',
+        'page': '$page',
+        'page_size': '$pageSize',
+      };
+      if (machine != null && machine != 'all') qp['machine'] = machine;
+      if (poId != null) qp['po_id'] = '$poId';
+      if (shiftId != null) qp['shift_id'] = '$shiftId';
+      if (reportId != null) qp['report_id'] = '$reportId';
+      if (date != null) qp['date'] = date;
+      if (shiftName != null) qp['shift_name'] = shiftName;
+      if (includeRaw) qp['include_raw'] = '1';
+      final uri = Uri.parse('$effectiveBaseUrl/v2/quality').replace(queryParameters: qp);
+      final response = await _httpClient.get(uri).timeout(const Duration(seconds: 30));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      return null;
+    } catch (e) {
+      AppLog.e("fetchQualityData error: $e");
+      return null;
+    }
+  }
+
+  /// URL for a shift's internal quality summary PDF.
+  static String certificatePdfUrl(int shiftId) =>
+      '$effectiveBaseUrl/v2/shifts/$shiftId/certificate.pdf';
+
+  /// URL for a shift's measurements as CSV.
+  static String measurementsCsvUrl(int shiftId) =>
+      '$effectiveBaseUrl/v2/shifts/$shiftId/measurements?fmt=csv';
+
+  /// Factory-wide quality defaults (tolerances & SD thresholds) for Settings.
+  static Future<Map<String, dynamic>?> fetchQualitySettings() async {
+    try {
+      final response = await _httpClient
+          .get(Uri.parse('$effectiveBaseUrl/v2/quality/settings'))
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      return null;
+    } catch (e) {
+      AppLog.e("fetchQualitySettings error: $e");
+      return null;
+    }
+  }
+
+  static Future<Map<String, dynamic>?> updateQualitySettings(Map<String, dynamic> payload) async {
+    try {
+      final response = await _httpClient
+          .put(Uri.parse('$effectiveBaseUrl/v2/quality/settings'),
+              headers: _authHeaders(), body: jsonEncode(payload))
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      return null;
+    } catch (e) {
+      AppLog.e("updateQualitySettings error: $e");
+      return null;
+    }
+  }
+
+  /// Consolidated dashboard summary (machines, orders, KPIs, ingestion heartbeat).
+  static Future<Map<String, dynamic>?> fetchDashboardSummary() async {
+    try {
+      final response = await _httpClient
+          .get(Uri.parse('$effectiveBaseUrl/v2/dashboard/summary'))
+          .timeout(const Duration(seconds: 20));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      return null;
+    } catch (e) {
+      AppLog.e("fetchDashboardSummary error: $e");
       return null;
     }
   }

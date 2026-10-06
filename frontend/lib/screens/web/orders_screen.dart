@@ -1160,7 +1160,7 @@ class _PoFormDialog extends StatefulWidget {
 }
 class _PoFormDialogState extends State<_PoFormDialog> {
   final _fk = GlobalKey<FormState>();
-  late TextEditingController _poNum,_qty,_box,_dia,_len,_pd,_cu,_weight;
+  late TextEditingController _poNum,_qty,_box,_dia,_len,_pd,_cu,_weight,_diaTol,_pdTol;
   String? _acetate,_paper,_pva,_hm,_tri;
 
   @override
@@ -1175,11 +1175,14 @@ class _PoFormDialogState extends State<_PoFormDialog> {
     _pd     = TextEditingController(text: p?.pd.toString() ?? '');
     _cu     = TextEditingController(text: p?.cu.toString() ?? '');
     _weight = TextEditingController(text: p?.weight.toString() ?? '');
+    _diaTol = TextEditingController(text: p?.diameterTolerance?.toString() ?? '');
+    _pdTol  = TextEditingController(text: p?.pdTolerance?.toString() ?? '');
     _acetate = p?.acetateType; _paper = p?.paperType;
     _pva = p?.pvaGlueType; _hm = p?.hmGlueType; _tri = p?.triacetinType;
+    if (p == null) _prefillDefaults();
   }
   @override void dispose() {
-    for (final c in [_poNum,_qty,_box,_dia,_len,_pd,_cu,_weight]) {
+    for (final c in [_poNum,_qty,_box,_dia,_len,_pd,_cu,_weight,_diaTol,_pdTol]) {
       c.dispose();
     }
     super.dispose();
@@ -1194,6 +1197,26 @@ class _PoFormDialogState extends State<_PoFormDialog> {
     keyboardType: n ? const TextInputType.numberWithOptions(decimal:true) : TextInputType.text,
     validator: n ? _nV : (v) => (v==null||v.trim().isEmpty)?'Required':null,
   );
+
+  Widget _fo(TextEditingController c, String label) => TextFormField(
+    controller: c,
+    decoration: InputDecoration(labelText: label),
+    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+    validator: (v) {
+      final t = (v ?? '').trim();
+      if (t.isEmpty) return null;
+      return double.tryParse(t.replaceAll(',', '.')) == null ? 'Invalid' : null;
+    },
+  );
+
+  Future<void> _prefillDefaults() async {
+    final s = await ApiService.fetchQualitySettings();
+    if (!mounted) return;
+    setState(() {
+      if (_diaTol.text.trim().isEmpty) _diaTol.text = '${s?['diameter_tolerance'] ?? ''}';
+      if (_pdTol.text.trim().isEmpty) _pdTol.text = '${s?['pd_tolerance'] ?? ''}';
+    });
+  }
 
   Widget _md(String label, MaterialCategory cat, String? val, ValueChanged<String?> onC) {
     final items = AppData.materialDictionary.where((m) => m.category==cat && !m.isHidden).toList();
@@ -1245,6 +1268,14 @@ class _PoFormDialogState extends State<_PoFormDialog> {
             const SizedBox(width:16),
             Expanded(child: _f(_weight, 'Weight mg *', n: true)),
           ]),
+          const SizedBox(height:12),
+          Row(children: [
+            Expanded(child: _fo(_diaTol, 'Diameter Tol ± (mm)')),
+            const SizedBox(width:16),
+            Expanded(child: _fo(_pdTol, 'PD Tol ± (mm WG)')),
+            const SizedBox(width:16),
+            const Expanded(child: SizedBox()),
+          ]),
           const SizedBox(height:20),
           Text('Materials', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blue[800])),
           const SizedBox(height:8),
@@ -1281,6 +1312,8 @@ class _PoFormDialogState extends State<_PoFormDialog> {
                   diameter: _pN(_dia.text), length: _pN(_len.text),
                   pd: _pN(_pd.text), weight: _pN(_weight.text),
                   cu: int.tryParse(_cu.text)??0, boxType: int.tryParse(_box.text)??0,
+                  diameterTolerance: _diaTol.text.trim().isEmpty ? null : _pN(_diaTol.text),
+                  pdTolerance: _pdTol.text.trim().isEmpty ? null : _pN(_pdTol.text),
                   targetQty: ((_pN(_qty.text))*1000).round(),
                   acetateType: _acetate??'', paperType: _paper??'',
                   pvaGlueType: _pva??'', hmGlueType: _hm??'', triacetinType: _tri??'',

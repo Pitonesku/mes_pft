@@ -88,6 +88,8 @@ class PurchaseOrder {
   final int cu; // Пористость (вернули)
   final double weight;
   final int boxType;
+  final double? diameterTolerance; // ± tolerance override for diameter
+  final double? pdTolerance;       // ± tolerance override for pressure drop
   
   final String acetateType;
   final String paperType;
@@ -111,6 +113,7 @@ class PurchaseOrder {
     required this.hmGlueType, required this.pvaGlueType, required this.triacetinType,
     required this.targetQty, this.producedQty = 0, this.isHidden = false,
     this.isArchived = false,
+    this.diameterTolerance, this.pdTolerance,
   });
 
   int get remainingQty => targetQty - producedQty;
@@ -125,6 +128,8 @@ class PurchaseOrder {
       cu: json['cu'] ?? 0,
       weight: (json['weight'] ?? 0).toDouble(),
       boxType: json['box_type'] ?? 0,
+      diameterTolerance: (json['diameter_tolerance'] as num?)?.toDouble(),
+      pdTolerance: (json['pd_tolerance'] as num?)?.toDouble(),
       acetateType: json['acetate_type'] ?? '',
       paperType: json['paper_type'] ?? '',
       pvaGlueType: json['pva_glue_type'] ?? '',
@@ -152,6 +157,8 @@ class PurchaseOrder {
     'cu': cu,
     'weight': weight,
     'box_type': boxType,
+    if (diameterTolerance != null) 'diameter_tolerance': diameterTolerance,
+    if (pdTolerance != null) 'pd_tolerance': pdTolerance,
     'acetate_type': acetateType,
     'paper_type': paperType,
     'pva_glue_type': pvaGlueType,

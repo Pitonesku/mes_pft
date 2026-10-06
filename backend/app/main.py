@@ -13,12 +13,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import func, inspect, text, or_
 from datetime import datetime, timedelta
-from pathlib import Path
-from fastapi import Path
 import json
 from typing import TYPE_CHECKING, Optional
 import pathlib
 import bcrypt
+import sys
+
+# Reconfigure std streams to UTF-8 so emoji/unicode log lines (📁, →) don't crash
+# the process on Windows consoles using a legacy codepage such as cp1251.
+for _stream in (sys.stdout, sys.stderr):
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if _reconfigure is not None:
+        try:
+            _reconfigure(encoding="utf-8")
+        except Exception:
+            pass
 
 
 # PDF Upload (Google Drive + local archive)
@@ -93,6 +102,12 @@ if __package__:
     station_watcher_mod = importlib.import_module(f"{__package__}.services.station_watcher")
 else:
     from services import station_watcher as station_watcher_mod
+
+# Unified v2 API (shifts, measurements, quality/certificate, odoo outbox)
+if __package__:
+    v2_routes_module = importlib.import_module(f"{__package__}.v2_routes")
+else:
+    import v2_routes as v2_routes_module
 
 
 # .env is already loaded by database.py (imported above) with override=True.
@@ -411,9 +426,33 @@ def telegram_outbox_worker():
         time.sleep(30)
 
 
+# --- ODOO DISPATCHER (processes odoo_outbox pending items) ---
+def odoo_dispatcher_worker():
+    """Background thread that dispatches pending odoo_outbox items to Odoo.
+
+    No-op unless ODOO_ENABLED=true and ODOO_URL/DB/USER/API_KEY are set.
+    """
+    from app.services.odoo import outbound as odoo_outbound
+
+    config = odoo_outbound.OdooConfig.from_env()
+    if not (config.enabled and config.valid()):
+        print("[Odoo] disabled or incomplete config - dispatcher not started.")
+        return
+
+    while True:
+        try:
+            dispatched = odoo_outbound.dispatch_pending(SessionLocal, config)
+            if dispatched:
+                print(f"[Odoo] dispatched {dispatched} outbox item(s)")
+        except Exception as e:
+            print(f"[Odoo] dispatcher error: {e}")
+        time.sleep(30)
+
+
 threading.Thread(target=telegram_worker, daemon=True).start()
 threading.Thread(target=telegram_outbox_worker, daemon=True).start()
 threading.Thread(target=gdrive_worker, daemon=True).start()
+threading.Thread(target=odoo_dispatcher_worker, daemon=True).start()
 
 # --- LIFESPAN (modern FastAPI startup/shutdown) ---
 @asynccontextmanager
@@ -551,6 +590,9 @@ admin_module.setup_admin(app)
 
 # AI Analysis endpoints (/api/ai/analyze, /api/ai/history)
 app.include_router(ai_routes_module.router, prefix="/api")
+
+# Unified v2 API endpoints (/api/v2/...)
+app.include_router(v2_routes_module.router, prefix="/api")
 
 # Версия данных
 @app.get("/api/version")
@@ -959,13 +1001,53 @@ def create_user_with_auth(payload: dict, db: Session = Depends(get_db)):
 
 # --- 2. УПРАВЛЕНИЕ ЗАКАЗАМИ (PURCHASE ORDERS) ---
 
+def _apply_po_tolerance_specs(db, db_po, diameter_tol, pd_tol):
+    """Upsert per-PO quality_specs rows from ± tolerance overrides.
+
+    Creates/updates ``quality_specs`` rows (scope='po') for diameter and pressure
+    drop so the quality overview and charts pick up PO-specific limits.
+    """
+    def _upsert(parameter, nominal, tol, unit, decimals):
+        if nominal is None or tol is None:
+            return
+        try:
+            nominal_f = float(nominal)
+            tol_f = float(tol)
+        except (TypeError, ValueError):
+            return
+        row = (
+            db.query(models.QualitySpec)
+            .filter(
+                models.QualitySpec.scope == "po",
+                models.QualitySpec.po_id == db_po.id,
+                models.QualitySpec.parameter == parameter,
+            )
+            .first()
+        )
+        lower = nominal_f - tol_f
+        upper = nominal_f + tol_f
+        if row is None:
+            db.add(models.QualitySpec(
+                scope="po", po_id=db_po.id, parameter=parameter,
+                nominal=nominal_f, lower_limit=lower, upper_limit=upper,
+                reject_multiplier=3, rod_count=100, report_unit=unit,
+                report_scale=1, decimals=decimals,
+            ))
+        else:
+            row.nominal = nominal_f
+            row.lower_limit = lower
+            row.upper_limit = upper
+    _upsert("diameter", db_po.diameter, diameter_tol, "mm", 3)
+    _upsert("pd", db_po.pd, pd_tol, "mm WG", 1)
+
+
 @app.get("/api/purchase-orders", response_model=list[schemas.PO])
 def read_pos(db: Session = Depends(get_db)):
     return db.query(models.PurchaseOrder).all()
 
 @app.post("/api/purchase-orders", response_model=schemas.PO)
 def create_po(
-    po: schemas.POBase,
+    po: schemas.POCreate,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
@@ -974,8 +1056,10 @@ def create_po(
     can_create = is_admin or (user_role is not None and user_role.can_create_po) or getattr(current_user, 'can_create_po', False)
     if not can_create:
         raise HTTPException(status_code=403, detail="You do not have permission to create purchase orders.")
-    db_po = models.PurchaseOrder(**po.model_dump())
+    db_po = models.PurchaseOrder(**po.model_dump(exclude={"diameter_tolerance", "pd_tolerance"}))
     db.add(db_po)
+    db.flush()
+    _apply_po_tolerance_specs(db, db_po, po.diameter_tolerance, po.pd_tolerance)
     db.commit()
     db.refresh(db_po)
     return db_po
@@ -983,7 +1067,7 @@ def create_po(
 @app.put("/api/purchase-orders/{po_id}", response_model=schemas.PO)
 def update_po(
     po_id: int,
-    po_data: schemas.POBase,
+    po_data: schemas.POCreate,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
@@ -994,8 +1078,9 @@ def update_po(
     can_edit = is_admin or (user_role is not None and user_role.can_edit_po) or getattr(current_user, 'can_edit_po', False)
     if not can_edit:
         raise HTTPException(status_code=403, detail="You do not have permission to edit purchase orders.")
-    for key, value in po_data.model_dump().items():
+    for key, value in po_data.model_dump(exclude={"diameter_tolerance", "pd_tolerance"}).items():
         setattr(db_po, key, value)
+    _apply_po_tolerance_specs(db, db_po, po_data.diameter_tolerance, po_data.pd_tolerance)
     db.commit()
     return db_po
 

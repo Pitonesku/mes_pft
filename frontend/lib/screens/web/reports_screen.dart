@@ -8,6 +8,8 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../../models.dart';
 import '../../api_service.dart';
+import '../../core/app_navigation.dart';
+import '../../core/hash_navigation.dart';
 import '../../widgets/resizable_panel.dart';
 import '../../widgets/report_detail_panel.dart';
 
@@ -316,17 +318,26 @@ class _ReportsScreenState extends State<ReportsScreen> {
                               },
                               materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                             )),
-                             DataCell(Row(children: [
-                               if (r['is_archived'] == true)
-                                 const Padding(
-                                   padding: EdgeInsets.only(right: 4),
-                                   child: Icon(Icons.archive, size: 13, color: Colors.brown)),
-                               Text(r['report_date'] ?? '',
-                                 style: TextStyle(
-                                   fontSize: 13,
-                                   color: r['is_archived'] == true ? Colors.grey : null,
-                                   fontStyle: r['is_archived'] == true ? FontStyle.italic : null)),
-                             ])),
+                             DataCell(InkWell(
+                               onTap: id == null ? null : () {
+                                 AppNavigation.openReport(id!);
+                                 setHash('#/reports/$id');
+                               },
+                               mouseCursor: id == null
+                                   ? MouseCursor.defer
+                                   : SystemMouseCursors.click,
+                               child: Row(children: [
+                                 if (r['is_archived'] == true)
+                                   const Padding(
+                                     padding: EdgeInsets.only(right: 4),
+                                     child: Icon(Icons.archive, size: 13, color: Colors.brown)),
+                                 Text(r['report_date'] ?? '',
+                                   style: TextStyle(
+                                     fontSize: 13,
+                                     color: r['is_archived'] == true ? Colors.grey : null,
+                                     fontStyle: r['is_archived'] == true ? FontStyle.italic : null)),
+                               ]),
+                             )),
                              DataCell(Text(r['shift_name']    ?? '', style: TextStyle(fontSize: 13, color: r['is_archived'] == true ? Colors.grey : null))),
                              DataCell(Text(r['machine_name']  ?? '', style: TextStyle(fontSize: 13, color: r['is_archived'] == true ? Colors.grey : null))),
                              DataCell(Text(r['operator_name'] ?? '', style: TextStyle(fontSize: 13, color: r['is_archived'] == true ? Colors.grey : null))),

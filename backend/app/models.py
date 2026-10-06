@@ -62,6 +62,10 @@ class MaterialDictionary(Base):
     is_hidden = Column(Boolean, default=False)
     created_at = Column(DateTime, server_default=func.now())
 
+    # Odoo integration: product.product / uom.uom ids for this material.
+    odoo_product_id = Column(Integer, nullable=True)
+    odoo_uom_id = Column(Integer, nullable=True)
+
 class Machine(Base):
     __tablename__ = "machines"
     id = Column(Integer, primary_key=True, index=True)
@@ -132,6 +136,10 @@ class PurchaseOrder(Base):
     is_hidden = Column(Boolean, default=False)
     is_archived = Column(Boolean, default=False)
     created_at = Column(DateTime, server_default=func.now())
+
+    # Odoo integration: sale.order id for this customer PO (nullable; linked
+    # non-destructively via inbound sync, never overwritten).
+    odoo_id = Column(Integer, nullable=True)
 
 class ProductionReport(Base):
     __tablename__ = "production_reports"
@@ -311,6 +319,9 @@ class ProductionRun(Base):
     status = Column(String(20), nullable=False, default="OPEN")
     spec_snapshot = Column(JSONB, nullable=False, default=dict)  # frozen limits
     odoo_mo_id = Column(Integer, nullable=True)
+    odoo_backorder_id = Column(Integer, nullable=True)  # mrp.production backorder id
+    odoo_done_qty = Column(Numeric, nullable=True)      # last synced completion qty (product UoM)
+    odoo_sync_status = Column(String(20), nullable=False, default="pending")  # pending | synced | error
 
 
 class MachineAlias(Base):
@@ -341,6 +352,18 @@ class QualitySpec(Base):
     report_unit = Column(String(20), nullable=False, default="")
     report_scale = Column(Numeric, nullable=False, default=1)
     decimals = Column(Integer, nullable=False, default=3)
+
+
+class QualitySettings(Base):
+    """Singleton row of factory-wide quality defaults (tolerances & SD limits)."""
+    __tablename__ = "quality_settings"
+    id = Column(Integer, primary_key=True, index=True)
+    diameter_tolerance = Column(Numeric, nullable=False, default=0.03)
+    pd_tolerance = Column(Numeric, nullable=False, default=20)
+    pd_sd_warn = Column(Numeric, nullable=False, default=12)
+    pd_sd_fail = Column(Numeric, nullable=False, default=15)
+    dia_sd_warn = Column(Numeric, nullable=False, default=0.013)
+    dia_sd_fail = Column(Numeric, nullable=False, default=0.015)
 
 
 class QualitySample(Base):
@@ -399,6 +422,9 @@ class MaterialLog(Base):
     batch_no = Column(String(100), nullable=True)
     qty_kg = Column(Numeric(12, 3), nullable=False, default=0)
     source = Column(String(30), nullable=False, default="legacy")  # legacy | materials_json
+
+    # Odoo integration: stock.lot id for the batch/lot reference.
+    odoo_lot_id = Column(Integer, nullable=True)
 
 
 class ScrapLog(Base):

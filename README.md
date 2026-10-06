@@ -36,7 +36,7 @@ flowchart LR
     Tablet["Operator tablets (Flutter)"] --> API
     Web["Web console (Flutter web)"] --> API
     Grafana["Grafana"] --> DB
-    Odoo["Odoo (future)"] -.-> API
+    Odoo["Odoo"] <--> API
     Resolver --> DB
     Agg --> DB
 ```
@@ -111,7 +111,8 @@ See `.env.example` for the full, commented reference. Key variables:
 
 - `docs/architecture.md` — shift resolution, data lifecycle, quality-statistics methodology.
 - `docs/api.md` — endpoint documentation (`/shifts`, `/measurements`, `/quality-summary`).
-- `docs/data-lifecycle.md` — from Quantum Neo output to PostgreSQL, Grafana, and future Odoo sync.
+- `docs/data-lifecycle.md` — from Quantum Neo output to PostgreSQL, Grafana, and Odoo sync.
+- `docs/odoo-integration.md` — Odoo connector, QC field mapping, UoM conversion, outbox.
 
 ## Security
 

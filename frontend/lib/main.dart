@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'screens/auth_screen.dart';
+import 'screens/web/kiosk_quality_screen.dart';
 import 'sync_manager.dart';
 import 'app_state.dart';
 import 'utils/logger_integration.dart';
@@ -17,8 +18,8 @@ void main() async {
   // On first launch (no URL saved), falls back to the compiled-in default.
   if (!kIsWeb) {
     await ApiService.loadSavedBaseUrl();
-    await ApiService.loadSavedAuthToken();
   }
+  await ApiService.loadSavedAuthToken();
 
   // SQLite offline queue is mobile/desktop only -- sqflite crashes on web.
   if (!kIsWeb) {
@@ -39,6 +40,22 @@ void main() async {
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
+
+  Widget _home() {
+    if (kIsWeb) {
+      final frag = Uri.base.fragment;
+      if (frag.startsWith('/kiosk')) {
+        final q = frag.indexOf('?');
+        final path = q == -1 ? frag : frag.substring(0, q);
+        if (path == '/kiosk/quality' || path == '/kiosk') {
+          final query = q == -1 ? '' : frag.substring(q + 1);
+          final params = Uri.splitQueryString(query);
+          return KioskQualityScreen(initialMachine: params['machine'] ?? 'M1');
+        }
+      }
+    }
+    return const SessionGate();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -63,7 +80,7 @@ class MyApp extends StatelessWidget {
           ),
         ),
       ),
-      home: const LoginScreen(),
+      home: _home(),
     );
   }
 }

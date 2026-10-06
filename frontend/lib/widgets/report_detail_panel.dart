@@ -4,6 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
+import 'package:url_launcher/link.dart';
+
+import '../core/app_navigation.dart';
+import 'quality_summary_card.dart';
 
 class ReportDetailPanel extends StatelessWidget {
   final Map<String, dynamic> report;
@@ -210,6 +214,15 @@ class ReportDetailPanel extends StatelessWidget {
               tooltip: 'Print / Save PDF',
               onPressed: () => _printPdf(context),
               padding: EdgeInsets.zero, constraints: const BoxConstraints()),
+            if (report['id'] != null)
+              Link(
+                uri: Uri.parse('#/reports/${report['id']}'),
+                builder: (ctx, follow) => IconButton(
+                  icon: const Icon(Icons.open_in_new, size: 18, color: Colors.deepPurple),
+                  tooltip: 'Open in Full Page / New Tab',
+                  onPressed: () => AppNavigation.openReport(report['id'] as int),
+                  padding: EdgeInsets.zero, constraints: const BoxConstraints()),
+              ),
             const SizedBox(width: 4),
             IconButton(icon: const Icon(Icons.close, size: 18),
               onPressed: onClose, tooltip: 'Close',
@@ -257,6 +270,8 @@ class ReportDetailPanel extends StatelessWidget {
               _materialBreakdown('Hot Melt Glue',report['hm_list']      as List?),
               _materialBreakdown('Triacetin',    report['tri_list']     as List?),
             ]),
+
+            QualitySummaryCard(key: ValueKey(report['id']), report: report),
 
             _sec('REMARKS', [
               Text(

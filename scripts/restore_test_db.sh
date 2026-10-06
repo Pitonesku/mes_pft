@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
-# Restore prod_backup.sql into the LOCAL test PostgreSQL container (mes_db_test).
-# Run LOCALLY after copying prod_backup.sql from the production server.
+# Restore the custom-format production dump (production_log_db_dump) into the
+# LOCAL test PostgreSQL container (mes_db_test, host port 5433).
+# The dump is pg_dump -Fc (custom format), so pg_restore is used (NOT psql).
 #
-# Usage:  bash scripts/restore_test_db.sh [path/to/prod_backup.sql]
-# Requires: the test DB is running (docker compose --profile test up -d db_test).
+# Usage:  bash scripts/restore_test_db.sh [path/to/dump]
+# Requires: docker compose --profile test up -d db_test
 
 set -euo pipefail
 
-DUMP="${1:-prod_backup.sql}"
+DUMP="${1:-production_log_db_dump}"
 if [[ ! -f "$DUMP" ]]; then
   echo "ERROR: dump file not found: $DUMP" >&2
   exit 1
 fi
 
-echo "==> Restoring $DUMP into mes_db_test (postgres / mes_test_db on 5433) ..."
-docker exec -i mes_db_test psql -U postgres -d mes_test_db < "$DUMP"
+echo "==> Copying $DUMP into mes_db_test ..."
+docker cp "$DUMP" mes_db_test:/tmp/prod_dump.dump
+
+echo "==> Restoring into mes_test_db (pg_restore, --no-owner --no-privileges) ..."
+docker exec mes_db_test pg_restore -U postgres -d mes_test_db \
+  --no-owner --no-privileges --clean --if-exists /tmp/prod_dump.dump
 
 echo "==> Done. Test DB restored."

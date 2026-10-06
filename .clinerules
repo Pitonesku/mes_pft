@@ -1,0 +1,42 @@
+# Project: mes_pft — Cigarette Filter MES (Manufacturing Execution System)
+
+## Stack
+- Backend: FastAPI (`backend/app`), served by uvicorn on port 8000.
+- Database: PostgreSQL, migrations via Alembic (`backend/alembic/versions/`).
+- Frontend: Flutter (tablet + web console); the web build is served by FastAPI at `/`.
+- ERP: Odoo 18 Community via XML-RPC (`backend/app/services/odoo/`).
+
+## Key directories
+- backend/app/models.py          — SQLAlchemy models (single source of truth)
+- backend/app/v2_routes.py       — unified `/api/v2` routes (pure HTTP layer)
+- backend/app/quality_stats.py   — pure statistics (no DB/framework imports; unit-tested)
+- backend/app/services/          — station_watcher, shift_resolver, aggregation, odoo/*
+- backend/alembic/versions/      — raw-SQL migrations, sequential IDs 0001, 0002, ...
+- frontend/lib/core/             — hash navigation, app navigation, open_new_tab (web/stub conditional exports)
+- frontend/lib/dashboard/        — 24-column dashboard grid engine
+- frontend/lib/screens/web/      — web console screens
+
+## Commands
+- Run backend:  cd backend && uvicorn app.main:app --reload --port 8000
+- Run tests:    cd backend && python -m unittest discover -s tests -t .
+- Migrate:      cd backend && .venv\Scripts\python.exe -m alembic upgrade head
+- Build web:    cd frontend && flutter build web --release
+- Docker:       docker compose --env-file .env up -d --build
+
+## Invariants (do not violate)
+1. Never commit secrets: `.env`, `*.jks`, keystores and tokens are gitignored. Use `.env.example` templates.
+2. Odoo `odoo_*` columns are NULLABLE and linking is additive only — never delete or
+   overwrite existing production data (17 materials, 44 POs, 150k+ measurements).
+3. New DB schema goes through Alembic only (raw SQL in a new 000N migration).
+   Do not add runtime ALTER TABLE (legacy migrate_db.py is frozen).
+4. Frontend navigation is direct `setState` + `setHash` (which uses history.replaceState).
+   Do NOT rely on a `hashchange` event listener — it is unreliable in this build.
+5. `quality_stats.py` must stay pure (importable with no DB/env) so it remains unit-testable
+   and reusable by the Odoo payload builder.
+6. Web/non-web platform splits use conditional exports
+   (`export 'stub.dart' if (dart.library.html) 'web.dart'`) — never import dart:html in non-web builds.
+
+## Quality methodology (reference)
+- Rod rejection: a value outside nominal ± 3×(nominal−limit) is rejected and excluded from all stats.
+- SD is reported as sample SD (n−1); weight is per-rod but certified per 100 rods (report_scale=100).
+- Statistics are computed per production run (MO), never pooled across MOs.

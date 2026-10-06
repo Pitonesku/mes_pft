@@ -30,6 +30,9 @@ requests>=2.31
 # Password Hashing (bcrypt for server, PBKDF2 for offline sync)
 bcrypt>=4.0.0
 
+# Timezone data (required on Windows for zoneinfo; harmless on Linux)
+tzdata>=2024.1
+
 # Utilities
 python-multipart==0.0.6
 
