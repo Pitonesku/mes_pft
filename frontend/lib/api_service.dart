@@ -1,9 +1,11 @@
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'utils/logger.dart';
 import 'models.dart';
+import 'shift_context.dart';
 import 'http_client_wrapper.dart';
 
 class ApiService {
@@ -11,7 +13,7 @@ class ApiService {
   static const String _baseUrlPrefKey = 'server_base_url';
 
   /// Default fallback URL used when no URL has been saved yet.
-  static const String _defaultBaseUrl = "http://10.10.0.202:8000/api";
+  static const String _defaultBaseUrl = "http://10.10.0.202:8001/api";
 
   /// Android/desktop: absolute URL to the backend server.
   /// This is mutable so it can be updated at runtime via [reinitialize].
@@ -31,7 +33,29 @@ class ApiService {
   /// Load the cached bearer token (if any) on app startup.
   static Future<void> loadSavedAuthToken() async {
     final prefs = await SharedPreferences.getInstance();
-    authToken = prefs.getString(_authTokenPrefKey);
+    final token = prefs.getString(_authTokenPrefKey);
+    authToken = (token != null && !_isTokenExpired(token)) ? token : null;
+    if (authToken == null && token != null) {
+      await prefs.remove(_authTokenPrefKey);
+    }
+  }
+
+  /// True when a bearer token's embedded ``exp`` claim is already in the past.
+  /// Malformed tokens are treated as valid and left for the server to reject.
+  static bool _isTokenExpired(String token) {
+    try {
+      final parts = token.split('.');
+      if (parts.length < 2) return true;
+      final payloadB64 = parts[0];
+      final padding = '=' * (-payloadB64.length % 4);
+      final payload = jsonDecode(utf8.decode(base64Url.decode(payloadB64 + padding)))
+          as Map<String, dynamic>;
+      final exp = payload['exp'];
+      if (exp is int) {
+        return DateTime.now().millisecondsSinceEpoch ~/ 1000 >= exp;
+      }
+    } catch (_) {}
+    return false;
   }
 
   /// Persist the bearer token after a successful login.
@@ -116,7 +140,10 @@ class ApiService {
   }
 
   // --- REPORT SUBMISSION ---
-  static Future<bool> submitProductionReport(
+  /// Submit a production report. Returns the server-side report id on success
+  /// (also when the server reports a duplicate, in which case the existing id is
+  /// returned so the caller can still link the PDF), or null on failure/offline.
+  static Future<int?> submitProductionReport(
     Map<String, dynamic> reportData,
   ) async {
     try {
@@ -127,17 +154,30 @@ class ApiService {
       );
 
       if (response.statusCode == 200 || response.statusCode == 201) {
-        AppLog.i("Report successfully sent to server!");
-        return true;
+        int? reportId;
+        try {
+          final body = jsonDecode(response.body);
+          if (body is Map && body['report_id'] is int) {
+            reportId = body['report_id'] as int;
+          }
+          if (body is Map && body['status'] == 'duplicate') {
+            AppLog.w(
+                "Report already exists on server (duplicate client_report_id, id=$reportId) — reusing existing id.");
+          }
+        } catch (_) {
+          // Non-JSON body: no report id available to link the PDF to.
+        }
+        AppLog.i("Report successfully sent to server! (id=$reportId)");
+        return reportId;
       } else {
         AppLog.e(
           "Server error sending report: ${response.statusCode} - ${response.body}",
         );
-        return false;
+        return null;
       }
     } catch (e) {
       AppLog.w("No connection to server (offline). Report not sent.");
-      return false;
+      return null;
     }
   }
 
@@ -178,6 +218,7 @@ class ApiService {
         if (token is String && token.isNotEmpty) {
           await _saveAuthToken(token);
         }
+        _unauthorizedNotified = false; // allow the next expired session to redirect again
         AppLog.i("✅ Login successful for $username");
         return data;
       } else {
@@ -606,6 +647,88 @@ class ApiService {
     }
   }
 
+  /// Verify (approve/reject) operator-entered report data (human-in-the-loop).
+  /// [action] is "approve" or "reject". Returns true on success (HTTP 200).
+  static Future<bool> verifyReport(int reportId, String action) async {
+    try {
+      final response = await _httpClient.post(
+        Uri.parse('$effectiveBaseUrl/reports/$reportId/verify'),
+        headers: _authHeaders(),
+        body: jsonEncode({'action': action}),
+      );
+      return response.statusCode == 200;
+    } catch (e) {
+      AppLog.e("Error verifying report: $e");
+      return false;
+    }
+  }
+
+  /// Edit a production report (supervisor correction). Returns true on success.
+  /// The backend marks the report "edited" and forces re-verification.
+  static Future<bool> updateReport(int reportId, Map<String, dynamic> payload) async {
+    try {
+      final response = await _httpClient.put(
+        Uri.parse('$effectiveBaseUrl/reports/$reportId'),
+        headers: _authHeaders(),
+        body: jsonEncode(payload),
+      );
+      return response.statusCode == 200;
+    } catch (e) {
+      AppLog.e("Error updating report: $e");
+      return false;
+    }
+  }
+
+  /// Fetch the per-field edit history (ReportEditLog) for a report.
+  /// Returns {"report_id": int, "edits": [...]} or null.
+  static Future<Map<String, dynamic>?> fetchReportEdits(int reportId) async {
+    try {
+      final response = await _httpClient.get(
+        Uri.parse('$effectiveBaseUrl/reports/$reportId/edits'),
+        headers: _authHeaders(),
+      );
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      return null;
+    } catch (e) {
+      AppLog.e("Error fetching report edits: $e");
+      return null;
+    }
+  }
+
+  /// Fetch the high-level audit log (ReportAuditLog) for a report.
+  /// Returns {"report_id": int, "logs": [...]} or null.
+  static Future<Map<String, dynamic>?> fetchReportLogs(int reportId) async {
+    try {
+      final response = await _httpClient.get(
+        Uri.parse('$effectiveBaseUrl/reports/$reportId/logs'),
+        headers: _authHeaders(),
+      );
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      return null;
+    } catch (e) {
+      AppLog.e("Error fetching report audit logs: $e");
+      return null;
+    }
+  }
+
+  /// Revert a report to its original (pre-edit) values. Returns true on success.
+  static Future<bool> revertReport(int reportId) async {
+    try {
+      final response = await _httpClient.post(
+        Uri.parse('$effectiveBaseUrl/reports/$reportId/revert'),
+        headers: _authHeaders(),
+      );
+      return response.statusCode == 200;
+    } catch (e) {
+      AppLog.e("Error reverting report: $e");
+      return false;
+    }
+  }
+
   /// Sync a report with optional PDF data in a single call.
   /// Used when re-submitting locally-stored pending reports after network is restored.
   static Future<Map<String, dynamic>?> syncReport({
@@ -645,6 +768,7 @@ class ApiService {
     required List<int> pdfBytes,
     required String filename,
     required String reportDate,
+    int? reportId,
   }) async {
     try {
       final base64Pdf = base64Encode(pdfBytes);
@@ -655,6 +779,7 @@ class ApiService {
           'pdf_base64': base64Pdf,
           'filename': filename,
           'report_date': reportDate,
+          if (reportId != null) 'report_id': reportId,
         }),
       ).timeout(const Duration(seconds: 60));
 
@@ -872,6 +997,10 @@ class ApiService {
   static String certificatePdfUrl(int shiftId) =>
       '$effectiveBaseUrl/v2/shifts/$shiftId/certificate.pdf';
 
+  /// URL for the consolidated quality certificate of a whole order (all shifts).
+  static String orderCertificatePdfUrl(int poId) =>
+      '$effectiveBaseUrl/v2/pos/$poId/certificate.pdf';
+
   /// URL for a shift's measurements as CSV.
   static String measurementsCsvUrl(int shiftId) =>
       '$effectiveBaseUrl/v2/shifts/$shiftId/measurements?fmt=csv';
@@ -904,6 +1033,849 @@ class ApiService {
       return null;
     } catch (e) {
       AppLog.e("updateQualitySettings error: $e");
+      return null;
+    }
+  }
+
+  /// Odoo integration mode ('hybrid' | 'strict').
+  static Future<String?> fetchOdooMode() async {
+    try {
+      final response = await _httpClient
+          .get(Uri.parse('$effectiveBaseUrl/settings/odoo'), headers: _authHeaders())
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        return data['mode']?.toString();
+      }
+      return null;
+    } catch (e) {
+      AppLog.e("fetchOdooMode error: $e");
+      return null;
+    }
+  }
+
+  static Future<bool> updateOdooMode(String mode) async {
+    try {
+      final response = await _httpClient
+          .put(Uri.parse('$effectiveBaseUrl/settings/odoo'),
+              headers: _authHeaders(), body: jsonEncode({'mode': mode}))
+          .timeout(const Duration(seconds: 15));
+      return response.statusCode == 200;
+    } catch (e) {
+      AppLog.e("updateOdooMode error: $e");
+      return false;
+    }
+  }
+
+  static Future<Map<String, dynamic>?> linkOdooOrder(int odooMoId, {int? localMoId}) async {
+    try {
+      final response = await _httpClient.post(
+        Uri.parse('$effectiveBaseUrl/v2/odoo/link-order'),
+        headers: _authHeaders(),
+        body: jsonEncode({'odoo_mo_id': odooMoId, 'local_mo_id': localMoId}),
+      ).timeout(const Duration(seconds: 30));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("linkOdooOrder error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  /// Mark an unlinked local order as not-for-Odoo (test/junk entries).
+  static Future<bool> ignoreOdooOrder(int orderId) async {
+    try {
+      final response = await _httpClient.post(
+        Uri.parse('$effectiveBaseUrl/v2/orders/$orderId/ignore-odoo'),
+        headers: _authHeaders(),
+      ).timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) return true;
+      _fail(response.statusCode, _detailFrom(response.body));
+      return false;
+    } catch (e) {
+      AppLog.e("ignoreOdooOrder error: $e");
+      _fail(null, e.toString());
+      return false;
+    }
+  }
+
+  /// Odoo MO chains for the manual link picker.
+  static Future<List<dynamic>?> fetchOdooMos({String? q}) async {
+    try {
+      final uri = Uri.parse('$effectiveBaseUrl/v2/odoo/mos').replace(
+        queryParameters: {
+          if (q != null && q.isNotEmpty) 'q': q,
+          'limit': '100',
+        },
+      );
+      final response = await _httpClient
+          .get(uri, headers: _authHeaders())
+          .timeout(const Duration(seconds: 120));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as List<dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("fetchOdooMos error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  /// On-demand Odoo MO sync by scope.
+  static Future<Map<String, dynamic>?> syncOdooOrders({
+    String scope = 'active',
+    String? dateFrom,
+    String? dateTo,
+  }) async {
+    try {
+      final response = await _httpClient.post(
+        Uri.parse('$effectiveBaseUrl/v2/odoo/sync-orders'),
+        headers: _authHeaders(),
+        body: jsonEncode({'scope': scope, 'date_from': dateFrom, 'date_to': dateTo}),
+      ).timeout(const Duration(seconds: 60));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      return null;
+    } catch (e) {
+      AppLog.e("syncOdooOrders error: $e");
+      return null;
+    }
+  }
+
+  static Future<bool> dispatchOdooNow() async {
+    try {
+      final response = await _httpClient.post(
+        Uri.parse('$effectiveBaseUrl/v2/odoo/dispatch'),
+        headers: _authHeaders(),
+      ).timeout(const Duration(seconds: 60));
+      return response.statusCode == 200;
+    } catch (e) {
+      AppLog.e("dispatchOdooNow error: $e");
+      return false;
+    }
+  }
+
+  /// Status/detail of the last failed Odoo API call, so screens can show the
+  /// server's message instead of a silent empty list or a wrong default state.
+  static int? lastApiStatus;
+  static String? lastApiDetail;
+
+  /// Invoked when an authenticated request is rejected with 401 (missing,
+  /// expired or otherwise invalid bearer token). Wired in main() to clear the
+  /// session and send the user back to the login screen.
+  static void Function()? onUnauthorized;
+
+  /// One-shot guard so a burst of 401s (e.g. several protected calls firing on a
+  /// stale screen) only redirects to login once. Reset after a successful login.
+  static bool _unauthorizedNotified = false;
+
+  static String _detailFrom(String body) {
+    try {
+      final d = jsonDecode(body);
+      if (d is Map && d['detail'] != null) return d['detail'].toString();
+    } catch (_) {}
+    return body.length > 200 ? body.substring(0, 200) : body;
+  }
+
+  static void _fail(int? status, String detail) {
+    lastApiStatus = status;
+    lastApiDetail = detail;
+    // Any 401 means the session is stale, expired or missing: clear the token and
+    // redirect to login ONCE (the guard avoids a redirect loop from a burst of 401s).
+    if (status == 401 && !_unauthorizedNotified) {
+      _unauthorizedNotified = true;
+      authToken = null;
+      onUnauthorized?.call();
+    }
+  }
+
+  /// Order Odoo sync state list for the Odoo Sync screen (superadmin).
+  ///
+  /// With [suggest] the backend returns `{orders: [...], suggest_error}` and every
+  /// unlinked order carries `suggestions`; without it the plain list is returned.
+  /// The result is always normalised to that map shape, so the order list renders
+  /// even when the suggestion step failed (`suggest_error` explains why).
+  static Future<Map<String, dynamic>?> fetchOdooOrdersSync({bool suggest = false}) async {
+    try {
+      final response = await _httpClient
+          .get(Uri.parse('$effectiveBaseUrl/v2/odoo/orders-sync'
+                  '${suggest ? '?suggest=true' : ''}'),
+              headers: _authHeaders())
+          .timeout(Duration(seconds: suggest ? 120 : 20));
+      if (response.statusCode == 200) {
+        final decoded = jsonDecode(response.body);
+        if (decoded is List<dynamic>) {
+          return {'orders': decoded, 'suggest_error': null};
+        }
+        return decoded as Map<String, dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("fetchOdooOrdersSync error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  static Future<bool> setOrderSyncMode(int orderId, String mode) async {
+    try {
+      final response = await _httpClient.put(
+        Uri.parse('$effectiveBaseUrl/v2/orders/$orderId/sync-mode'),
+        headers: _authHeaders(),
+        body: jsonEncode({'sync_mode': mode}),
+      ).timeout(const Duration(seconds: 15));
+      return response.statusCode == 200;
+    } catch (e) {
+      AppLog.e("setOrderSyncMode error: $e");
+      return false;
+    }
+  }
+
+  /// Finalize an order: computes cumulative production + consolidated quality,
+  /// marks it completed, renders the summary PDF and pushes it to Odoo (full sync).
+  static Future<Map<String, dynamic>?> closeOrder(int orderId) async {
+    try {
+      final response = await _httpClient.post(
+        Uri.parse('$effectiveBaseUrl/v2/orders/$orderId/close'),
+        headers: _authHeaders(),
+      ).timeout(const Duration(seconds: 60));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("closeOrder error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  /// Material mapping overview; with [suggest] also asks Odoo for suggestions.
+  static Future<Map<String, dynamic>?> fetchOdooMaterialMapping({bool suggest = false}) async {
+    try {
+      final uri = Uri.parse('$effectiveBaseUrl/v2/odoo/material-mapping'
+          '${suggest ? '?suggest=true' : ''}');
+      final response = await _httpClient
+          .get(uri, headers: _authHeaders())
+          .timeout(const Duration(seconds: 60));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("fetchOdooMaterialMapping error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  static Future<Map<String, dynamic>?> confirmOdooMaterialMapping({
+    required int materialId,
+    int? odooProductId,
+    int? odooUomId,
+    bool force = false,
+  }) async {
+    try {
+      final response = await _httpClient.post(
+        Uri.parse('$effectiveBaseUrl/v2/odoo/material-mapping'),
+        headers: _authHeaders(),
+        body: jsonEncode({
+          'material_id': materialId,
+          'odoo_product_id': odooProductId,
+          'odoo_uom_id': odooUomId,
+          'force': force,
+        }),
+      ).timeout(const Duration(seconds: 20));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("confirmOdooMaterialMapping error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  /// Odoo shadow-mode log entries.
+  static Future<Map<String, dynamic>?> fetchOdooShadowLog() async {
+    try {
+      final response = await _httpClient
+          .get(Uri.parse('$effectiveBaseUrl/v2/odoo/shadow-log'),
+              headers: _authHeaders())
+          .timeout(const Duration(seconds: 20));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("fetchOdooShadowLog error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  static Future<Map<String, dynamic>?> requeueOdooShadow() async {
+    try {
+      final response = await _httpClient.post(
+        Uri.parse('$effectiveBaseUrl/v2/odoo/shadow/requeue'),
+        headers: _authHeaders(),
+      ).timeout(const Duration(seconds: 20));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("requeueOdooShadow error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  static Future<Map<String, dynamic>?> reconcileOdoo() async {
+    try {
+      final response = await _httpClient.post(
+        Uri.parse('$effectiveBaseUrl/v2/odoo/reconcile'),
+        headers: _authHeaders(),
+      ).timeout(const Duration(seconds: 60));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("reconcileOdoo error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  static Future<Map<String, dynamic>?> fetchOdooUnlinkedOrders() async {
+    try {
+      final response = await _httpClient
+          .get(Uri.parse('$effectiveBaseUrl/v2/odoo/unlinked-orders'),
+              headers: _authHeaders())
+          .timeout(const Duration(seconds: 120));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("fetchOdooUnlinkedOrders error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  static Future<Map<String, dynamic>?> fetchOdooSyncSettings() async {
+    try {
+      final response = await _httpClient
+          .get(Uri.parse('$effectiveBaseUrl/v2/odoo/sync-settings'),
+              headers: _authHeaders())
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("fetchOdooSyncSettings error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  static Future<bool> setOdooSyncSettings(Map<String, dynamic> settings) async {
+    try {
+      final response = await _httpClient.put(
+        Uri.parse('$effectiveBaseUrl/v2/odoo/sync-settings'),
+        headers: _authHeaders(),
+        body: jsonEncode(settings),
+      ).timeout(const Duration(seconds: 15));
+      return response.statusCode == 200;
+    } catch (e) {
+      AppLog.e("setOdooSyncSettings error: $e");
+      return false;
+    }
+  }
+
+  /// Odoo product feed for the manual material-mapping picker.
+  static Future<List<dynamic>?> fetchOdooProducts({String? category, String? q}) async {
+    try {
+      final uri = Uri.parse('$effectiveBaseUrl/v2/odoo/products').replace(
+        queryParameters: {
+          if (category != null) 'category': category,
+          if (q != null && q.isNotEmpty) 'q': q,
+          'limit': '100',
+        },
+      );
+      final response = await _httpClient
+          .get(uri, headers: _authHeaders())
+          .timeout(const Duration(seconds: 60));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as List<dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("fetchOdooProducts error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  /// Runtime shadow-mode toggle (persisted in system_settings, no restart needed).
+  static Future<bool> setOdooShadowMode(bool enabled) async {
+    try {
+      final response = await _httpClient.put(
+        Uri.parse('$effectiveBaseUrl/v2/odoo/shadow-mode'),
+        headers: _authHeaders(),
+        body: jsonEncode({'enabled': enabled}),
+      ).timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) return true;
+      _fail(response.statusCode, _detailFrom(response.body));
+      return false;
+    } catch (e) {
+      AppLog.e("setOdooShadowMode error: $e");
+      _fail(null, e.toString());
+      return false;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Station profiles (Settings -> Quality Stations)
+  // ---------------------------------------------------------------------------
+
+  static Future<List<dynamic>?> fetchStationProfiles() async {
+    try {
+      final response = await _httpClient
+          .get(Uri.parse('$effectiveBaseUrl/v2/station-profiles'), headers: _authHeaders())
+          .timeout(const Duration(seconds: 20));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as List<dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("fetchStationProfiles error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  static Future<Map<String, dynamic>?> saveStationProfile(
+      Map<String, dynamic> payload, {int? id}) async {
+    try {
+      final uri = Uri.parse(
+          '$effectiveBaseUrl/v2/station-profiles${id == null ? '' : '/$id'}');
+      final response = id == null
+          ? await _httpClient
+              .post(uri, headers: _authHeaders(), body: jsonEncode(payload))
+              .timeout(const Duration(seconds: 20))
+          : await _httpClient
+              .put(uri, headers: _authHeaders(), body: jsonEncode(payload))
+              .timeout(const Duration(seconds: 20));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("saveStationProfile error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  static Future<bool> deleteStationProfile(int id) async {
+    try {
+      final response = await _httpClient
+          .delete(Uri.parse('$effectiveBaseUrl/v2/station-profiles/$id'),
+              headers: _authHeaders())
+          .timeout(const Duration(seconds: 20));
+      return response.statusCode == 200;
+    } catch (e) {
+      AppLog.e("deleteStationProfile error: $e");
+      return false;
+    }
+  }
+
+  static Future<Map<String, dynamic>?> generateStationKey(int profileId) async {
+    try {
+      final response = await _httpClient
+          .post(Uri.parse('$effectiveBaseUrl/v2/station-profiles/$profileId/generate-key'),
+              headers: _authHeaders())
+          .timeout(const Duration(seconds: 20));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("generateStationKey error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  static Future<bool> revokeStationKey(int profileId) async {
+    try {
+      final response = await _httpClient
+          .post(Uri.parse('$effectiveBaseUrl/v2/station-profiles/$profileId/revoke-key'),
+              headers: _authHeaders())
+          .timeout(const Duration(seconds: 20));
+      return response.statusCode == 200;
+    } catch (e) {
+      AppLog.e("revokeStationKey error: $e");
+      return false;
+    }
+  }
+
+  /// Download the ready-to-run agent bundle (ZIP) for a station profile.
+  static Future<Uint8List?> downloadStationAgentBundle(int profileId) async {
+    try {
+      final response = await _httpClient
+          .get(Uri.parse('$effectiveBaseUrl/v2/station-profiles/$profileId/download-agent'),
+              headers: _authHeaders())
+          .timeout(const Duration(seconds: 60));
+      if (response.statusCode == 200) {
+        return response.bodyBytes;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("downloadStationAgentBundle error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Shift lifecycle + manual in-process QC
+  // ---------------------------------------------------------------------------
+
+  static const _shiftCtxKey = 'active_shift_ctx';
+
+  static Future<ShiftContext?> loadShiftContext() async {
+    final prefs = await SharedPreferences.getInstance();
+    return ShiftContext.fromString(prefs.getString(_shiftCtxKey));
+  }
+
+  static Future<void> saveShiftContext(ShiftContext ctx) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_shiftCtxKey, jsonEncode(ctx.toJson()));
+  }
+
+  static Future<void> clearShiftContext() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_shiftCtxKey);
+  }
+
+  static Future<Map<String, dynamic>?> startShift({
+    required int machineId,
+    String? moRef,
+    int? poId,
+    String? shiftName,
+    DateTime? scheduledEndAt,
+    bool takeover = false,
+  }) async {
+    try {
+      final response = await _httpClient
+          .post(
+              Uri.parse('$effectiveBaseUrl/v2/shifts'),
+              headers: _authHeaders(),
+              body: jsonEncode({
+                'machine_id': machineId,
+                if (moRef != null) 'mo_ref': moRef,
+                if (poId != null) 'po_id': poId,
+                if (shiftName != null) 'shift_name': shiftName,
+                if (scheduledEndAt != null) 'scheduled_end_at': scheduledEndAt.toIso8601String(),
+                if (takeover) 'takeover': true,
+              }))
+          .timeout(const Duration(seconds: 20));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("startShift error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  static Future<bool> completeShift(int shiftId,
+      {List<Map<String, dynamic>> materialLogs = const [],
+      List<Map<String, dynamic>> scrapLogs = const []}) async {
+    try {
+      final response = await _httpClient
+          .post(Uri.parse('$effectiveBaseUrl/v2/shifts/$shiftId/close'),
+              headers: _authHeaders(),
+              body: jsonEncode({
+                'material_logs': materialLogs,
+                'scrap_logs': scrapLogs,
+              }))
+          .timeout(const Duration(seconds: 30));
+      return response.statusCode == 200;
+    } catch (e) {
+      AppLog.e("completeShift error: $e");
+      return false;
+    }
+  }
+
+  /// Soft-delete an empty AUTO_CLOSED/CLOSED shift (supervisor only). Returns true on
+  /// success; false when it was refused (see [lastApiDetail]) or the call failed.
+  static Future<bool> discardShift(int shiftId) async {
+    try {
+      final response = await _httpClient
+          .post(Uri.parse('$effectiveBaseUrl/v2/shifts/$shiftId/discard'),
+              headers: _authHeaders())
+          .timeout(const Duration(seconds: 20));
+      if (response.statusCode == 200) return true;
+      _fail(response.statusCode, _detailFrom(response.body));
+      return false;
+    } catch (e) {
+      AppLog.e("discardShift error: $e");
+      _fail(null, e.toString());
+      return false;
+    }
+  }
+
+  static Future<bool> stopShift(int shiftId) async {
+    try {
+      final response = await _httpClient
+          .post(Uri.parse('$effectiveBaseUrl/v2/shifts/$shiftId/stop'),
+              headers: _authHeaders())
+          .timeout(const Duration(seconds: 30));
+      return response.statusCode == 200;
+    } catch (e) {
+      AppLog.e("stopShift error: $e");
+      return false;
+    }
+  }
+
+  static Future<Map<String, dynamic>?> switchMo(int shiftId,
+      {int? poId, String? moRef, double? endCounter}) async {
+    try {
+      final response = await _httpClient
+          .post(Uri.parse('$effectiveBaseUrl/v2/shifts/$shiftId/switch-mo'),
+              headers: _authHeaders(),
+              body: jsonEncode({
+                if (poId != null) 'po_id': poId,
+                if (moRef != null) 'mo_ref': moRef,
+                if (endCounter != null) 'end_counter': endCounter,
+              }))
+          .timeout(const Duration(seconds: 20));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("switchMo error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  /// Shift with its runs (`runs[]`, each with machine_id / mo_ref / status).
+  static Future<Map<String, dynamic>?> fetchShiftDetail(int shiftId) async {
+    try {
+      final response = await _httpClient
+          .get(Uri.parse('$effectiveBaseUrl/v2/shifts/$shiftId'), headers: _authHeaders())
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("fetchShiftDetail error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  /// Move the open shift to another machine (same MO unless [poId] is given).
+  /// Returns the shift with its new `run` + `specs`, or null (see [lastApiDetail]).
+  static Future<Map<String, dynamic>?> changeMachine(int shiftId,
+      {required int machineId, int? poId, double? endCounter}) async {
+    try {
+      final response = await _httpClient
+          .post(Uri.parse('$effectiveBaseUrl/v2/shifts/$shiftId/change-machine'),
+              headers: _authHeaders(),
+              body: jsonEncode({
+                'machine_id': machineId,
+                if (poId != null) 'po_id': poId,
+                if (endCounter != null) 'end_counter': endCounter,
+              }))
+          .timeout(const Duration(seconds: 20));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("changeMachine error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  /// Void (never delete) a manual QC check.
+  static Future<bool> voidManualCheck(int checkId, String reason) async {
+    try {
+      final response = await _httpClient
+          .post(Uri.parse('$effectiveBaseUrl/v2/quality/manual-checks/$checkId/void'),
+              headers: _authHeaders(), body: jsonEncode({'reason': reason}))
+          .timeout(const Duration(seconds: 20));
+      if (response.statusCode == 200) return true;
+      _fail(response.statusCode, _detailFrom(response.body));
+      return false;
+    } catch (e) {
+      AppLog.e("voidManualCheck error: $e");
+      _fail(null, e.toString());
+      return false;
+    }
+  }
+
+  // --- offline queue for manual QC checks (idempotent via client_check_id) ---
+  static const _qcQueueKey = 'qc_check_queue';
+
+  static Future<List<Map<String, dynamic>>> pendingManualChecks() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_qcQueueKey);
+    if (raw == null || raw.isEmpty) return [];
+    try {
+      return (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  static Future<void> _savePendingChecks(List<Map<String, dynamic>> items) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_qcQueueKey, jsonEncode(items));
+  }
+
+  /// Submit a QC check; on a network failure keep it in the local queue so it is
+  /// never lost. Returns the saved check, or null when it was only queued/failed.
+  static Future<Map<String, dynamic>?> submitManualCheckQueued(
+      Map<String, dynamic> payload) async {
+    final item = {
+      ...payload,
+      'client_check_id': payload['client_check_id'] ??
+          '${DateTime.now().microsecondsSinceEpoch}-${payload.hashCode}',
+      'measured_at': payload['measured_at'] ?? DateTime.now().toUtc().toIso8601String(),
+    };
+    final saved = await submitManualCheck(item);
+    if (saved != null) return saved;
+    // A 4xx is a real rejection (closed shift, empty check): do not queue it.
+    final status = lastApiStatus;
+    if (status != null && status >= 400 && status < 500) return null;
+    final queue = await pendingManualChecks();
+    queue.add(item);
+    await _savePendingChecks(queue);
+    return null;
+  }
+
+  /// Re-send queued checks (call when the QC screen opens / connectivity returns).
+  /// Returns how many were delivered.
+  static Future<int> flushManualCheckQueue() async {
+    final queue = await pendingManualChecks();
+    if (queue.isEmpty) return 0;
+    final remaining = <Map<String, dynamic>>[];
+    var sent = 0;
+    for (final item in queue) {
+      final r = await submitManualCheck(item);
+      if (r != null) {
+        sent++;
+      } else {
+        final status = lastApiStatus;
+        // keep only network failures / 5xx; drop permanently rejected items
+        if (status == null || status >= 500) remaining.add(item);
+      }
+    }
+    await _savePendingChecks(remaining);
+    return sent;
+  }
+
+  static Future<List<dynamic>?> fetchShiftSessions(
+      {int? machineId, String? status}) async {
+    try {
+      final qp = <String, String>{
+        if (machineId != null) 'machine_id': '$machineId',
+        if (status != null) 'status': status,
+      };
+      final uri = Uri.parse('$effectiveBaseUrl/v2/shifts')
+          .replace(queryParameters: qp.isEmpty ? null : qp);
+      final response = await _httpClient.get(uri, headers: _authHeaders())
+          .timeout(const Duration(seconds: 20));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as List<dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("fetchShiftSessions error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  static Future<Map<String, dynamic>?> submitManualCheck(
+      Map<String, dynamic> payload) async {
+    try {
+      final response = await _httpClient
+          .post(Uri.parse('$effectiveBaseUrl/v2/quality/manual-check'),
+              headers: _authHeaders(), body: jsonEncode(payload))
+          .timeout(const Duration(seconds: 20));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("submitManualCheck error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  static Future<List<dynamic>?> fetchManualChecks({int? shiftId, int? moId}) async {
+    try {
+      final qp = <String, String>{
+        if (shiftId != null) 'shift_id': '$shiftId',
+        if (moId != null) 'mo_id': '$moId',
+      };
+      final uri = Uri.parse('$effectiveBaseUrl/v2/quality/manual-checks')
+          .replace(queryParameters: qp.isEmpty ? null : qp);
+      final response = await _httpClient
+          .get(uri, headers: _authHeaders())
+          .timeout(const Duration(seconds: 20));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as List<dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("fetchManualChecks error: $e");
+      _fail(null, e.toString());
       return null;
     }
   }

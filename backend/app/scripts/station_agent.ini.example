@@ -1,0 +1,21 @@
+; station_agent.ini — copy next to station_push_agent.py (or the .exe) and rename
+; to station_agent.ini. Precedence: CLI flag > environment variable > this file >
+; built-in default.
+
+[agent]
+
+; Local folder the station writes measurement files into (required).
+watch_dir = C:\Station1\output
+
+; MES server root (where FastAPI runs). Required for remote stations.
+mes_base_url = http://10.10.0.202:8000
+
+; Long-lived ingest API key (run `python -m app.scripts.create_station_key` on
+; the MES server, then paste the printed key here). Required.
+station_key = <PASTE_KEY_HERE>
+
+; Optional overrides (defaults shown — omit to use defaults):
+; archive_dir   = C:\Station1\output\Archive
+; error_dir     = C:\Station1\output\Errors
+; scan_interval = 30
+; ledger        = C:\Station1\output\Archive\ledger.json

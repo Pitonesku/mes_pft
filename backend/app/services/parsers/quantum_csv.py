@@ -101,6 +101,7 @@ class ParsedSample:
     rods_count: Optional[int]
     reserve_1: str
     reserve_2: str
+    mo_field: str = "batch_description"
     rods: List[Rod] = field(default_factory=list)
     footer: Dict[str, Dict[str, Optional[float]]] = field(default_factory=dict)
     file_sha256: Optional[str] = None
@@ -108,7 +109,16 @@ class ParsedSample:
 
     @property
     def mo_ref(self) -> str:
-        """The 'Manufacturing Order' value comes from Batch Description or Comments."""
+        """The 'Manufacturing Order' value, resolved from the configured station field.
+
+        ``mo_field`` selects which station column carries the MO number:
+        ``batch_description`` (default, falls back to Comments), ``comments`` or
+        ``brand``.
+        """
+        if self.mo_field == "brand":
+            return (self.brand or "").strip()
+        if self.mo_field == "comments":
+            return (self.reserve_1 or "").strip()
         return (self.reserve_2 or "").strip() or (self.reserve_1 or "").strip()
 
 
@@ -151,11 +161,13 @@ class QuantumCsvParser:
         column_map: Optional[Dict[str, Optional[int]]] = None,
         data_start_row: int = DEFAULT_DATA_START_ROW,
         encoding: str = "utf-8",
+        mo_field: str = "batch_description",
     ) -> None:
         self.metadata_map = metadata_map or dict(DEFAULT_METADATA_MAP)
         self.column_map = column_map or dict(DEFAULT_COLUMN_MAP)
         self.data_start_row = data_start_row
         self.encoding = encoding
+        self.mo_field = mo_field
 
     def parse(self, content: str) -> ParsedSample:
         """Parse CSV text (already decoded)."""
@@ -206,6 +218,7 @@ class QuantumCsvParser:
             rods_count=_to_int(meta.get("rods_count")),
             reserve_1=meta.get("reserve_1", ""),
             reserve_2=meta.get("reserve_2", ""),
+            mo_field=self.mo_field,
             rods=rods,
         )
 
@@ -227,9 +240,26 @@ class QuantumCsvParser:
         )
 
 
-def parse_bytes(data: bytes, encoding: str = "utf-8") -> ParsedSample:
-    """Decode raw file bytes and parse; falls back to cp1251 like the old daemon."""
-    parser = QuantumCsvParser(encoding=encoding)
+def parse_bytes(
+    data: bytes,
+    encoding: str = "utf-8",
+    metadata_map: Optional[Dict[str, str]] = None,
+    column_map: Optional[Dict[str, Optional[int]]] = None,
+    data_start_row: int = DEFAULT_DATA_START_ROW,
+    mo_field: str = "batch_description",
+) -> ParsedSample:
+    """Decode raw file bytes and parse; falls back to cp1251 like the old daemon.
+
+    ``metadata_map`` / ``column_map`` / ``data_start_row`` / ``mo_field`` let the
+    caller override the default Quantum Neo layout (used by per-station profiles).
+    """
+    parser = QuantumCsvParser(
+        encoding=encoding,
+        metadata_map=metadata_map,
+        column_map=column_map,
+        data_start_row=data_start_row,
+        mo_field=mo_field,
+    )
     try:
         text = data.decode(encoding)
     except UnicodeDecodeError:

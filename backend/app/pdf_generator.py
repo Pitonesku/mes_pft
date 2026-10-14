@@ -6,20 +6,451 @@ Generates PDF files matching Flutter App / Web App format.
 """
 
 import os
+import io
 import json
 from datetime import datetime
 from pathlib import Path
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
+from reportlab.lib.units import inch, mm
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+
+
+def report_to_dict(report) -> dict:
+    """Build the ``report_data`` dict expected by ``generate_pdf`` from a ``ProductionReport``."""
+    data = {
+        "id": getattr(report, "id", ""),
+        "report_date": report.report_date or "",
+        "shift_name": report.shift_name or "",
+        "machine_name": report.machine_name or "",
+        "operator_name": report.operator_name or "",
+        "po_number": report.po_number or "",
+        "lot_number": report.lot_number or "",
+        "shift_time_range": report.shift_time_range or "",
+        "box_type": report.box_type or 0,
+        "diameter": report.diameter or 0,
+        "length": report.length or 0,
+        "pd": report.pd or 0,
+        "cu": getattr(report, "cu", 0) or 0,
+        "weight": report.weight or 0,
+        "boxes_produced": report.boxes_produced or 0,
+        "produced_rods": report.produced_rods or 0,
+        "machine_counter": report.machine_counter or 0,
+        "difference": report.difference or 0,
+        "diff_percent": report.diff_percent or "0%",
+        "waste_kg": report.waste_kg or 0,
+        "machine_efficiency": report.machine_efficiency or 0,
+        "total_acetate": report.total_acetate or 0,
+        "total_paper": report.total_paper or 0,
+        "total_pva": report.total_pva or 0,
+        "total_hm": report.total_hm or 0,
+        "total_triacetin": report.total_triacetin or 0,
+        "remarks": report.remarks or "",
+        "acetate_list": [],
+        "paper_list": [],
+        "pva_list": [],
+        "hm_list": [],
+        "tri_list": [],
+    }
+    try:
+        if report.materials_json:
+            parsed = json.loads(report.materials_json)
+            for key, field in (("acetate_list", "acetate_list"), ("paper_list", "paper_list"),
+                               ("pva_list", "pva_list"), ("hm_list", "hm_list"),
+                               ("tri_list", "tri_list")):
+                data[field] = parsed.get(key, []) if isinstance(parsed.get(key), list) else []
+    except Exception:
+        pass
+    return data
+
+
+_FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+_DEJAVU_REGULAR = "DejaVu"
+_DEJAVU_BOLD = "DejaVu-Bold"
+_FONT_REGISTERED = False
+
+# Official Quality Certificate parameter matrix (fixed order + units).
+_PARAM_META = [
+    ("length", "Filter rods length", "mm"),
+    ("diameter", "Filter rods diameter", "mm"),
+    ("pd", "Pressure drop", "mm WG"),
+    ("hardness", "Hardness", "%"),
+    ("weight", "Weight", "mg"),
+]
+
+
+def _register_dejavu_fonts() -> None:
+    """Register a Unicode TTF (DejaVu Sans) so Ukrainian/Hungarian/Latin render."""
+    global _FONT_REGISTERED
+    if _FONT_REGISTERED:
+        return
+    _FONT_REGISTERED = True
+    pairs = [
+        (os.path.join(_FONT_DIR, "DejaVuSans.ttf"), _DEJAVU_REGULAR),
+        (os.path.join(_FONT_DIR, "DejaVuSans-Bold.ttf"), _DEJAVU_BOLD),
+    ]
+    try:
+        if all(os.path.isfile(p) for p, _ in pairs):
+            for path, name in pairs:
+                pdfmetrics.registerFont(TTFont(name, path))
+            pdfmetrics.registerFontFamily(
+                "DejaVu", normal=_DEJAVU_REGULAR, bold=_DEJAVU_BOLD,
+                italic=_DEJAVU_REGULAR, boldItalic=_DEJAVU_BOLD)
+            return
+    except Exception:
+        pass
+    try:  # fall back to matplotlib's bundled copy
+        import matplotlib
+        ttf = os.path.join(os.path.dirname(matplotlib.__file__), "mpl-data", "fonts", "ttf")
+        reg = os.path.join(ttf, "DejaVuSans.ttf")
+        bold = os.path.join(ttf, "DejaVuSans-Bold.ttf")
+        if os.path.isfile(reg):
+            pdfmetrics.registerFont(TTFont(_DEJAVU_REGULAR, reg))
+        if os.path.isfile(bold):
+            pdfmetrics.registerFont(TTFont(_DEJAVU_BOLD, bold))
+        pdfmetrics.registerFontFamily(
+            "DejaVu", normal=_DEJAVU_REGULAR, bold=_DEJAVU_BOLD,
+            italic=_DEJAVU_REGULAR, boldItalic=_DEJAVU_BOLD)
+    except Exception:
+        pass
+
+
+def _fmt_num(value) -> str:
+    if value is None or value == "":
+        return "-"
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if f != f:  # NaN
+        return "-"
+    if f == int(f):
+        return str(int(f))
+    return f"{f:.4f}".rstrip("0").rstrip(".")
+
+
+def _flag(v) -> str:
+    if v is None:
+        return "-"
+    return "OK" if v else "FAIL"
+
+
+def _trend_chart(values, lower, upper, nominal, width=500, height=130):
+    """Render a rod-index vs value line chart with spec-limit lines (vector).
+
+    Returns a ``reportlab.graphics.shapes.Drawing`` or ``None`` when there is too
+    little data (or the chart module is unavailable).
+    """
+    if not values or len(values) < 2:
+        return None
+    try:
+        from reportlab.graphics.charts.lineplots import LinePlot
+        from reportlab.graphics.shapes import Drawing
+    except ImportError:  # pragma: no cover
+        return None
+
+    n = len(values)
+    data = [[(i, v) for i, v in enumerate(values)]]
+    for limit in (lower, upper, nominal):
+        if limit is not None:
+            data.append([(0, limit), (n - 1, limit)])
+
+    try:
+        lp = LinePlot()
+        lp.x = 46
+        lp.y = 24
+        lp.width = width - 60
+        lp.height = height - 40
+        lp.data = data
+        lp.xValueAxis.valueMin = 0
+        lp.xValueAxis.valueMax = n - 1
+        lp.xValueAxis.valueStep = max(1, (n - 1) // 12)
+        lp.xValueAxis.labels.fontName = "DejaVu"
+        lp.xValueAxis.labels.fontSize = 6
+        lp.yValueAxis.labels.fontName = "DejaVu"
+        lp.yValueAxis.labels.fontSize = 6
+        lp.lines[0].strokeColor = colors.HexColor("#2c3e50")
+        lp.lines[0].strokeWidth = 1.2
+        for i in range(1, len(data)):
+            lp.lines[i].strokeColor = colors.HexColor("#c0392b")
+            lp.lines[i].strokeWidth = 0.8
+            lp.lines[i].strokeDashArray = [2, 2]
+
+        d = Drawing(width, height)
+        d.add(lp)
+        return d
+    except Exception:
+        return None
+
+
+def render_order_summary_pdf(data: dict) -> bytes:
+    """Render the aggregated Order Summary PDF (production + consolidated quality).
+
+    ``data`` keys:
+      * ``header``: mo_number, spec_string, machines, date_range, operator
+      * ``production``: total_boxes, total_rods, total_waste_kg, materials{...}
+      * ``quality``: certificate[...], rods_total, rods_rejected, status
+    """
+    _register_dejavu_fonts()
+
+    header = data.get("header") or {}
+    production = data.get("production") or {}
+    quality = data.get("quality") or {}
+    materials = production.get("materials") or {}
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4, topMargin=14 * mm, bottomMargin=14 * mm,
+        leftMargin=14 * mm, rightMargin=14 * mm, title="Order Summary",
+    )
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("OrderTitle", parent=styles["Title"],
+                                 fontName="DejaVu-Bold", fontSize=16)
+    section_style = ParagraphStyle("OrderSection", parent=styles["Heading2"],
+                                   fontName="DejaVu-Bold", fontSize=11)
+    cell = ParagraphStyle("OrderCell", parent=styles["Normal"], fontName="DejaVu", fontSize=8)
+    cell_bold = ParagraphStyle("OrderCellBold", parent=cell, fontName="DejaVu-Bold")
+
+    def _kv_table(rows, left_w=50 * mm):
+        t = Table([[Paragraph(k, cell_bold), Paragraph(str(v), cell)] for k, v in rows],
+                  colWidths=[left_w, None])
+        t.setStyle(TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ]))
+        return t
+
+    story = [Paragraph("Order Summary", title_style), Spacer(1, 6)]
+    story.append(_kv_table([
+        ("MO Number", header.get("mo_number") or "-"),
+        ("Specification", header.get("spec_string") or "-"),
+        ("Machine(s)", header.get("machines") or "-"),
+        ("Production Period", header.get("date_range") or "-"),
+        ("Operator(s)", header.get("operator") or "-"),
+    ]))
+    story.append(Spacer(1, 10))
+
+    # Production rollup
+    story.append(Paragraph("Production", section_style))
+    story.append(_kv_table([
+        ("Reports", production.get("report_count") or 0),
+        ("Total Boxes", production.get("total_boxes") or 0),
+        ("Total Rods", production.get("total_rods") or 0),
+        ("Total Waste (kg)", _fmt_num(production.get("total_waste_kg"))),
+        ("Acetate (kg)", _fmt_num(materials.get("acetate"))),
+        ("Paper (Bob)", _fmt_num(materials.get("paper"))),
+        ("PVA / Cold Glue (kg)", _fmt_num(materials.get("pva"))),
+        ("Hot Melt Glue (kg)", _fmt_num(materials.get("hm"))),
+        ("Triacetin (kg)", _fmt_num(materials.get("triacetin"))),
+    ]))
+    story.append(Spacer(1, 10))
+
+    # Consolidated quality matrix
+    story.append(Paragraph("Consolidated Quality", section_style))
+    from app.quality_stats import CERTIFICATE_PARAMS
+    cert = quality.get("certificate") or []
+    cert_by_param = {str(r.get("parameter")): r for r in cert}
+    qh = ["Parameter", "Unit", "Nominal", "Lower SL", "Upper SL", "Mean", "SD", "N"]
+    qrows = [qh]
+    for param, label, unit in CERTIFICATE_PARAMS:
+        r = cert_by_param.get(param) or {}
+        qrows.append([
+            label, r.get("unit") or unit,
+            _fmt_num(r.get("nominal")), _fmt_num(r.get("lower")), _fmt_num(r.get("upper")),
+            _fmt_num(r.get("mean")), _fmt_num(r.get("sd")),
+            str(r.get("n") or ""),
+        ])
+    qt = Table(qrows, repeatRows=1)
+    qt.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#333333")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("FONTNAME", (0, 0), (-1, -1), "DejaVu"),
+        ("FONTNAME", (0, 0), (-1, 0), "DejaVu-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("ALIGN", (3, 1), (-1, -1), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+    ]))
+    story.append(qt)
+    story.append(Spacer(1, 4))
+    story.append(Paragraph(
+        f"Tested rods: {quality.get('rods_total') or 0} · "
+        f"Rejected: {quality.get('rods_rejected') or 0} · "
+        f"Status: {quality.get('status') or '-'}",
+        cell,
+    ))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+def render_shift_quality_pdf(data: dict) -> bytes:
+    """Render the Shift Quality Report (certificate-style) as PDF bytes.
+
+    ``data`` keys:
+        header:         {po_number, spec_string, machine, date, interval, operator}
+        certificate:    [{parameter, nominal, lower, upper, mean, sd, ...}]
+        manual_checks:  [{time, operator, length_mm, weight_g, glue_seam,
+                          cut_quality, visual, notes}]
+        remarks:        str
+    """
+    _register_dejavu_fonts()
+
+    header = data.get("header") or {}
+    certificate = data.get("certificate") or []
+    manual_checks = data.get("manual_checks") or []
+    remarks = (data.get("remarks") or "").strip()
+    cert_by_param = {str(r.get("parameter")): r for r in certificate if isinstance(r, dict)}
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4, topMargin=15 * mm, bottomMargin=15 * mm,
+        leftMargin=14 * mm, rightMargin=14 * mm)
+
+    title_style = ParagraphStyle("QRTitle", fontSize=15, leading=18,
+                                 alignment=TA_CENTER, fontName="DejaVu-Bold", spaceAfter=10)
+    section_style = ParagraphStyle("QRSection", fontSize=10, leading=13,
+                                   fontName="DejaVu-Bold", spaceBefore=8, spaceAfter=4)
+    cell = ParagraphStyle("QRCell", fontSize=8.5, leading=11, fontName="DejaVu")
+    cell_bold = ParagraphStyle("QRCellBold", fontSize=8.5, leading=11, fontName="DejaVu-Bold")
+
+    story = [Paragraph("QUALITY REPORT", title_style)]
+
+    # --- Header ---
+    story.append(Paragraph("Header", section_style))
+    hdr_rows = [
+        ("MO Number", str(header.get("po_number") or "-")),
+        ("Lot Number", str(header.get("lot_number") or "-")),
+        ("Specification", str(header.get("spec_string") or "-")),
+        ("Machine", str(header.get("machine") or "-")),
+        ("Date", str(header.get("date") or "-")),
+        ("Shift Interval", str(header.get("interval") or "-")),
+        ("Operator", str(header.get("operator") or "-")),
+    ]
+    hdr = Table(
+        [[Paragraph(k, cell_bold), Paragraph(v, cell)] for k, v in hdr_rows],
+        colWidths=[32 * mm, None])
+    hdr.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 1),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+    ]))
+    story.append(hdr)
+
+    # --- Measurement Results ---
+    story.append(Paragraph("Measurement Results", section_style))
+    t_header = ["#", "Parameter", "Measure", "Nominal", "Lower SL", "Upper SL", "Mean", "SD"]
+    t_rows = [t_header]
+    for idx, (key, label, unit) in enumerate(_PARAM_META, start=1):
+        row = cert_by_param.get(key) or {}
+        t_rows.append([
+            str(idx), label, unit,
+            _fmt_num(row.get("nominal")), _fmt_num(row.get("lower")), _fmt_num(row.get("upper")),
+            _fmt_num(row.get("mean")), _fmt_num(row.get("sd")),
+        ])
+    tbl = Table(t_rows, repeatRows=1, colWidths=[8 * mm, None, 15 * mm, 14 * mm, 14 * mm, 14 * mm, 14 * mm, 14 * mm])
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#333333")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("FONTNAME", (0, 0), (-1, -1), "DejaVu"),
+        ("FONTNAME", (0, 0), (-1, 0), "DejaVu-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+        ("ALIGN", (3, 1), (-1, -1), "RIGHT"),
+        ("ALIGN", (0, 0), (0, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    story.append(tbl)
+
+    # --- Manual checks log ---
+    story.append(Paragraph("In-Process Manual Checks", section_style))
+    m_header = ["#", "Time", "Weight (g)", "Length (mm)", "Hardness (%)",
+                "Glue Seam", "Cut Quality", "Visual", "Notes"]
+    m_rows = [m_header]
+    if not manual_checks:
+        m_rows.append(["", "No manual checks recorded for this shift", "", "", "", "", "", "", ""])
+    else:
+        for idx, c in enumerate(manual_checks, start=1):
+            m_rows.append([
+                str(idx),
+                str(c.get("time") or "-"),
+                _fmt_num(c.get("weight_g")),
+                _fmt_num(c.get("length_mm")),
+                _fmt_num(c.get("hardness")),
+                _flag(c.get("glue_seam")),
+                _flag(c.get("cut_quality")),
+                _flag(c.get("visual")),
+                str(c.get("notes") or ""),
+            ])
+
+    # Summary footer: mean of Weight / Length / Hardness across manual checks.
+    if manual_checks:
+        def _mean(vals):
+            vals = [v for v in vals if isinstance(v, (int, float))]
+            return (sum(vals) / len(vals)) if vals else None
+        m_rows.append([
+            "", "Mean",
+            _fmt_num(_mean([c.get("weight_g") for c in manual_checks])),
+            _fmt_num(_mean([c.get("length_mm") for c in manual_checks])),
+            _fmt_num(_mean([c.get("hardness") for c in manual_checks])),
+            "", "", "", "",
+        ])
+
+    mtbl = Table(m_rows, repeatRows=1, colWidths=[8 * mm, 14 * mm, 15 * mm, 15 * mm, 15 * mm, 17 * mm, 17 * mm, 16 * mm, None])
+    mtbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#333333")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("FONTNAME", (0, 0), (-1, -1), "DejaVu"),
+        ("FONTNAME", (0, 0), (-1, 0), "DejaVu-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("ALIGN", (0, 0), (0, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+    ]))
+    story.append(mtbl)
+
+    # --- Trend charts (diameter + pressure drop, spec limits) ---
+    series = data.get("series") or {}
+    charts = []
+    for key, label in (("diameter", "Diameter"), ("pd", "Pressure Drop")):
+        values = series.get(key) or []
+        if len(values) < 2:
+            continue
+        spec = cert_by_param.get(key) or {}
+        chart = _trend_chart(
+            values, spec.get("lower"), spec.get("upper"), spec.get("nominal"))
+        if chart is not None:
+            charts.append((f"{label} trend", chart))
+    if charts:
+        story.append(Paragraph("Trend Charts", section_style))
+        for label, chart in charts:
+            story.append(Paragraph(label, cell_bold))
+            story.append(chart)
+            story.append(Spacer(1, 4))
+
+    if remarks:
+        story.append(Paragraph("Remarks", section_style))
+        story.append(Paragraph(remarks, cell))
+
+    doc.build(story)
+    return buf.getvalue()
 
 
 class PDFReportGenerator:
@@ -368,6 +799,21 @@ class PDFReportGenerator:
     # ==================================================================
     # generate_audit_pdf — matches Web App PO Audit format
     # ==================================================================
+    def generate_pdf_bytes(self, report_data: dict):
+        """Render the Production Report PDF and return its bytes (for Odoo attach).
+
+        Reuses ``generate_pdf`` (identical layout); the PDF is archived to the normal
+        folder and read back as bytes. Returns ``None`` on failure.
+        """
+        result = self.generate_pdf(report_data)
+        if not result.get("success"):
+            return None
+        try:
+            with open(result["path"], "rb") as fh:
+                return fh.read()
+        except OSError:
+            return None
+
     def generate_audit_pdf(self, po, reports: list) -> dict:
         """
         Generate an audit PDF for a Purchase Order matching the web app format.

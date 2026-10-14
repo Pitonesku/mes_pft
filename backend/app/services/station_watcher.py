@@ -25,13 +25,14 @@ import os
 import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, List, Optional
 
 from sqlalchemy.orm import Session
 
 from app import models
+from app.config import local_to_utc
 from app.services import shift_resolver
-from app.services.parsers.quantum_csv import parse_bytes
+from app.services.parsers import profiles
 
 logger = logging.getLogger(__name__)
 
@@ -41,13 +42,13 @@ DEFAULT_STABLE_SECONDS = 3
 
 @dataclass
 class WatcherConfig:
-    watch_path: str
-    archive_path: str
-    error_path: str
+    watch_paths: List[str]
     scan_interval: int = DEFAULT_SCAN_INTERVAL
     stable_seconds: int = DEFAULT_STABLE_SECONDS
     source: str = "quantum_neo"
     alias_field: str = "maker"  # station column used to identify the machine
+    mo_field: str = "batch_description"  # station column carrying the MO number
+    dynamic_paths: Optional[Callable[[], List[str]]] = None
 
 
 class StationWatcher:
@@ -64,7 +65,7 @@ class StationWatcher:
         producer = asyncio.create_task(self._scan_loop())
         consumer = asyncio.create_task(self._consume_loop())
         self._tasks = (producer, consumer)
-        logger.info("StationWatcher started on %s", self.config.watch_path)
+        logger.info("StationWatcher started on %s", self.config.watch_paths)
 
     async def stop(self) -> None:
         self._running = False
@@ -76,12 +77,25 @@ class StationWatcher:
         """Enqueue a single file (used by the manual ingest endpoint)."""
         await self._queue.put(path)
 
+    def _current_paths(self) -> List[str]:
+        """Union of static (env) watch paths and DB pull-profile watch_paths."""
+        paths = list(self.config.watch_paths)
+        if self.config.dynamic_paths is not None:
+            try:
+                for p in self.config.dynamic_paths():
+                    if p and p not in paths:
+                        paths.append(p)
+            except Exception:  # noqa: BLE001 - a DB hiccup must not kill scanning
+                logger.exception("Failed to read dynamic pull paths")
+        return paths
+
     async def _scan_loop(self) -> None:
         while self._running:
-            if os.path.isdir(self.config.watch_path):
-                for name in os.listdir(self.config.watch_path):
-                    if name.lower().endswith((".csv", ".xml")):
-                        await self._queue.put(os.path.join(self.config.watch_path, name))
+            for path in self._current_paths():
+                if os.path.isdir(path):
+                    for name in os.listdir(path):
+                        if name.lower().endswith((".csv", ".xml")):
+                            await self._queue.put(os.path.join(path, name))
             await asyncio.sleep(self.config.scan_interval)
 
     async def _consume_loop(self) -> None:
@@ -102,9 +116,12 @@ class StationWatcher:
         if data is None:
             return
 
-        sample = parse_bytes(data)
         digest = hashlib.sha256(data).hexdigest()
         md5 = hashlib.md5(data).hexdigest()
+
+        base = os.path.dirname(path) or "."
+        archive_path = os.path.join(base, "Archive")
+        error_path = os.path.join(base, "Errors")
 
         session: Session = self.session_factory()
         try:
@@ -117,16 +134,19 @@ class StationWatcher:
                 .first()
             )
             if existing:
-                self._move(path, self.config.archive_path)
+                self._move(path, archive_path)
                 return
 
+            sample, _ = profiles.parse_file_with_profile(
+                session, data, self.config.source, self.config.mo_field
+            )
             self._persist(session, sample, digest, md5, os.path.basename(path))
             session.commit()
-            self._move(path, self.config.archive_path)
+            self._move(path, archive_path)
         except Exception:
             session.rollback()
             self._record_error(digest, md5, os.path.basename(path), traceback.format_exc())
-            self._move(path, self.config.error_path)
+            self._move(path, error_path)
             raise
         finally:
             session.close()
@@ -136,9 +156,7 @@ class StationWatcher:
             session, self.config.source, self.config.alias_field, sample.maker
         )
 
-        produced_at = sample.produced_on or datetime.now(timezone.utc)
-        if produced_at.tzinfo is None:
-            produced_at = produced_at.replace(tzinfo=timezone.utc)
+        produced_at = local_to_utc(sample.produced_on) or datetime.now(timezone.utc)
 
         kind, is_non_production = shift_resolver.classify_sample(sample.maker)
         if is_non_production:
@@ -148,7 +166,17 @@ class StationWatcher:
 
         run_id: Optional[int] = None
         if shift_id is not None:
-            run_id, _ = shift_resolver.resolve_run(session, shift_id, produced_at, sample.mo_ref)
+            run_id, run_status = shift_resolver.resolve_run(
+                session, shift_id, produced_at, sample.mo_ref, machine_id=machine_id
+            )
+            if run_status == shift_resolver.LINK_MO_MISMATCH:
+                # Keep the rods (shift is known) but surface the label problem for review
+                # instead of silently losing the MO attribution.
+                link_status = shift_resolver.LINK_MO_MISMATCH
+                logger.warning(
+                    "Station MO label %r matches no run of shift %s (machine %s)",
+                    sample.mo_ref, shift_id, machine_id,
+                )
 
         db_sample = models.QualitySample(
             shift_id=shift_id,
@@ -164,9 +192,10 @@ class StationWatcher:
             mo_ref=sample.mo_ref,
             brand=sample.brand,
             operator=sample.operator,
+            comments=sample.reserve_1,
             produced_at=produced_at,
-            batch_started_at=sample.batch_start,
-            batch_ended_at=sample.batch_end,
+            batch_started_at=local_to_utc(sample.batch_start),
+            batch_ended_at=local_to_utc(sample.batch_end),
             rods_declared=sample.rods_count,
             file_sha256=sha256,
             file_md5=md5,

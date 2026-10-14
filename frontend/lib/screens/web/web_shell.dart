@@ -43,12 +43,14 @@ class _WebShellState extends State<WebShell> {
   QualityRequest? _qualityRequest;
   int? _reportId;
   _Section? _reportReturnSection;
+  String? _orderFilter;
 
   @override
   void initState() {
     super.initState();
     AppNavigation.qualityRequest.addListener(_onQualityRequest);
     AppNavigation.reportRequest.addListener(_onReportRequest);
+    AppNavigation.orderRequest.addListener(_onOrderRequest);
     _applyInitialFragment();
   }
 
@@ -56,6 +58,7 @@ class _WebShellState extends State<WebShell> {
   void dispose() {
     AppNavigation.qualityRequest.removeListener(_onQualityRequest);
     AppNavigation.reportRequest.removeListener(_onReportRequest);
+    AppNavigation.orderRequest.removeListener(_onOrderRequest);
     super.dispose();
   }
 
@@ -66,7 +69,10 @@ class _WebShellState extends State<WebShell> {
     setState(() {
       _qualityRequest = req;
       _active = _Section.quality;
+      _reportId = null;
+      _reportReturnSection = null;
     });
+    setHash('#/quality');
   }
 
   void _onReportRequest() {
@@ -78,6 +84,20 @@ class _WebShellState extends State<WebShell> {
       _reportId = id;
       _active = _Section.reports;
     });
+  }
+
+  void _onOrderRequest() {
+    final po = AppNavigation.orderRequest.value;
+    if (po == null) return;
+    AppNavigation.orderRequest.value = null;
+    setState(() {
+      _orderFilter = po;
+      _reportId = null;
+      _qualityRequest = null;
+      _reportReturnSection = null;
+      _active = _Section.orders;
+    });
+    setHash('#/orders');
   }
 
   void _applyInitialFragment() {
@@ -166,7 +186,7 @@ class _WebShellState extends State<WebShell> {
 
   List<(_Section, IconData, IconData, String)> get _navItems => [
     (_Section.dashboard,      Icons.dashboard_outlined,         Icons.dashboard,              'Dashboard'),
-    (_Section.orders,         Icons.receipt_long_outlined,      Icons.receipt_long,           'Orders'),
+    (_Section.orders,         Icons.receipt_long_outlined,      Icons.receipt_long,           'Manufacturing Orders'),
     (_Section.reports,        Icons.bar_chart_outlined,         Icons.bar_chart,              'Reports'),
     (_Section.materials,      Icons.inventory_2_outlined,       Icons.inventory_2,            'Materials'),
     (_Section.quality,        Icons.biotech_outlined,           Icons.biotech,                'Quality Control'),
@@ -182,7 +202,7 @@ class _WebShellState extends State<WebShell> {
 
   Widget _buildBody() => switch (_active) {
     _Section.dashboard      => DashboardScreen(user: widget.currentUser),
-    _Section.orders         => OrdersScreen(user: widget.currentUser),
+    _Section.orders         => OrdersScreen(key: ValueKey('orders-$_orderFilter'), user: widget.currentUser, initialFilter: _orderFilter),
     _Section.reports        => ReportsScreen(user: widget.currentUser),
     _Section.materials      => MaterialsScreen(user: widget.currentUser),
     _Section.quality       => QualityControlScreen(initial: _qualityRequest),
@@ -287,6 +307,7 @@ class _WebShellState extends State<WebShell> {
                   ? _buildBody()
                   : ReportFullScreen(
                       reportId: _reportId!,
+                      canModify: widget.currentUser.canModifyPO,
                       onBack: () => setState(() {
                         _active = _reportReturnSection ?? _Section.reports;
                         _reportId = null;

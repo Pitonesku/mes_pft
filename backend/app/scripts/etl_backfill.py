@@ -34,7 +34,9 @@ from app import models
 from app.database import SessionLocal
 from app.services import shift_resolver
 
-PLANT_TZ = ZoneInfo("Europe/Budapest")
+from app.config import get_plant_timezone
+
+PLANT_TZ = get_plant_timezone()
 SOURCE = "quantum_neo"
 ALIAS_FIELD = "maker"
 OTHER_MAKER = "Other"
@@ -108,10 +110,37 @@ def load_batches(con):
     return out
 
 
-def load_measurement_groups(con):
-    """measurements grouped by (instrument_id, batch_id, time)."""
+def time_window(since=None, until=None):
+    """Turn inclusive ``YYYY-MM-DD`` dates into ``[lower, upper)`` station-time bounds.
+
+    ``measurements.time`` is naive local ISO text, so plain string comparison is
+    chronological. ``until`` is INCLUSIVE of the whole day (upper bound = next midnight).
+    Returns ``(lower, upper)``; either may be None (unbounded).
+    """
+    lower = upper = None
+    if since:
+        lower = datetime.strptime(since, "%Y-%m-%d").strftime("%Y-%m-%d 00:00:00")
+    if until:
+        nxt = datetime.strptime(until, "%Y-%m-%d") + timedelta(days=1)
+        upper = nxt.strftime("%Y-%m-%d 00:00:00")
+    return lower, upper
+
+
+def load_measurement_groups(con, since=None, until=None):
+    """measurements grouped by (instrument_id, batch_id, time), optionally windowed."""
+    lower, upper = time_window(since, until)
+    where, params = [], []
+    if lower:
+        where.append("time >= ?")
+        params.append(lower)
+    if upper:
+        where.append("time < ?")
+        params.append(upper)
+    sql = "SELECT * FROM measurements"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
     groups = {}
-    for r in con.execute("SELECT * FROM measurements ORDER BY rowid"):
+    for r in con.execute(sql + " ORDER BY rowid", params):
         key = (r["instrument_id"], r["batch_id"], r["time"])
         groups.setdefault(key, []).append(r)
     return groups
@@ -244,10 +273,10 @@ def _kind_of(maker):
     return "CALIBRATION" if maker == OTHER_MAKER else "PRODUCTION"
 
 
-def load_quality_data(session, sqlite_path, aliases):
+def load_quality_data(session, sqlite_path, aliases, since=None, until=None):
     con = open_sqlite(sqlite_path)
     batches = load_batches(con)
-    groups = load_measurement_groups(con)
+    groups = load_measurement_groups(con, since, until)
 
     sample_count = 0
     measurement_count = 0
@@ -333,18 +362,66 @@ def load_quality_data(session, sqlite_path, aliases):
 
 # ---------------------------------------------------------------------------
 
+def assign_single_runs(session):
+    """Set ``run_id`` on linked samples/rods whose shift has EXACTLY ONE run.
+
+    Additive and conservative: only rows with ``run_id IS NULL`` and a shift are
+    touched. Shifts with several runs are left alone (a guess would put rods into the
+    wrong run's statistics) and are returned for manual review.
+    Returns ``(samples_updated, rods_updated, ambiguous_shift_ids)``.
+    """
+    from sqlalchemy import text
+
+    one_run = (
+        "(SELECT shift_id, MIN(id) AS run_id FROM production_runs "
+        "GROUP BY shift_id HAVING COUNT(*) = 1)"
+    )
+    s_upd = session.execute(text(
+        f"UPDATE quality_samples q SET run_id = r.run_id FROM {one_run} r "
+        "WHERE q.shift_id = r.shift_id AND q.run_id IS NULL"
+    )).rowcount
+    m_upd = session.execute(text(
+        f"UPDATE quality_measurements q SET run_id = r.run_id FROM {one_run} r "
+        "WHERE q.shift_id = r.shift_id AND q.run_id IS NULL"
+    )).rowcount
+    ambiguous = [row[0] for row in session.execute(text(
+        "SELECT DISTINCT q.shift_id FROM quality_samples q WHERE q.shift_id IS NOT NULL "
+        "AND q.run_id IS NULL ORDER BY 1"
+    ))]
+    session.commit()
+    return s_upd, m_upd, ambiguous
+
+
 def main():
     ap = argparse.ArgumentParser(description="Backfill unified quality schema from measurements.db")
     ap.add_argument("sqlite", nargs="?", default=None,
                     help="path to measurements.db (default: <repo>/measurements.db)")
+    ap.add_argument("--since", default=None, metavar="YYYY-MM-DD",
+                    help="load rods from this day on (inclusive)")
+    ap.add_argument("--until", default=None, metavar="YYYY-MM-DD",
+                    help="load rods up to and including this whole day")
+    ap.add_argument("--no-assign-runs", action="store_true",
+                    help="do not assign run_id from the report time windows")
+    ap.add_argument("--force", action="store_true",
+                    help="allow loading when quality_samples is not empty (appends!)")
     args = ap.parse_args()
 
     sqlite_path = args.sqlite or str(
         pathlib.Path(__file__).resolve().parent.parent.parent.parent / "measurements.db"
     )
+    lower, upper = time_window(args.since, args.until)
+    print(f"window: [{lower or 'start'} , {upper or 'end'})")
 
     session = SessionLocal()
     try:
+        from sqlalchemy import func
+
+        existing = session.query(func.count(models.QualitySample.id)).scalar()
+        if existing and not args.force:
+            print(f"ABORT: quality_samples already holds {existing} rows. This backfill "
+                  "appends and would duplicate them; use --force only if that is intended.")
+            sys.exit(2)
+
         con = open_sqlite(sqlite_path)
         makers = distinct_makers(con)
         con.close()
@@ -353,13 +430,28 @@ def main():
         aliases = build_machine_aliases(session, makers)
         print(f"machine aliases (maker -> machine_id): {aliases}")
 
-        shifts, run_count = derive_shifts_and_runs(session)
-        print(f"shift sessions derived: {len(shifts)}, runs: {run_count}")
+        legacy_shifts = session.query(func.count(models.ShiftSession.id)).scalar()
+        if legacy_shifts:
+            print(f"shift sessions already present ({legacy_shifts}): skipping derivation")
+        else:
+            shifts, run_count = derive_shifts_and_runs(session)
+            print(f"shift sessions derived: {len(shifts)}, runs: {run_count}")
 
-        samples, measurements, stats = load_quality_data(session, sqlite_path, aliases)
+        samples, measurements, stats = load_quality_data(
+            session, sqlite_path, aliases, args.since, args.until
+        )
         print(f"quality samples: {samples}")
         print(f"quality measurements: {measurements}")
         print(f"link stats: {stats}")
+
+        if not args.no_assign_runs:
+            # Report time windows (+ station label tie-break), see assign_runs.py.
+            from app.scripts import assign_runs
+
+            a_rods, a_samples, a_stats, _per_po, left = assign_runs.plan(session)
+            r_upd, s_upd = assign_runs.apply(session, a_rods, a_samples)
+            print(f"run_id assigned by report time windows: samples={s_upd}, rods={r_upd}")
+            print(f"stats: {dict(a_stats)}; left without a run: {len(left)} rod(s)")
     finally:
         session.close()
 

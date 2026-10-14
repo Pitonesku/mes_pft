@@ -18,6 +18,7 @@ time seed_initial_admin() is called the schema should already be correct.
 import os
 import importlib
 import bcrypt
+from typing import Optional
 from sqlalchemy import text
 
 if __package__:
@@ -200,5 +201,43 @@ def seed_telegram_admin() -> None:
         db.rollback()
         print(f"err [Seed] Telegram admin seeding failed: {exc}")
         # Do NOT raise — seeding failure must not crash the server
+    finally:
+        db.close()
+
+
+# =============================================================================
+# Station ingest service account (runs every startup, idempotent)
+# =============================================================================
+
+def seed_station_ingest() -> Optional[int]:
+    """Create the ``station_ingest`` service user if missing.
+
+    The account has a locked password and no role/permissions; it exists only so
+    a validated station API key can resolve to a real (low-privilege) user object.
+    Returns the user id, or None on failure (never raises — seeding must not
+    crash the server).
+    """
+    db = SessionLocal()
+    try:
+        existing = db.execute(
+            text("SELECT id FROM users WHERE username = 'station_ingest'")
+        ).fetchone()
+        if existing:
+            return existing[0]
+
+        db.execute(text("""
+            INSERT INTO users (username, email, password_hash, is_inactive)
+            VALUES ('station_ingest', 'station_ingest@factory.local', :pw, FALSE)
+        """), {"pw": "!locked"})
+        db.commit()
+        user_id = db.execute(
+            text("SELECT id FROM users WHERE username = 'station_ingest'")
+        ).scalar()
+        print(f"ok [Seed] station_ingest service account created (id={user_id}).")
+        return user_id
+    except Exception as exc:
+        db.rollback()
+        print(f"err [Seed] station_ingest seeding failed: {exc}")
+        return None
     finally:
         db.close()

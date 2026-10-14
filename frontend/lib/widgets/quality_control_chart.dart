@@ -33,7 +33,7 @@ class QualityControlChart extends StatelessWidget {
       points = points.where((p) => !p.rejected).toList();
     }
     if (points.isEmpty) {
-      return _frame(Center(child: Text(showOutliers ? 'No data' : 'No data (outliers hidden)',
+      return _frame(null, Center(child: Text(showOutliers ? 'No data' : 'No data (outliers hidden)',
           style: const TextStyle(color: Colors.grey, fontSize: 12))));
     }
 
@@ -75,11 +75,18 @@ class QualityControlChart extends StatelessWidget {
     final maxX = points.last.x;
     final span = maxX - minX;
     final padX = (span * 0.12) > (30 * 60 * 1000) ? (span * 0.12) : (30 * 60 * 1000.0);
-    final chartMinX = minX - padX;
+    final rawMinX = minX - padX;
     final chartMaxX = maxX + padX;
+    final tickStep = _tickStepMs(chartMaxX - rawMinX);
+    // fl_chart draws ticks at minX + k*interval: snap minX down to the tick grid so
+    // labels land on whole hours (06:00, 09:00 ...) instead of 06:34, 07:34 ...
+    final chartMinX = (rawMinX / tickStep).floorToDouble() * tickStep;
     final midnights = _midnights(chartMinX, chartMaxX);
+    final firstDate = _dateLabel(minX);
+    final lastDate = _dateLabel(maxX);
+    final dateSuffix = firstDate == lastDate ? firstDate : '$firstDate → $lastDate';
 
-    return _frame(LineChart(
+    return _frame(dateSuffix, LineChart(
       LineChartData(
         minX: chartMinX,
         maxX: chartMaxX,
@@ -98,9 +105,13 @@ class QualityControlChart extends StatelessWidget {
           )),
           bottomTitles: AxisTitles(sideTitles: SideTitles(
             showTitles: true,
-            reservedSize: 24,
-            interval: 3600 * 1000,
-            getTitlesWidget: (v, meta) => _bottomTitle(v),
+            reservedSize: 34,
+            interval: tickStep,
+            getTitlesWidget: (v, meta) {
+              // The max edge label can collide with its neighbour; skip it.
+              if (v == meta.max) return const SizedBox.shrink();
+              return _bottomTitle(v, tickStep);
+            },
           )),
         ),
         extraLinesData: ExtraLinesData(
@@ -148,11 +159,30 @@ class QualityControlChart extends StatelessWidget {
     ));
   }
 
-  Widget _bottomTitle(double value) {
+  /// Tick spacing chosen from the visible span so there are at most ~8 labels.
+  double _tickStepMs(double spanMs) {
+    const hour = 3600 * 1000.0;
+    const steps = [1, 2, 3, 6, 12, 24, 48, 72, 168];
+    for (final h in steps) {
+      if (spanMs / (h * hour) <= 8) return h * hour;
+    }
+    return 168 * hour;
+  }
+
+  Widget _bottomTitle(double value, double step) {
     final dt = DateTime.fromMillisecondsSinceEpoch(value.toInt(), isUtc: true);
     final hh = dt.hour.toString().padLeft(2, '0');
     final mm = dt.minute.toString().padLeft(2, '0');
-    return Text('$hh:$mm', style: const TextStyle(fontSize: 9, color: Colors.black54));
+    final date = _dateLabel(value).substring(5); // MM-DD
+    const style = TextStyle(fontSize: 9, color: Colors.black54);
+    if (step >= 24 * 3600 * 1000.0) {
+      return Text(date, style: style);
+    }
+    // Hours + a second line with the date, so one-day charts still show the day.
+    return Column(mainAxisSize: MainAxisSize.min, children: [
+      Text('$hh:$mm', style: style),
+      Text(date, style: const TextStyle(fontSize: 8, color: Colors.black38)),
+    ]);
   }
 
   List<LineTooltipItem?> _tooltipItems(List<LineBarSpot> spots, Map<double, _Point> byX, Map<String, dynamic> params) {
@@ -179,11 +209,12 @@ class QualityControlChart extends StatelessWidget {
     }).toList();
   }
 
-  Widget _frame(Widget child) => Container(
+  Widget _frame(String? dateText, Widget child) => Container(
     padding: const EdgeInsets.all(8),
     decoration: BoxDecoration(color: Colors.white, border: Border.all(color: Colors.black12), borderRadius: BorderRadius.circular(8)),
     child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text(title, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+      Text(dateText == null ? title : '$title · $dateText',
+          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
       const SizedBox(height: 4),
       SizedBox(height: height, width: double.infinity, child: child),
     ]),
@@ -192,7 +223,9 @@ class QualityControlChart extends StatelessWidget {
   List<double> _midnights(double minX, double maxX) {
     final out = <double>[];
     final start = DateTime.fromMillisecondsSinceEpoch(minX.toInt(), isUtc: true);
-    var d = DateTime(start.year, start.month, start.day);
+    // x values are plant wall-clock time encoded as UTC, so build midnights in UTC
+    // (a local DateTime would shift every divider by the browser's UTC offset).
+    var d = DateTime.utc(start.year, start.month, start.day);
     while (d.millisecondsSinceEpoch <= maxX.toInt()) {
       if (d.millisecondsSinceEpoch >= minX.toInt()) out.add(d.millisecondsSinceEpoch.toDouble());
       d = d.add(const Duration(days: 1));

@@ -60,7 +60,7 @@ SQLALCHEMY_DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_P
 _masked_user = DB_USER[:2] + "***" if len(DB_USER) > 2 else "***"
 print(f"[Database] Connecting to: postgresql://{_masked_user}:***@{DB_HOST}:{DB_PORT}/{DB_NAME}")
 
-engine = create_engine(SQLALCHEMY_DATABASE_URL, pool_pre_ping=True)
+engine = create_engine(SQLALCHEMY_DATABASE_URL, pool_pre_ping=True, connect_args={"options": "-c timezone=utc"})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
@@ -89,7 +89,7 @@ else:
     AI_SQLALCHEMY_URL = (
         f"postgresql://{AI_DB_USER}:{AI_DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
     )
-    ai_engine = create_engine(AI_SQLALCHEMY_URL, pool_pre_ping=True)
+    ai_engine = create_engine(AI_SQLALCHEMY_URL, pool_pre_ping=True, connect_args={"options": "-c timezone=utc"})
     SessionAI = sessionmaker(autocommit=False, autoflush=False, bind=ai_engine)
     _masked_ai = AI_DB_USER[:2] + "***" if len(AI_DB_USER) > 2 else "***"
     print(f"[Database] AI read-only session: postgresql://{_masked_ai}:***@{DB_HOST}:{DB_PORT}/{DB_NAME}")

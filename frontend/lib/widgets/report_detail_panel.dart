@@ -7,13 +7,26 @@ import 'package:printing/printing.dart';
 import 'package:url_launcher/link.dart';
 
 import '../core/app_navigation.dart';
+import '../api_service.dart';
 import 'quality_summary_card.dart';
+import 'report_verification_card.dart';
+import 'report_edit_form.dart';
+import 'report_history_dialog.dart';
 
 class ReportDetailPanel extends StatelessWidget {
   final Map<String, dynamic> report;
   final VoidCallback onClose;
   final VoidCallback? onArchiveToggle;
-  const ReportDetailPanel({super.key, required this.report, required this.onClose, this.onArchiveToggle});
+  final bool canVerify;
+  final VoidCallback? onVerified;
+  const ReportDetailPanel({
+    super.key,
+    required this.report,
+    required this.onClose,
+    this.onArchiveToggle,
+    this.canVerify = false,
+    this.onVerified,
+  });
 
   String _fmt(dynamic v, {int dec = 2}) {
     if (v == null) return '-';
@@ -185,6 +198,26 @@ class ReportDetailPanel extends StatelessWidget {
     await Printing.layoutPdf(onLayout: (_) => pdf.save(), name: 'report_${report["id"]}.pdf');
   }
 
+  Future<void> _edit(BuildContext context) async {
+    final payload = await showReportEditOverlay(context, report);
+    if (payload == null || payload.isEmpty) return;
+    final rawId = report['id'];
+    if (rawId == null) return;
+    final id = rawId is int ? rawId : int.tryParse(rawId.toString());
+    if (id == null) return;
+    final ok = await ApiService.updateReport(id, payload);
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(ok ? 'Report updated — re-verification required.' : 'Failed to update report.'),
+      backgroundColor: ok ? Colors.green : Colors.red,
+    ));
+    if (ok) onVerified?.call();
+  }
+
+  void _history(BuildContext context) {
+    showReportHistoryDialog(context, report, onReverted: onVerified);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -214,6 +247,17 @@ class ReportDetailPanel extends StatelessWidget {
               tooltip: 'Print / Save PDF',
               onPressed: () => _printPdf(context),
               padding: EdgeInsets.zero, constraints: const BoxConstraints()),
+            IconButton(
+              icon: const Icon(Icons.history, size: 18, color: Colors.deepPurple),
+              tooltip: 'History',
+              onPressed: () => _history(context),
+              padding: EdgeInsets.zero, constraints: const BoxConstraints()),
+            if (canVerify)
+              IconButton(
+                icon: const Icon(Icons.edit, size: 18, color: Colors.deepPurple),
+                tooltip: 'Edit Report',
+                onPressed: () => _edit(context),
+                padding: EdgeInsets.zero, constraints: const BoxConstraints()),
             if (report['id'] != null)
               Link(
                 uri: Uri.parse('#/reports/${report['id']}'),
@@ -238,6 +282,10 @@ class ReportDetailPanel extends StatelessWidget {
             _row('Shift',      '${report['shift_name'] ?? '-'} (${report['shift_time_range'] ?? ''})'),
             _row('Machine',    report['machine_name']    ?? '-'),
             _row('PO Number',  report['po_number']       ?? '-', vc: Colors.deepPurple),
+
+            _sec('VERIFICATION', [
+              ReportVerificationCard(report: report, canVerify: canVerify, onVerified: onVerified),
+            ]),
 
             _sec('TECHNICAL SPECIFICATION', [
               _row('Lot Number',       report['lot_number']  ?? '-'),
@@ -303,3 +351,5 @@ class ReportDetailPanel extends StatelessWidget {
     );
   }
 }
+
+

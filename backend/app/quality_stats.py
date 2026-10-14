@@ -36,6 +36,15 @@ STATUS_FAIL = "FAIL"
 STATUS_NOT_MEASURED = "NOT_MEASURED"
 STATUS_NO_DATA = "NO_DATA"
 
+# Fixed certificate table order, label and unit (independent of spec insertion order).
+CERTIFICATE_PARAMS = [
+    ("length", "Length", "mm"),
+    ("diameter", "Diameter", "mm"),
+    ("pd", "PD", "mm WG"),
+    ("hardness", "Hardness", "%"),
+    ("weight", "Weight", "mg"),
+]
+
 
 @dataclass(frozen=True)
 class ParamSpec:
@@ -127,7 +136,12 @@ def compute_run_stats(
     parameters: Dict[str, Dict[str, Any]] = {}
     for name, spec in specs.items():
         values = [v for v in (_num(r.get(name)) for r in kept) if v is not None]
-        entry: Dict[str, Any] = {"nominal": spec.nominal, "lower": spec.lower, "upper": spec.upper}
+        entry: Dict[str, Any] = {
+            "nominal": spec.nominal, "lower": spec.lower, "upper": spec.upper,
+            "report_unit": spec.report_unit,
+            "report_scale": spec.report_scale,
+            "decimals": spec.decimals,
+        }
         if not values:
             entry.update({"status": STATUS_NOT_MEASURED, "n": 0})
         else:
@@ -149,6 +163,74 @@ def compute_run_stats(
         "status": overall_status(parameters),
         "parameters": parameters,
     }
+
+
+def manual_rods(checks: Sequence[Mapping[str, Any]]) -> List[Dict[str, Optional[float]]]:
+    """Convert operator manual QC checks into pseudo-rod measurement dicts.
+
+    Weight is entered as grams per ``sample_rods`` rods and is converted back to
+    grams per rod; length is millimetres and hardness is percent, already per rod.
+    Each check becomes one pseudo-rod. ``pd`` / ``diameter`` etc. are not measured
+    by the operator and stay unset, so they never contribute to those parameters.
+    """
+    rods: List[Dict[str, Optional[float]]] = []
+    for c in checks:
+        w = _num(c.get("sample_weight"))
+        n = c.get("sample_rods") or 10
+        per_rod = w / n if (w is not None and n) else None
+        rods.append({
+            "pd": None,
+            "diameter": None,
+            "weight": per_rod,
+            "length": _num(c.get("length_mm")),
+            "hardness": _num(c.get("hardness")),
+        })
+    return rods
+
+
+# Parameters where a manual operator measurement overrides the station value for
+# the final Mean/SD (the operator's lab check is authoritative for these).
+MANUAL_PRIORITY_PARAMS = frozenset({"weight"})
+
+
+def merge_manual_parameters(
+    parameters: Dict[str, Dict[str, Any]],
+    pseudo_rods: Sequence[Mapping[str, Any]],
+    specs: Mapping[str, ParamSpec],
+) -> Dict[str, Dict[str, Any]]:
+    """Merge operator manual QC checks into the run's parameter statistics.
+
+    ``pseudo_rods`` are produced by :func:`manual_rods` (measurement units: weight
+    per rod, length mm, hardness %).
+
+    * For parameters in ``MANUAL_PRIORITY_PARAMS`` (e.g. weight) a manual value
+      **overrides** the station value for the final Mean/SD.
+    * For every other parameter a manual value is used only when the station has
+      no data (``n`` is falsy), so a station measurement is never overwritten.
+
+    Mutates and returns ``parameters``.
+    """
+    if not pseudo_rods:
+        return parameters
+    mstats = compute_run_stats(pseudo_rods, specs)
+    for name, mstat in mstats["parameters"].items():
+        if not mstat.get("n"):
+            continue
+        entry = parameters.get(name)
+        if entry is None:
+            spec = specs[name]
+            entry = {
+                "nominal": spec.nominal, "lower": spec.lower, "upper": spec.upper,
+                "report_unit": spec.report_unit,
+                "report_scale": spec.report_scale,
+                "decimals": spec.decimals,
+            }
+            parameters[name] = entry
+        if entry.get("n") and name not in MANUAL_PRIORITY_PARAMS:
+            continue  # a station measurement wins unless manual has priority
+        entry.update(mstat)
+        entry["source"] = "manual"
+    return parameters
 
 
 def _scaled(value: Optional[float], spec: ParamSpec) -> Optional[float]:

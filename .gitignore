@@ -13,9 +13,11 @@
 **/*.keystore
 **/key.properties
 **/.env.test
+**/.env.disabled
 
 # Logs
 **/nohup.out
+*_log_backup
 
 # Flutter/Dart
 **/.dart_tool/
@@ -34,6 +36,7 @@ backend/app/web/
 apk_releases/
 backend/apk_releases/
 frontend/build/
+**/_build.txt
 pdf_archive/
 backend/pdf_archive/
 

@@ -4,6 +4,10 @@
 import 'package:flutter/material.dart';
 
 import '../../api_service.dart';
+import '../../theme/theme_controller.dart';
+import '../../theme/theme_presets.dart';
+import 'odoo_sync_screen.dart';
+import 'station_profiles_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -79,7 +83,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         child: Padding(
           padding: const EdgeInsets.all(20),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(title, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.deepPurple)),
+            Text(title, style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Theme.of(context).colorScheme.primary)),
             const SizedBox(height: 16),
             ...children,
           ]),
@@ -89,16 +93,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 2,
+      length: 4,
       child: Column(children: [
         const Material(
           color: Colors.white,
           child: TabBar(
             labelColor: Colors.deepPurple,
             unselectedLabelColor: Colors.black54,
+            isScrollable: true,
+            tabAlignment: TabAlignment.start,
             tabs: [
               Tab(text: 'Quality & Tolerances'),
+              Tab(text: 'Odoo Integration'),
               Tab(text: 'General'),
+              Tab(text: 'Quality Stations'),
             ],
           ),
         ),
@@ -107,10 +115,56 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ? const Center(child: CircularProgressIndicator())
               : TabBarView(children: [
                   _qualityTab(),
-                  const Center(child: Text('General settings coming soon.')),
+                  const OdooSyncScreen(),
+                  _generalTab(),
+                  const StationProfilesScreen(),
                 ]),
         ),
       ]),
+    );
+  }
+
+  Widget _generalTab() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 760),
+          child: ListenableBuilder(
+            listenable: ThemeController.instance,
+            builder: (context, _) {
+              final c = ThemeController.instance;
+              return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                _card('Appearance & Theme', [
+                  const Text('Theme Mode', style: TextStyle(fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 8),
+                  SegmentedButton<ThemeMode>(
+                    segments: const [
+                      ButtonSegment(value: ThemeMode.light, label: Text('Light')),
+                      ButtonSegment(value: ThemeMode.dark, label: Text('Dark')),
+                      ButtonSegment(value: ThemeMode.system, label: Text('System')),
+                    ],
+                    selected: {c.mode},
+                    onSelectionChanged: (s) => ThemeController.instance.setMode(s.first),
+                  ),
+                  const SizedBox(height: 16),
+                  const Text('UI Style Preset', style: TextStyle(fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 8),
+                  SegmentedButton<ThemePreset>(
+                    segments: const [
+                      ButtonSegment(value: ThemePreset.cupertino, label: Text('iOS / Clean')),
+                      ButtonSegment(value: ThemePreset.material3, label: Text('Material 3')),
+                      ButtonSegment(value: ThemePreset.industrial, label: Text('Industrial Dark')),
+                    ],
+                    selected: {c.preset},
+                    onSelectionChanged: (s) => ThemeController.instance.setPreset(s.first),
+                  ),
+                ]),
+              ]);
+            },
+          ),
+        ),
+      ),
     );
   }
 

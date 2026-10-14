@@ -90,6 +90,10 @@ class PurchaseOrder {
   final int boxType;
   final double? diameterTolerance; // ± tolerance override for diameter
   final double? pdTolerance;       // ± tolerance override for pressure drop
+  final String source;              // 'odoo' | 'local'
+  final Map<String, dynamic>? allowedMaterials; // category -> [{material_id, product_name}]
+  final int? odooMoId;              // root mrp.production id
+  final String? odooMoName;         // root MO name (e.g. WH/MO/00217)
   
   final String acetateType;
   final String paperType;
@@ -114,14 +118,22 @@ class PurchaseOrder {
     required this.targetQty, this.producedQty = 0, this.isHidden = false,
     this.isArchived = false,
     this.diameterTolerance, this.pdTolerance,
+    this.source = 'local', this.allowedMaterials,
+    this.odooMoId, this.odooMoName,
   });
+
+  /// Manufacturing Order number (terminology alias of the legacy poNumber).
+  String get moNumber => poNumber;
+
+  /// True when this MO is linked to an Odoo Manufacturing Order.
+  bool get isOdooLinked => odooMoId != null || source == 'odoo';
 
   int get remainingQty => targetQty - producedQty;
 
   factory PurchaseOrder.fromJson(Map<String, dynamic> json) {
     return PurchaseOrder(
       id: json['id'],
-      poNumber: json['po_number'] ?? 'Unknown',
+      poNumber: json['mo_number'] ?? json['po_number'] ?? 'Unknown',
       diameter: (json['diameter'] ?? 0).toDouble(),
       length: (json['length'] ?? 0).toDouble(),
       pd: (json['pd'] ?? 0).toDouble(),
@@ -137,6 +149,10 @@ class PurchaseOrder {
       triacetinType: json['triacetin_type'] ?? '',
       isHidden: json['is_hidden'] ?? false,
       isArchived: json['is_archived'] ?? false,
+      source: json['source'] ?? 'local',
+      allowedMaterials: json['allowed_materials'] as Map<String, dynamic>?,
+      odooMoId: json['odoo_mo_id'],
+      odooMoName: json['odoo_mo_name'],
       
       // Добавленные обязательные поля:
       targetQty: json['target_qty'] ?? 0,
@@ -181,22 +197,25 @@ class PurchaseOrder {
 }
 
 class Machine {
+  int? id;
   String name;
   String remarks;
   bool isInactive;
 
-  Machine({required this.name, this.remarks = "", this.isInactive = false});
+  Machine({this.id, required this.name, this.remarks = "", this.isInactive = false});
   
   factory Machine.fromJson(Map<String, dynamic> json) {
     return Machine(
+      id: json['id'],
       name: json['name'] ?? 'Unknown',
+      remarks: json['remarks'] ?? "",
       // В Python у нас is_inactive, поэтому читаем его
       isInactive: json['is_inactive'] ?? false, 
     );
-    
   }
 
   Map<String, dynamic> toJson() => {
+    if (id != null) 'id': id,
     'name': name,
     'is_inactive': isInactive,
     'remarks': remarks,
@@ -246,10 +265,13 @@ class RawMaterial {
   String type;
   String? batch; // Батч не обязателен
   bool isHidden;
+  int? odooProductId; // mapped Odoo product.product id
+  String source;       // 'odoo' | 'local'
 
   RawMaterial({
     required this.category, required this.type, 
-    this.batch, this.isHidden = false
+    this.batch, this.isHidden = false,
+    this.odooProductId, this.source = 'local',
   });
 
   factory RawMaterial.fromJson(Map<String, dynamic> json) {
@@ -266,6 +288,8 @@ class RawMaterial {
     type: json['type_name'] ?? 'Unknown', // Зависит от названия колонки в FastAPI
     batch: json['default_batch'] ?? '', 
     isHidden: json['is_hidden'] ?? false,
+    odooProductId: json['odoo_product_id'],
+    source: json['source'] ?? 'local',
   );
   }
   Map<String, dynamic> toJson() => {
@@ -273,6 +297,7 @@ class RawMaterial {
     'type_name': type,
     'default_batch': batch,
     'is_hidden': isHidden,
+    if (odooProductId != null) 'odoo_product_id': odooProductId,
   };
 }
 

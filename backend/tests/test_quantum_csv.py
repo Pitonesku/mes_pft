@@ -52,6 +52,34 @@ class QuantumCsvParserTest(unittest.TestCase):
         self.assertAlmostEqual(sample.rods[0].weight, 0.664)
         self.assertAlmostEqual(sample.rods[0].diameter, 7.74)
 
+    def test_mo_field_brand(self):
+        sample = parse_bytes(_SAMPLE.read_bytes(), mo_field="brand")
+        self.assertEqual(sample.mo_ref, "7.75x108 PD300 porosus")
+
+    def test_mo_field_default_uses_batch_description_then_comments(self):
+        # The sample has empty Batch Description and Comments, so mo_ref is empty.
+        self.assertEqual(self.sample.mo_ref, "")
+
+    def test_custom_column_map_can_omit_weight(self):
+        from app.services.parsers.quantum_csv import QuantumCsvParser
+
+        content = (
+            "Instrument ID           ,X\n"
+            "Produced On             ,06/05/2026 09:00:00\n"
+            "\n"
+            "Rod# ,PD,SizeL\n"
+            "     , (mmWg),(mm)\n"
+            "1    , 300, 7.70\n"
+        ).encode("utf-8")
+        sample = QuantumCsvParser(
+            data_start_row=3,
+            column_map={"rod_no": 0, "pd": 1, "diameter": 2},
+        ).parse(content.decode("utf-8"))
+        self.assertEqual(len(sample.rods), 1)
+        self.assertEqual(sample.rods[0].pd, 300.0)
+        self.assertIsNone(sample.rods[0].weight)
+        self.assertAlmostEqual(sample.rods[0].diameter, 7.70)
+
 
 if __name__ == "__main__":
     unittest.main()

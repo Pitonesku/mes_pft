@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
+from sqlalchemy import exists
 from sqlalchemy.orm import Session
 
 from app import models
@@ -85,12 +86,31 @@ def resolve_shift(
     if ts > datetime.now(timezone.utc) + timedelta(minutes=DEFAULT_CLOCK_SKEW_MINUTES):
         return None, LINK_CLOCK_SKEW
 
-    # Exact containment.
+    # A shift may move between machines, so a rod belongs to the shift whose RUN was
+    # active on this machine at ``ts`` (production_runs.machine_id), not to
+    # ``shift.machine_id`` (which only names the machine the shift is on *now*).
+    run = (
+        session.query(models.ProductionRun)
+        .filter(
+            models.ProductionRun.machine_id == machine_id,
+            models.ProductionRun.started_at <= ts,
+        )
+        .filter(
+            (models.ProductionRun.ended_at.is_(None)) | (models.ProductionRun.ended_at > ts)
+        )
+        .order_by(models.ProductionRun.started_at.desc())
+        .first()
+    )
+    if run:
+        return run.shift_id, LINK_LINKED
+
+    # Legacy shifts that have no machine-bearing run: exact containment on the shift.
     shift = (
         session.query(models.ShiftSession)
         .filter(
             models.ShiftSession.machine_id == machine_id,
             models.ShiftSession.started_at <= ts,
+            ~_has_machine_run(),
         )
         .filter(
             (models.ShiftSession.ended_at.is_(None)) | (models.ShiftSession.ended_at > ts)
@@ -101,9 +121,23 @@ def resolve_shift(
     if shift:
         return shift.id, LINK_LINKED
 
-    # Grace window: latest closed shift whose end is within grace and not followed
-    # by another shift starting before ts.
+    # Grace window: the latest run on this machine that ended within ``grace`` of ts
+    # (QC samples pulled right after a close / machine change).
     grace_end = ts - timedelta(minutes=grace_minutes)
+    run = (
+        session.query(models.ProductionRun)
+        .filter(
+            models.ProductionRun.machine_id == machine_id,
+            models.ProductionRun.ended_at.isnot(None),
+            models.ProductionRun.ended_at <= ts,
+            models.ProductionRun.ended_at >= grace_end,
+        )
+        .order_by(models.ProductionRun.ended_at.desc())
+        .first()
+    )
+    if run:
+        return run.shift_id, LINK_LINKED_GRACE
+
     shift = (
         session.query(models.ShiftSession)
         .filter(
@@ -111,6 +145,7 @@ def resolve_shift(
             models.ShiftSession.ended_at.isnot(None),
             models.ShiftSession.ended_at <= ts,
             models.ShiftSession.ended_at >= grace_end,
+            ~_has_machine_run(),
         )
         .order_by(models.ShiftSession.ended_at.desc())
         .first()
@@ -121,41 +156,86 @@ def resolve_shift(
     return None, LINK_NO_SHIFT
 
 
+def _has_machine_run():
+    """Correlated EXISTS: the shift owns at least one run that records a machine."""
+    return exists().where(
+        models.ProductionRun.shift_id == models.ShiftSession.id,
+        models.ProductionRun.machine_id.isnot(None),
+    )
+
+
+def pick_run(runs: Sequence, ts: datetime, mo_ref: Optional[str] = None) -> Tuple[Optional[object], str]:
+    """Pure run-selection rule over a shift's runs (objects with ``id``, ``seq``,
+    ``mo_ref``, ``started_at``, ``ended_at``). Returns ``(run, link_status)``.
+
+    * no station label -> the run active at ``ts`` (or, in the post-close grace
+      window, the last run);
+    * a label -> the run with that MO; when the shift has several runs of the same
+      MO (A -> B -> A) the one active at ``ts``, else the nearest in time;
+    * a label no run of the shift carries -> ``(None, MO_MISMATCH)`` so the rod
+      stays visible for review instead of polluting another MO's statistics.
+    """
+    ordered = sorted(runs, key=lambda r: r.seq)
+
+    def active_at() -> Optional[object]:
+        hit = None
+        for r in ordered:
+            if r.started_at is not None and _as_utc(r.started_at) > ts:
+                continue
+            if r.ended_at is not None and _as_utc(r.ended_at) <= ts:
+                continue
+            hit = r
+        if hit is None and ordered:
+            last = ordered[-1]
+            if last.ended_at is not None and _as_utc(last.ended_at) <= ts:
+                hit = last  # grace window after close
+        return hit
+
+    label = (mo_ref or "").strip()
+    if not label:
+        run = active_at()
+        return run, LINK_LINKED
+
+    candidates = [r for r in ordered if (r.mo_ref or "").strip() == label]
+    if not candidates:
+        return None, LINK_MO_MISMATCH
+    if len(candidates) == 1:
+        return candidates[0], LINK_LINKED
+    current = active_at()
+    if current is not None and current in candidates:
+        return current, LINK_LINKED
+
+    def distance(r) -> float:
+        start = _as_utc(r.started_at) if r.started_at else ts
+        end = _as_utc(r.ended_at) if r.ended_at else ts
+        if ts < start:
+            return (start - ts).total_seconds()
+        if ts > end:
+            return (ts - end).total_seconds()
+        return 0.0
+
+    return min(candidates, key=distance), LINK_LINKED
+
+
 def resolve_run(
     session: Session,
     shift_id: int,
     timestamp: datetime,
     mo_ref: Optional[str] = None,
+    machine_id: Optional[int] = None,
 ) -> Tuple[Optional[int], str]:
-    """Return (run_id, link_status) for a measurement within a shift."""
+    """Return (run_id, link_status) for a measurement within a shift.
+
+    ``machine_id`` restricts the choice to runs recorded on that machine, which
+    matters once a shift has moved between machines."""
     ts = _as_utc(timestamp)
-
-    if mo_ref:
-        run = (
-            session.query(models.ProductionRun)
-            .filter(
-                models.ProductionRun.shift_id == shift_id,
-                models.ProductionRun.mo_ref == mo_ref.strip(),
-            )
-            .first()
+    query = session.query(models.ProductionRun).filter(models.ProductionRun.shift_id == shift_id)
+    if machine_id is not None:
+        query = query.filter(
+            (models.ProductionRun.machine_id == machine_id) | (models.ProductionRun.machine_id.is_(None))
         )
-        if run:
-            return run.id, LINK_LINKED
-        return None, LINK_MO_MISMATCH
-
-    run = (
-        session.query(models.ProductionRun)
-        .filter(
-            models.ProductionRun.shift_id == shift_id,
-            models.ProductionRun.started_at <= ts,
-        )
-        .filter(
-            (models.ProductionRun.ended_at.is_(None)) | (models.ProductionRun.ended_at > ts)
-        )
-        .order_by(models.ProductionRun.seq.desc())
-        .first()
-    )
-    return (run.id if run else None), LINK_LINKED
+    run, status = pick_run(query.all(), ts, mo_ref)
+    return (run.id if run is not None else None), status
 
 
 def _as_utc(value: Optional[datetime]) -> Optional[datetime]:

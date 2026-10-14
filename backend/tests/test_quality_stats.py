@@ -162,5 +162,48 @@ class CertificateTable(unittest.TestCase):
         self.assertIsNone(h["mean"])
 
 
+class ManualMergeTests(unittest.TestCase):
+    SPECS = {
+        "diameter": CERT_SPECS["diameter"],
+        "pd": CERT_SPECS["pd"],
+        "weight": CERT_SPECS["weight"],
+        "hardness": CERT_SPECS["hardness"],
+        "length": ParamSpec("length", 108.0, 107.5, 108.5, report_unit="mm", decimals=2),
+    }
+
+    def test_manual_rods_converts_weight_per_rod(self):
+        rods = qs.manual_rods([
+            {"sample_weight": 6.6, "sample_rods": 10, "length_mm": 108.2, "hardness": 84.0},
+            {"sample_weight": 6.8, "sample_rods": 10, "length_mm": 107.9, "hardness": 83.5},
+        ])
+        self.assertAlmostEqual(rods[0]["weight"], 0.66, places=6)
+        self.assertAlmostEqual(rods[1]["weight"], 0.68, places=6)
+        self.assertEqual([r["length"] for r in rods], [108.2, 107.9])
+        self.assertEqual([r["hardness"] for r in rods], [84.0, 83.5])
+
+    def test_merge_fills_unmeasured_length_and_hardness(self):
+        stats = qs.compute_run_stats(STATION_RODS, self.SPECS)
+        pseudo = qs.manual_rods([
+            {"sample_rods": 10, "length_mm": 108.2, "hardness": 84.0},
+            {"sample_rods": 10, "length_mm": 107.8, "hardness": 83.0},
+        ])
+        qs.merge_manual_parameters(stats["parameters"], pseudo, self.SPECS)
+        self.assertEqual(stats["parameters"]["length"]["source"], "manual")
+        self.assertAlmostEqual(stats["parameters"]["length"]["mean"], 108.0, places=6)
+        self.assertAlmostEqual(stats["parameters"]["hardness"]["mean"], 83.5, places=6)
+        self.assertEqual(stats["parameters"]["hardness"]["n"], 2)
+
+    def test_manual_overrides_station_weight(self):
+        # Weight is in MANUAL_PRIORITY_PARAMS: a manual operator lab measurement
+        # overrides the station value for the final Mean/SD.
+        stats = qs.compute_run_stats(STATION_RODS, self.SPECS)
+        self.assertAlmostEqual(stats["parameters"]["weight"]["mean"], 0.6641, places=6)
+        pseudo = qs.manual_rods([{"sample_weight": 0.670, "sample_rods": 10}])
+        qs.merge_manual_parameters(stats["parameters"], pseudo, self.SPECS)
+        self.assertEqual(stats["parameters"]["weight"]["source"], "manual")
+        self.assertAlmostEqual(stats["parameters"]["weight"]["mean"], 0.067, places=6)
+        self.assertEqual(stats["parameters"]["weight"]["n"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

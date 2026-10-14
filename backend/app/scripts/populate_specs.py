@@ -50,10 +50,18 @@ def _specs_for_po(po):
 
 
 def main():
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Populate quality_specs from purchase_orders")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print what would be created/reset without writing anything")
+    args = ap.parse_args()
+
     session: Session = SessionLocal()
     try:
         pos = session.query(models.PurchaseOrder).all()
         created = 0
+        would_create: list = []
         for po in pos:
             for spec in _specs_for_po(po):
                 existing = (
@@ -62,14 +70,23 @@ def main():
                     .first()
                 )
                 if existing is None:
-                    session.add(models.QualitySpec(**spec))
+                    would_create.append((po.po_number, spec["parameter"], spec["nominal"]))
+                    if not args.dry_run:
+                        session.add(models.QualitySpec(**spec))
                     created += 1
         reset = session.query(models.ProductionRun).update(
             {"spec_snapshot": {}}, synchronize_session=False
         )
-        session.commit()
-        print(f"created quality_specs: {created}")
-        print(f"runs with spec_snapshot reset: {reset}")
+        if args.dry_run:
+            session.rollback()
+            print(f"[dry-run] would create quality_specs: {created}")
+            print(f"[dry-run] would reset spec_snapshot on runs: {reset}")
+            for row in would_create:
+                print(f"  {row[0]:<24} {row[1]:<10} {row[2]}")
+        else:
+            session.commit()
+            print(f"created quality_specs: {created}")
+            print(f"runs with spec_snapshot reset: {reset}")
         total = session.query(models.QualitySpec).count()
         print(f"total quality_specs: {total}")
     finally:

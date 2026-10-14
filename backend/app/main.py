@@ -12,7 +12,7 @@ from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import func, inspect, text, or_
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 from typing import TYPE_CHECKING, Optional
 import pathlib
@@ -79,8 +79,9 @@ if __package__:
     seed_module = importlib.import_module(f"{__package__}.seed")
     seed_initial_admin = seed_module.seed_initial_admin
     seed_telegram_admin = seed_module.seed_telegram_admin
+    seed_station_ingest = seed_module.seed_station_ingest
 else:
-    from seed import seed_initial_admin, seed_telegram_admin
+    from seed import seed_initial_admin, seed_telegram_admin, seed_station_ingest
 
 # AI Read-Only DB User creation (idempotent, runs on every startup)
 if __package__:
@@ -108,6 +109,22 @@ if __package__:
     v2_routes_module = importlib.import_module(f"{__package__}.v2_routes")
 else:
     import v2_routes as v2_routes_module
+
+
+# Shift / run lifecycle rules (report <-> run link, auto-close, ...)
+if __package__:
+    shift_lifecycle_mod = importlib.import_module(f"{__package__}.services.shift_lifecycle")
+else:
+    from services import shift_lifecycle as shift_lifecycle_mod
+
+
+def shift_lifecycle_svc_link(db, db_report) -> None:
+    """Best-effort: attach a saved report to its production run (never blocks a report)."""
+    try:
+        with db.begin_nested():
+            shift_lifecycle_mod.link_report_to_run(db, db_report)
+    except Exception as exc:  # noqa: BLE001 - linking is additive, the report must still save
+        print(f"[Report] could not link report {getattr(db_report, 'id', '?')} to a run: {exc}")
 
 
 # .env is already loaded by database.py (imported above) with override=True.
@@ -439,20 +456,128 @@ def odoo_dispatcher_worker():
         print("[Odoo] disabled or incomplete config - dispatcher not started.")
         return
 
+    poll = 30
     while True:
         try:
-            dispatched = odoo_outbound.dispatch_pending(SessionLocal, config)
+            db = SessionLocal()
+            shadow = odoo_outbound.shadow_enabled(db)
+            poll = odoo_outbound.poll_seconds(db)
+            db.close()
+            dispatched = odoo_outbound.dispatch_pending(SessionLocal, config, shadow=shadow)
             if dispatched:
                 print(f"[Odoo] dispatched {dispatched} outbox item(s)")
         except Exception as e:
             print(f"[Odoo] dispatcher error: {e}")
-        time.sleep(30)
+            poll = 30
+        time.sleep(poll)
+
+
+# --- ODOO RECONCILER (re-reads the MO chain of linked, unfinished orders) ---
+def odoo_reconcile_worker():
+    """Safety net for missed webhooks: refresh Odoo state of linked orders.
+
+    Interval: ``odoo_reconcile_minutes`` setting (default 10, 0 disables). An
+    unreachable Odoo only logs - MES keeps working standalone.
+    """
+    from app.services.odoo import outbound as odoo_outbound
+    from app.services.odoo import reconcile as odoo_reconcile_svc
+    from app.services.odoo.client import OdooClient, OdooConfig
+
+    config = OdooConfig.from_env()
+    if not (config.enabled and config.valid()):
+        return
+
+    time.sleep(60)  # let the app finish starting
+    while True:
+        db = SessionLocal()
+        minutes = odoo_outbound.reconcile_minutes(db)
+        if minutes <= 0:
+            db.close()
+            time.sleep(60)  # re-check periodically while disabled
+            continue
+        try:
+            client = OdooClient(config)
+            client.connect()
+            result = odoo_reconcile_svc.reconcile_all(db, client)
+            if result["changed"] or result["errors"]:
+                print(f"[Odoo] reconcile: {len(result['changed'])} changed, {len(result['errors'])} errors")
+        except Exception as e:
+            db.rollback()
+            print(f"[Odoo] reconcile error: {e}")
+        finally:
+            db.close()
+        time.sleep(minutes * 60)
+
+
+# --- SHIFT AUTO-CLOSE (IN_PROGRESS -> AUTO_CLOSED once scheduled end passes +30min) ---
+def shift_auto_close_worker():
+    """Auto-close shifts whose scheduled end passed >30 min ago without a final report.
+
+    Never discards data: AUTO_CLOSED keeps rods, QC checks and drafts intact — it only
+    frees the machine for the next operator. Finalization (Odoo sync) happens later via
+    the operator/supervisor submitting the report for that shift.
+    """
+    from datetime import timezone
+    if __package__:
+        shift_lifecycle_svc = importlib.import_module(f"{__package__}.services.shift_lifecycle")
+    else:
+        from services import shift_lifecycle as shift_lifecycle_svc
+
+    time.sleep(60)  # let the app finish starting
+    while True:
+        db = SessionLocal()
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+            stale = (
+                db.query(models.ShiftSession)
+                .filter(
+                    models.ShiftSession.ended_at.is_(None),
+                    models.ShiftSession.scheduled_end_at.isnot(None),
+                    models.ShiftSession.scheduled_end_at < cutoff,
+                    # never auto-close a shift that was opened *after* its scheduled end
+                    # (overnight early-open bug): it must have started before that end
+                    models.ShiftSession.started_at < models.ShiftSession.scheduled_end_at,
+                )
+                .all()
+            )
+            for s in stale:
+                s.status = "AUTO_CLOSED"
+                s.ended_at = s.scheduled_end_at
+                s.closed_at = datetime.now(timezone.utc)
+                # Close the shift's open runs too, otherwise the machine keeps a phantom
+                # running MO and the "one open run per machine" index blocks the next shift.
+                shift_lifecycle_svc.close_shift_runs(db, s, s.scheduled_end_at)
+                print(f"[Shift] auto-closed shift {s.id} (scheduled end {s.scheduled_end_at})")
+            if stale:
+                db.commit()
+        except Exception as e:
+            db.rollback()
+            print(f"[Shift] auto-close error: {e}")
+        finally:
+            db.close()
+        time.sleep(60)
 
 
 threading.Thread(target=telegram_worker, daemon=True).start()
 threading.Thread(target=telegram_outbox_worker, daemon=True).start()
 threading.Thread(target=gdrive_worker, daemon=True).start()
 threading.Thread(target=odoo_dispatcher_worker, daemon=True).start()
+threading.Thread(target=odoo_reconcile_worker, daemon=True).start()
+threading.Thread(target=shift_auto_close_worker, daemon=True).start()
+
+def _parse_watch_paths(paths_env: Optional[str], single_env: Optional[str]) -> list:
+    """Return a deduplicated list of watch folders from env.
+
+    ``STATION_WATCH_PATHS`` (``;`` or ``,`` separated) takes precedence over the
+    legacy single ``STATION_WATCH_PATH``. Whitespace-only entries are dropped.
+    """
+    if paths_env:
+        parts = [p.strip() for p in paths_env.replace(",", ";").split(";") if p.strip()]
+        return list(dict.fromkeys(parts))
+    if single_env and single_env.strip():
+        return [single_env.strip()]
+    return []
+
 
 # --- LIFESPAN (modern FastAPI startup/shutdown) ---
 @asynccontextmanager
@@ -475,29 +600,52 @@ async def lifespan(app: FastAPI):
     # 2. Auto-seed web admin user if DB is empty (first startup)
     seed_initial_admin()
 
+    # 2.5. Ensure the station_ingest service account exists for push-agent keys
+    seed_station_ingest()
+
     # 3. Validate Google Drive credentials
     validate_google_drive_at_startup()
 
     # 3.5. Ensure AI read-only DB user exists for Text-to-SQL agent
     ensure_ai_user()
 
-    # 3.6. Start the station watcher (integrated ingester) if configured
-    app.state.station_watcher = None
-    watch_path = os.getenv("STATION_WATCH_PATH")
-    if watch_path:
-        cfg = station_watcher_mod.WatcherConfig(
-            watch_path=watch_path,
-            archive_path=os.getenv("STATION_ARCHIVE_PATH") or os.path.join(watch_path, "Archive"),
-            error_path=os.getenv("STATION_ERROR_PATH") or os.path.join(watch_path, "Errors"),
-            scan_interval=int(os.getenv("STATION_SCAN_INTERVAL", "30")),
-            alias_field=os.getenv("STATION_MACHINE_ALIAS_FIELD", "maker"),
-        )
-        watcher = station_watcher_mod.StationWatcher(SessionLocal, cfg)
-        await watcher.start()
-        app.state.station_watcher = watcher
-        print(f"📡 Station watcher started on {watch_path}")
-    else:
-        print("⚠️  STATION_WATCH_PATH not set — station watcher disabled")
+    # 3.6. Start the station watcher (integrated ingester).
+    # Static paths come from .env (fallback); pull-mode station_profiles in the DB
+    # are re-read every scan, so the Settings UI is the single source of truth and
+    # no restart is needed when a pull station is added/updated.
+    app.state.station_watchers = []
+    static_paths = _parse_watch_paths(
+        os.getenv("STATION_WATCH_PATHS"),
+        os.getenv("STATION_WATCH_PATH"),
+    )
+    scan_interval = int(os.getenv("STATION_SCAN_INTERVAL", "30"))
+
+    def _pull_profile_paths() -> list:
+        session = SessionLocal()
+        try:
+            rows = (
+                session.query(models.StationProfile)
+                .filter(
+                    models.StationProfile.delivery_mode == "pull",
+                    models.StationProfile.watch_path.isnot(None),
+                )
+                .all()
+            )
+            return [r.watch_path.strip() for r in rows if r.watch_path and r.watch_path.strip()]
+        finally:
+            session.close()
+
+    cfg = station_watcher_mod.WatcherConfig(
+        watch_paths=static_paths,
+        scan_interval=scan_interval,
+        alias_field=os.getenv("STATION_MACHINE_ALIAS_FIELD", "maker"),
+        mo_field=os.getenv("STATION_MO_FIELD", "batch_description"),
+        dynamic_paths=_pull_profile_paths,
+    )
+    watcher = station_watcher_mod.StationWatcher(SessionLocal, cfg)
+    await watcher.start()
+    app.state.station_watchers.append(watcher)
+    print(f"📡 Station watcher started (static paths={static_paths}; pull profiles read from DB each scan)")
 
     # 4. Initialize and start the Telegram Bot (aiogram)
     TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -558,8 +706,8 @@ async def lifespan(app: FastAPI):
         await app.state.bot.session.close()
         print("🤖 Telegram Bot stopped")
 
-    if getattr(app.state, 'station_watcher', None):
-        await app.state.station_watcher.stop()
+    for watcher in getattr(app.state, 'station_watchers', []):
+        await watcher.stop()
         print("📡 Station watcher stopped")
 
 # Create FastAPI app with the lifespan handler.
@@ -783,7 +931,10 @@ def get_reports(start_date: str | None = None, end_date: str | None = None, incl
         query = query.filter(
             or_(models.ProductionReport.is_deleted == False, models.ProductionReport.is_deleted == None)
         )
-    reports = query.order_by(models.ProductionReport.report_date.desc()).all()
+    reports = query.order_by(
+        models.ProductionReport.sync_at.desc(),
+        models.ProductionReport.id.desc(),
+    ).all()
 
     result = []
     for report in reports:
@@ -919,46 +1070,6 @@ def get_report_by_id(report_id: int, db: Session = Depends(get_db)):
     )
     return report_item
 
-# Temporary debug endpoint: returns the last saved report (for troubleshooting material fields)
-@app.get("/api/debug/last-report")
-def debug_last_report(db: Session = Depends(get_db)):
-    r = db.query(models.ProductionReport).order_by(models.ProductionReport.id.desc()).first()
-    if not r:
-        return {"msg": "no reports found"}
-
-    report_item = {col.name: getattr(r, col.name) for col in r.__table__.columns}
-
-    # Prefer the stored raw lists if available
-    try:
-        if getattr(r, 'materials_json', None):
-            parsed = json.loads(r.materials_json or "{}")
-            report_item['acetate_list'] = parsed.get('acetate_list', [])
-            report_item['paper_list'] = parsed.get('paper_list', [])
-            report_item['pva_list'] = parsed.get('pva_list', [])
-            report_item['hm_list'] = parsed.get('hm_list', [])
-            report_item['tri_list'] = parsed.get('tri_list', [])
-            return report_item
-    except Exception:
-        # fall back to legacy behavior
-        pass
-
-    def build_material_list(m_type, m_batch, total):
-        if total and total > 0:
-            return [{
-                "type": m_type or "",
-                "batch": m_batch or "No Batch",
-                "used": round(total, 2),
-            }]
-        return []
-
-    report_item["acetate_list"] = build_material_list(r.acetate_type, r.acetate_batch, r.total_acetate)
-    report_item["paper_list"] = build_material_list(r.paper_type, r.paper_batch, r.total_paper)
-    report_item["pva_list"] = build_material_list(r.pva_glue_type, r.pva_batch, r.total_pva)
-    report_item["hm_list"] = build_material_list(r.hm_glue_type, r.hm_batch, r.total_hm)
-    report_item["tri_list"] = build_material_list(r.triacetin_type, r.tri_batch, r.total_triacetin)
-
-    return report_item
-
 @app.post("/api/users/create-with-auth", response_model=schemas.User)
 def create_user_with_auth(payload: dict, db: Session = Depends(get_db)):
     """
@@ -1043,7 +1154,60 @@ def _apply_po_tolerance_specs(db, db_po, diameter_tol, pd_tol):
 
 @app.get("/api/purchase-orders", response_model=list[schemas.PO])
 def read_pos(db: Session = Depends(get_db)):
-    return db.query(models.PurchaseOrder).all()
+    pos = db.query(models.PurchaseOrder).all()
+    _attach_allowed_materials(db, pos)
+    return pos
+
+
+def _attach_allowed_materials(db: Session, pos) -> None:
+    """Attach the per-category allowed materials dict onto PO instances."""
+    items = pos if isinstance(pos, list) else [pos]
+    for po in items:
+        comps = (
+            db.query(models.ProductionRunComponent)
+            .filter(models.ProductionRunComponent.po_id == po.id)
+            .order_by(models.ProductionRunComponent.seq)
+            .all()
+        )
+        grouped: dict = {}
+        for c in comps:
+            grouped.setdefault(c.category, []).append({
+                "material_id": c.material_id,
+                "product_name": c.product_name,
+            })
+        po.allowed_materials = grouped or None
+
+
+@app.get("/api/settings/odoo")
+def get_odoo_settings(db: Session = Depends(get_db)):
+    row = db.get(models.SystemSetting, "odoo_integration")
+    mode = "hybrid"
+    if row is not None and isinstance(row.value, dict):
+        mode = row.value.get("mode", "hybrid")
+    return {"mode": mode}
+
+
+@app.put("/api/settings/odoo")
+def set_odoo_settings(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    user_role = current_user.role
+    is_admin = user_role is not None and user_role.role_name.lower() in ("admin", "superadmin")
+    if not is_admin:
+        raise HTTPException(status_code=403, detail="Admin only")
+    mode = str(payload.get("mode", "hybrid")).strip().lower()
+    if mode not in ("hybrid", "strict"):
+        raise HTTPException(status_code=400, detail="mode must be 'hybrid' or 'strict'")
+    row = db.get(models.SystemSetting, "odoo_integration")
+    if row is None:
+        row = models.SystemSetting(key="odoo_integration", value={})
+        db.add(row)
+    row.value = {"mode": mode}
+    db.commit()
+    return {"mode": mode}
+
 
 @app.post("/api/purchase-orders", response_model=schemas.PO)
 def create_po(
@@ -1056,13 +1220,15 @@ def create_po(
     can_create = is_admin or (user_role is not None and user_role.can_create_po) or getattr(current_user, 'can_create_po', False)
     if not can_create:
         raise HTTPException(status_code=403, detail="You do not have permission to create purchase orders.")
-    db_po = models.PurchaseOrder(**po.model_dump(exclude={"diameter_tolerance", "pd_tolerance"}))
+    db_po = models.PurchaseOrder(**po.model_dump(exclude_unset=True, exclude={"diameter_tolerance", "pd_tolerance", "allowed_materials"}))
+    db_po.source = "local"
     db.add(db_po)
     db.flush()
     _apply_po_tolerance_specs(db, db_po, po.diameter_tolerance, po.pd_tolerance)
     db.commit()
     db.refresh(db_po)
     return db_po
+
 
 @app.put("/api/purchase-orders/{po_id}", response_model=schemas.PO)
 def update_po(
@@ -1078,7 +1244,7 @@ def update_po(
     can_edit = is_admin or (user_role is not None and user_role.can_edit_po) or getattr(current_user, 'can_edit_po', False)
     if not can_edit:
         raise HTTPException(status_code=403, detail="You do not have permission to edit purchase orders.")
-    for key, value in po_data.model_dump(exclude={"diameter_tolerance", "pd_tolerance"}).items():
+    for key, value in po_data.model_dump(exclude_unset=True, exclude={"diameter_tolerance", "pd_tolerance", "allowed_materials"}).items():
         setattr(db_po, key, value)
     _apply_po_tolerance_specs(db, db_po, po_data.diameter_tolerance, po_data.pd_tolerance)
     db.commit()
@@ -1118,6 +1284,7 @@ def get_materials(db: Session = Depends(get_db)):
 @app.post("/api/materials", response_model=schemas.Material)
 def create_material(mat: schemas.MaterialBase, db: Session = Depends(get_db)):
     db_mat = models.MaterialDictionary(**mat.model_dump())
+    db_mat.source = "local"
     db.add(db_mat)
     db.commit()
     db.refresh(db_mat)
@@ -1138,6 +1305,8 @@ def update_material(old_name: str, mat: schemas.MaterialBase, db: Session = Depe
     db_mat.type_name = mat.type_name
     db_mat.default_batch = mat.default_batch
     db_mat.is_hidden = mat.is_hidden
+    if mat.odoo_product_id is not None:
+        db_mat.odoo_product_id = mat.odoo_product_id
 
     db.commit()
     db.refresh(db_mat)
@@ -1238,6 +1407,7 @@ def delete_shift(shift_name: str, db: Session = Depends(get_db)):
 async def upload_pdf_report(
     payload: dict,
     current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """
     Receive a pre-generated PDF (as base64) from the Flutter app.
@@ -1254,6 +1424,26 @@ async def upload_pdf_report(
 
         # Decode base64 to bytes
         pdf_bytes = base64.b64decode(pdf_base64)
+
+        # Persist the exact PDF into ReportOutbox so the Odoo dispatcher can attach
+        # the SAME file that goes to Google Drive (the "exact stream" requirement).
+        # Marked "sent" because this endpoint uploads to Drive directly, so the
+        # gdrive_worker must not re-send it; the dispatcher only reads the base64.
+        report_id = payload.get('report_id')
+        if report_id:
+            try:
+                db_report = db.get(models.ProductionReport, int(report_id))
+            except (TypeError, ValueError):
+                db_report = None
+            if db_report is not None:
+                db.add(models.ReportOutbox(
+                    report_id=db_report.id,
+                    delivery_type='pdf_gdrive',
+                    payload_pdf_base64=pdf_base64,
+                    filename=filename,
+                    status='sent',
+                ))
+                db.commit()
 
         # --- Save to local archive ---
         local_path_env = os.getenv('LOCAL_PDF_ARCHIVE_PATH', './pdf_archive')
@@ -1395,17 +1585,6 @@ def create_report(
             payload.get('tri_batch', ''),
         )
 
-        # DEBUG: log received lists and resolved values for tracing
-        print(f"[DEBUG] Received acetate_list={acetate_list}")
-        print(f"[DEBUG] Resolved acetate_type={acetate_type}, acetate_batch={acetate_batch}")
-        print(f"[DEBUG] Received paper_list={paper_list}")
-        print(f"[DEBUG] Resolved paper_type={paper_type}, paper_batch={paper_batch}")
-        print(f"[DEBUG] Received pva_list={pva_list}")
-        print(f"[DEBUG] Resolved pva_type={pva_type}, pva_batch={pva_batch}")
-        print(f"[DEBUG] Received hm_list={hm_list}")
-        print(f"[DEBUG] Resolved hm_type={hm_type}, hm_batch={hm_batch}")
-        print(f"[DEBUG] Received tri_list={tri_list}")
-        print(f"[DEBUG] Resolved tri_type={tri_type}, tri_batch={tri_batch}")
         payload['acetate_type'] = acetate_type
         payload['acetate_batch'] = acetate_batch
         payload['paper_type'] = paper_type
@@ -1429,14 +1608,19 @@ def create_report(
             payload['materials_json'] = ''
 
         # 1. Сохраняем отчет в БД
-        # Use the client-submitted UTC timestamp for sync_at if provided;
-        # otherwise PostgreSQL func.now() returns server local time (not UTC).
+        # Always store sync_at as naive UTC (never func.now(), which uses the
+        # database session timezone).
         submitted_utc = payload.pop('submitted_at_utc', None)
         if submitted_utc:
+            if getattr(submitted_utc, 'tzinfo', None) is not None:
+                submitted_utc = submitted_utc.astimezone(timezone.utc).replace(tzinfo=None)
             payload['sync_at'] = submitted_utc
+        else:
+            payload['sync_at'] = datetime.now(timezone.utc).replace(tzinfo=None)
         db_report = models.ProductionReport(**payload)
         db.add(db_report)
         db.flush() # Получаем ID отчета до коммита
+        shift_lifecycle_svc_link(db, db_report)
 
         # --- ВАЖНО: Обновляем АБСОЛЮТНЫЙ счет отчетов из БД ---
         remaining_qty = 0
@@ -1633,15 +1817,18 @@ def sync_report(
         except Exception:
             p['materials_json'] = ''
 
-        # 1. Save report to DB
-        # Use the client-submitted UTC timestamp for sync_at if provided;
-        # otherwise PostgreSQL func.now() returns server local time (not UTC).
+        # 1. Save report to DB (sync_at always naive UTC).
         submitted_utc_sync = p.pop('submitted_at_utc', None)
         if submitted_utc_sync:
+            if getattr(submitted_utc_sync, 'tzinfo', None) is not None:
+                submitted_utc_sync = submitted_utc_sync.astimezone(timezone.utc).replace(tzinfo=None)
             p['sync_at'] = submitted_utc_sync
+        else:
+            p['sync_at'] = datetime.now(timezone.utc).replace(tzinfo=None)
         db_report = models.ProductionReport(**p)
         db.add(db_report)
         db.flush()
+        shift_lifecycle_svc_link(db, db_report)
 
         # 2. Update PO produced_qty (excluding soft-deleted)
         # Lock the PO row first to serialize concurrent submissions for the same PO.
@@ -1944,6 +2131,19 @@ def update_report(
     # Apply only the allowed editable fields present in the payload
     # For archive-only requests, allow is_archived through always
     applicable_fields = EDITABLE_REPORT_FIELDS if editing_keys else EDITABLE_REPORT_FIELDS | archive_keys
+
+    # The MO / machine of a report that belongs to a production run must change
+    # together with the run, its QC checks and the shift summary: only the audited
+    # supervisor endpoint (POST /api/v2/runs/{id}/reassign) may do that.
+    if db_report.run_id is not None:
+        for locked in ("po_number", "machine_name"):
+            if locked in payload and str(payload[locked]) != str(getattr(db_report, locked, None)):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"'{locked}' is bound to production run {db_report.run_id}; "
+                           f"use POST /api/v2/runs/{db_report.run_id}/reassign instead.",
+                )
+
     changed_fields = []
     old_values = {}
     new_values = {}
@@ -1965,6 +2165,10 @@ def update_report(
     if changed_fields:
         db_report.is_modified_manually = True
         db_report.status = "edited"
+        # Editing invalidates any prior verification — data must be re-approved.
+        db_report.verification_status = "pending"
+        db_report.verified_by = None
+        db_report.verified_at = None
 
     db.commit()
     db.refresh(db_report)
@@ -1999,6 +2203,122 @@ def update_report(
         "status": "success",
         "report_id": db_report.id,
         "changed_fields": changed_fields,
+    }
+
+
+def _attach_production_report_async(report_id: int) -> None:
+    """Best-effort: attach the Production Report PDF to the report's Odoo MO.
+
+    Runs in a daemon thread after a report is approved, so a slow or unreachable Odoo
+    never blocks the approval response. Failures are logged, never raised.
+    """
+    try:
+        from app.pdf_generator import PDFReportGenerator, report_to_dict
+        from app.services.odoo import legacy_push
+        from app.services.odoo.client import OdooClient, OdooConfig
+
+        cfg = OdooConfig.from_env()
+        if not (cfg.enabled and cfg.valid()):
+            return
+        db = SessionLocal()
+        try:
+            report = db.query(models.ProductionReport).get(report_id)
+            if report is None:
+                return
+            po = db.query(models.PurchaseOrder).filter(
+                models.PurchaseOrder.po_number == report.po_number).first()
+            if po is None or not po.odoo_mo_id:
+                return
+            client = OdooClient(cfg)
+            client.connect()
+            mo = legacy_push.resolve_report_mo(client, po, report.produced_rods)
+            if mo is None:
+                print(f"[Odoo] production-report attach skipped (no unique MO) for report {report_id}")
+                return
+            mo_id, mo_name = mo
+            pdf = PDFReportGenerator().generate_pdf_bytes(report_to_dict(report))
+            if not pdf:
+                return
+            safe = legacy_push.safe_name(mo_name)
+            client.attach_file(
+                f"Production_Report_{safe}_#{report.id}.pdf",
+                "mrp.production", mo_id, pdf, "application/pdf",
+            )
+            print(f"[Odoo] attached production report #{report.id} to {mo_name}")
+        finally:
+            db.close()
+    except Exception as exc:  # noqa: BLE001 - must never affect approval
+        print(f"[Odoo] production-report attach failed for report {report_id}: {exc}")
+
+
+@app.post("/api/reports/{report_id}/verify")
+def verify_report(
+    report_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Human-in-the-loop verification of operator-entered report data.
+
+    A supervisor/admin approves (``{"action": "approve"}``) or rejects
+    (``{"action": "reject"}``) the report. Only approved reports are considered
+    authoritative for Odoo sync. Rejecting keeps the record but marks it out of
+    the verified set; the operator/admin can correct and re-submit for approval.
+    """
+    db_report = db.query(models.ProductionReport).filter(
+        models.ProductionReport.id == report_id
+    ).first()
+    if not db_report:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    user_role = current_user.role
+    is_admin = (
+        user_role is not None
+        and user_role.role_name.lower() in ("admin", "superadmin")
+    )
+    can_verify = is_admin or (user_role is not None and user_role.can_edit_report)
+    if not can_verify:
+        raise HTTPException(
+            status_code=403,
+            detail="Only admin/superadmin (or can_edit_report) may verify reports.",
+        )
+
+    action = str(payload.get("action", "")).strip().lower()
+    if action not in ("approve", "reject"):
+        raise HTTPException(status_code=400, detail="action must be 'approve' or 'reject'")
+
+    db_report.verification_status = "approved" if action == "approve" else "rejected"
+    db_report.verified_by = current_user.username
+    db_report.verified_at = datetime.utcnow()
+    db.commit()
+
+    import json as _json
+    audit_log = models.ReportAuditLog(
+        report_id=db_report.id,
+        user_id=current_user.id,
+        username=current_user.username,
+        action="VERIFIED" if action == "approve" else "REJECTED",
+        changed_fields=_json.dumps({"verification_status": db_report.verification_status}),
+    )
+    db.add(audit_log)
+    db.commit()
+
+    if action == "approve":
+        # Dispatch the run to Odoo immediately: the approved report is authoritative
+        # even while the shift is still open (a shift may span multiple orders).
+        if db_report.run_id:
+            try:
+                from app.services.odoo import outbound as odoo_outbound
+                odoo_outbound.enqueue_run_dispatch(db, db_report.run_id)
+                db.commit()
+            except Exception as exc:  # noqa: BLE001 - approval must never fail
+                print(f"[Odoo] run dispatch enqueue failed for report {db_report.id}: {exc}")
+
+    return {
+        "status": "success",
+        "report_id": db_report.id,
+        "verification_status": db_report.verification_status,
+        "verified_by": db_report.verified_by,
     }
 
 
@@ -2082,6 +2402,163 @@ def get_report_edits(
             for e in edits
         ],
     }
+
+def _coerce_report_value(col_type, value):
+    """Coerce a stringified audit value back to the column's Python type."""
+    if value is None:
+        return None
+    type_name = str(col_type).lower()
+    if any(t in type_name for t in ("integer", "bigint", "smallint")):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+    if any(t in type_name for t in ("float", "numeric", "double", "decimal")):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    if "bool" in type_name:
+        return str(value).strip().lower() in ("true", "1", "yes", "t")
+    return value
+
+
+# Fields that are lifecycle/identity flags and must never be "restored" back to
+# an earlier snapshot (archive state, verification, soft-delete, timestamps, ...).
+_REVERT_EXCLUDED_FIELDS = {
+    "id", "client_report_id", "is_archived", "is_deleted", "deleted_by",
+    "deleted_at", "status", "verification_status", "verified_by", "verified_at",
+    "edited_by", "edited_at", "parent_report_id", "parent_local_report_id",
+    "sync_at", "submitted_at_utc", "timezone_offset", "shift_id", "run_id",
+    "is_modified_manually",
+}
+
+
+@app.post("/api/reports/{report_id}/revert")
+def revert_report_to_original(
+    report_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """
+    Revert a production report to its original (pre-edit) values.
+
+    Reconstructs the initial value of every data field from the immutable
+    ``ReportEditLog`` history (the earliest ``old_values`` per field), applies
+    them, resets the report to ``status='original'`` and forces re-verification,
+    then writes a ``RESTORED`` audit log entry.
+
+    Requires: admin/superadmin role OR user.can_edit_report.
+    """
+    db_report = db.query(models.ProductionReport).filter(
+        models.ProductionReport.id == report_id
+    ).first()
+    if not db_report:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    user_role = current_user.role
+    is_admin = (
+        user_role is not None
+        and user_role.role_name.lower() in ("admin", "superadmin")
+    )
+    can_edit = is_admin or (user_role is not None and user_role.can_edit_report)
+    if not can_edit:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to revert report data. "
+                   "Required: can_edit_report or admin/superadmin role.",
+        )
+
+    edits = (
+        db.query(models.ReportEditLog)
+        .filter(models.ReportEditLog.report_id == report_id)
+        .order_by(models.ReportEditLog.edited_at.asc())
+        .all()
+    )
+    if not edits:
+        raise HTTPException(status_code=400, detail="Report has no edit history to revert.")
+
+    columns = models.ProductionReport.__table__.columns
+
+    # Earliest recorded old_value wins -> the value before any edit was applied.
+    original = {}
+    for e in edits:
+        try:
+            old_values = json.loads(e.old_values) if e.old_values else {}
+        except Exception:
+            old_values = {}
+        if not isinstance(old_values, dict):
+            continue
+        for field, val in old_values.items():
+            if field in original:
+                continue
+            if field in _REVERT_EXCLUDED_FIELDS:
+                continue
+            if field not in columns:
+                continue
+            original[field] = val
+
+    if not original:
+        raise HTTPException(status_code=400, detail="Nothing to revert.")
+
+    changed = {}
+    for field, val in original.items():
+        col = columns[field]
+        new_val = _coerce_report_value(col.type, val)
+        old_val = getattr(db_report, field, None)
+        if str(old_val) == str(new_val):
+            continue
+        setattr(db_report, field, new_val)
+        changed[field] = {"old": old_val, "new": new_val}
+
+    db_report.status = "original"
+    db_report.verification_status = "pending"
+    db_report.verified_by = None
+    db_report.verified_at = None
+    db_report.is_modified_manually = False
+
+    db.commit()
+    db.refresh(db_report)
+
+    if changed:
+        import json as _json
+        edit_log = models.ReportEditLog(
+            report_id=db_report.id,
+            user_id=current_user.id,
+            username=current_user.username,
+            changed_fields=_json.dumps(list(changed.keys()), ensure_ascii=False),
+            old_values=_json.dumps(
+                {f: (str(v["old"]) if v["old"] is not None else None) for f, v in changed.items()},
+                ensure_ascii=False,
+            ),
+            new_values=_json.dumps(
+                {f: (str(v["new"]) if v["new"] is not None else None) for f, v in changed.items()},
+                ensure_ascii=False,
+            ),
+        )
+        db.add(edit_log)
+        audit_diff = {
+            f: {"old": str(v["old"]) if v["old"] is not None else None,
+                "new": str(v["new"]) if v["new"] is not None else None}
+            for f, v in changed.items()
+        }
+        audit_log = models.ReportAuditLog(
+            report_id=db_report.id,
+            user_id=current_user.id,
+            username=current_user.username,
+            action="RESTORED",
+            changed_fields=_json.dumps(audit_diff, ensure_ascii=False),
+        )
+        db.add(audit_log)
+        db.commit()
+
+    return {
+        "status": "success",
+        "report_id": db_report.id,
+        "restored_fields": list(changed.keys()),
+        "verification_status": db_report.verification_status,
+    }
+
 
 # --- LAST REPORT BY MACHINE (for "copy from previous" feature) ---
 @app.get("/api/reports/last-by-machine")
@@ -2471,6 +2948,11 @@ if os.path.isdir(_web_dir):
         candidate = os.path.join(_web_dir, full_path.lstrip('/'))
         if os.path.isfile(candidate):
             return _FileResponse(candidate)
+        # A path with a file extension is a static-asset request (e.g. flutter.js.map).
+        # If the file is missing, 404 instead of falling back to index.html so the
+        # browser devtools doesn't try to JSON.parse the HTML fallback.
+        if os.path.splitext(full_path)[1]:
+            raise HTTPException(status_code=404, detail='Not found')
         # Otherwise fall back to index.html (SPA entry point)
         index = os.path.join(_web_dir, 'index.html')
         if os.path.isfile(index):

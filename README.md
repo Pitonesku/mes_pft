@@ -103,8 +103,10 @@ See `.env.example` for the full, commented reference. Key variables:
 | `ENV` | `production` enables strict checks (refuses placeholder secrets/admin) |
 | `DB_USER` / `DB_PASSWORD` / `DB_HOST` / `DB_PORT` / `DB_NAME` | PostgreSQL connection |
 | `SECRET_KEY` | Signs bearer tokens + SQLAdmin cookies |
-| `STATION_WATCH_PATH` / `STATION_ARCHIVE_PATH` / `STATION_ERROR_PATH` | Station watcher folders |
+| `STATION_WATCH_PATH` / `STATION_WATCH_PATHS` | Legacy static fallback folders — Pull folders are configured in **Settings → Quality Stations** (`station_profiles.watch_path`) |
+| `STATION_SCAN_INTERVAL` | Watcher poll interval in seconds (default `30`) |
 | `STATION_MACHINE_ALIAS_FIELD` | Station column identifying the machine (`maker`) |
+| `STATION_MO_FIELD` | Station column carrying the MO number (`batch_description` / `comments` / `brand`) |
 | `WEB_BUILD_DIR` | Flutter web build directory (defaults to `frontend/build/web`) |
 
 ## Documentation

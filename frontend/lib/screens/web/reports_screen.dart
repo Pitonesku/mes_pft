@@ -9,9 +9,9 @@ import 'package:intl/intl.dart';
 import '../../models.dart';
 import '../../api_service.dart';
 import '../../core/app_navigation.dart';
-import '../../core/hash_navigation.dart';
 import '../../widgets/resizable_panel.dart';
 import '../../widgets/report_detail_panel.dart';
+import '../../widgets/report_verification_card.dart';
 
 class ReportsScreen extends StatefulWidget {
   final User user;
@@ -318,36 +318,42 @@ class _ReportsScreenState extends State<ReportsScreen> {
                               },
                               materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                             )),
-                             DataCell(InkWell(
-                               onTap: id == null ? null : () {
-                                 AppNavigation.openReport(id!);
-                                 setHash('#/reports/$id');
-                               },
-                               mouseCursor: id == null
-                                   ? MouseCursor.defer
-                                   : SystemMouseCursors.click,
-                               child: Row(children: [
-                                 if (r['is_archived'] == true)
-                                   const Padding(
-                                     padding: EdgeInsets.only(right: 4),
-                                     child: Icon(Icons.archive, size: 13, color: Colors.brown)),
-                                 Text(r['report_date'] ?? '',
-                                   style: TextStyle(
-                                     fontSize: 13,
-                                     color: r['is_archived'] == true ? Colors.grey : null,
-                                     fontStyle: r['is_archived'] == true ? FontStyle.italic : null)),
-                               ]),
-                             )),
+                             DataCell(Row(children: [
+                               if (r['is_archived'] == true)
+                                 const Padding(
+                                   padding: EdgeInsets.only(right: 4),
+                                   child: Icon(Icons.archive, size: 13, color: Colors.brown)),
+                               Text(r['report_date'] ?? '',
+                                 style: TextStyle(
+                                   fontSize: 13,
+                                   color: r['is_archived'] == true ? Colors.grey : null,
+                                   fontStyle: r['is_archived'] == true ? FontStyle.italic : null)),
+                             ])),
                              DataCell(Text(r['shift_name']    ?? '', style: TextStyle(fontSize: 13, color: r['is_archived'] == true ? Colors.grey : null))),
                              DataCell(Text(r['machine_name']  ?? '', style: TextStyle(fontSize: 13, color: r['is_archived'] == true ? Colors.grey : null))),
                              DataCell(Text(r['operator_name'] ?? '', style: TextStyle(fontSize: 13, color: r['is_archived'] == true ? Colors.grey : null))),
-                             DataCell(Text(r['po_number'] ?? '',
-                               style: TextStyle(fontSize: 13,
-                                 fontWeight: FontWeight.w600,
-                                 color: r['is_archived'] == true ? Colors.grey : Colors.deepPurple))),
+                             DataCell(InkWell(
+                               onTap: (r['po_number'] ?? '').toString().isEmpty
+                                   ? null
+                                   : () => AppNavigation.openOrder(r['po_number'].toString()),
+                               mouseCursor: (r['po_number'] ?? '').toString().isEmpty
+                                   ? MouseCursor.defer
+                                   : SystemMouseCursors.click,
+                               child: Text(r['po_number'] ?? '',
+                                 style: TextStyle(fontSize: 13,
+                                   fontWeight: FontWeight.w600,
+                                   color: r['is_archived'] == true ? Colors.grey : Colors.deepPurple,
+                                   decoration: (r['po_number'] ?? '').toString().isEmpty
+                                       ? null
+                                       : TextDecoration.underline)),
+                             )),
                              DataCell(Text(_fmtSync(r['sync_at']),
                                style: const TextStyle(fontSize: 12, color: Colors.grey))),
-                             DataCell(_StatusChip(r['status'] ?? 'original')),
+                             DataCell(Row(mainAxisSize: MainAxisSize.min, children: [
+                                ReportStatusChip(r['status'] ?? 'original'),
+                                const SizedBox(width: 4),
+                                ReportVerificationDot(r['verification_status']?.toString() ?? 'pending'),
+                              ])),
                           ],
                         );
                       }).toList(),
@@ -370,25 +376,11 @@ class _ReportsScreenState extends State<ReportsScreen> {
         report: _selected!,
         onClose: () => setState(() => _selected = null),
         onArchiveToggle: () => _archiveSelected(),
+        canVerify: widget.user.canModifyPO,
+        onVerified: _load,
       ),
     );
   }
 }
 
-// ── Status chip ──────────────────────────────────────────────────────────────
-class _StatusChip extends StatelessWidget {
-  final String status;
-  const _StatusChip(this.status);
-  @override
-  Widget build(BuildContext context) {
-    final color = switch (status) {
-      'edited'   => Colors.orange,
-      'obsolete' => Colors.red,
-      _          => Colors.green,
-    };
-    return Chip(
-      label: Text(status, style: const TextStyle(fontSize: 11, color: Colors.white)),
-      backgroundColor: color, padding: EdgeInsets.zero,
-      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap);
-  }
-}
+

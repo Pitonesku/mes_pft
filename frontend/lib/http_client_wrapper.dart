@@ -48,32 +48,30 @@ class LoggingHttpClient extends http.BaseClient {
         '📥 [RESPONSE #$requestId] Status: ${response.statusCode} (${duration}ms)',
       );
 
-      // Log response body for debugging
+      // Log response body for debugging (never break binary payloads).
+      final bodyBytes = await response.stream.toBytes();
       try {
-        final bodyBytes = await response.stream.toBytes();
         final bodyString = utf8.decode(bodyBytes);
-        
         if (bodyString.isNotEmpty && bodyString.length < 500) {
           AppLog.d('   Response Body: $bodyString');
         } else if (bodyString.isNotEmpty) {
           AppLog.d('   Response Body: [${bodyString.length} bytes]');
         }
-
-        // Return response with body
-        return http.StreamedResponse(
-          http.ByteStream.fromBytes(bodyBytes),
-          response.statusCode,
-          contentLength: response.contentLength,
-          request: response.request,
-          headers: response.headers,
-          isRedirect: response.isRedirect,
-          persistentConnection: response.persistentConnection,
-          reasonPhrase: response.reasonPhrase,
-        );
-      } catch (e) {
-        AppLog.d('   Response Body: [Unable to decode]');
-        return response;
+      } catch (_) {
+        AppLog.d('   Response Body: [Binary data, ${bodyBytes.length} bytes]');
       }
+
+      // Return response with the exact body bytes we already read.
+      return http.StreamedResponse(
+        http.ByteStream.fromBytes(bodyBytes),
+        response.statusCode,
+        contentLength: bodyBytes.length,
+        request: response.request,
+        headers: response.headers,
+        isRedirect: response.isRedirect,
+        persistentConnection: response.persistentConnection,
+        reasonPhrase: response.reasonPhrase,
+      );
     } on TimeoutException catch (e) {
       AppLog.e(
         '❌ [REQUEST #$requestId] TIMEOUT ERROR: $e\n'

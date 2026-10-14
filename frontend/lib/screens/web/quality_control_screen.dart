@@ -360,6 +360,17 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
         OutlinedButton.icon(icon: const Icon(Icons.print, size: 16), label: const Text('Print Report'), onPressed: _openPrintReport),
         const SizedBox(width: 8),
         OutlinedButton.icon(icon: const Icon(Icons.download, size: 16), label: const Text('Export CSV'), onPressed: _exportCsv),
+        const SizedBox(width: 8),
+        Tooltip(
+          message: _poId == null
+              ? 'Select a PO to generate the certificate for the whole order'
+              : 'Quality certificate aggregating all shifts of this order',
+          child: OutlinedButton.icon(
+            icon: const Icon(Icons.workspace_premium, size: 16),
+            label: const Text('Order Certificate'),
+            onPressed: _poId == null ? null : _openOrderCertificate,
+          ),
+        ),
       ]),
       const SizedBox(height: 8),
       Expanded(
@@ -439,9 +450,17 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
     final qp = <String, String>{'fmt': 'csv', 'window': _window, 'window_value': '$_windowValue'};
     if (_machine != 'all') qp['machine'] = _machine;
     if (_poId != null) qp['po_id'] = '$_poId';
-    if (_shiftId != null) qp['shift_id'] = '$_shiftId';
+    // Same rule as _load(): "Entire PO" ignores the selected shift.
+    if (_shiftId != null && _window != 'po') qp['shift_id'] = '$_shiftId';
     final uri = Uri.parse('${ApiService.effectiveBaseUrl}/v2/quality').replace(queryParameters: qp);
     launchUrl(Uri.base.resolve(uri.toString()), webOnlyWindowName: '_blank');
+  }
+
+  /// Consolidated certificate of the whole order (all shifts), opened in a new tab.
+  void _openOrderCertificate() {
+    final id = _poId;
+    if (id == null) return;
+    launchUrl(Uri.base.resolve(ApiService.orderCertificatePdfUrl(id)), webOnlyWindowName: '_blank');
   }
 
   Future<void> _openPrintReport() async {

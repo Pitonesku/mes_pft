@@ -68,6 +68,7 @@ class _MaterialsScreenState extends State<MaterialsScreen> {
   Future<void> _showDialog(RawMaterial? existing) async {
     final typeC  = TextEditingController(text: existing?.type ?? '');
     final batchC = TextEditingController(text: existing?.batch ?? '');
+    final odooC  = TextEditingController(text: existing?.odooProductId?.toString() ?? '');
     MaterialCategory cat = existing?.category ?? MaterialCategory.acetate;
     bool hidden = existing?.isHidden ?? false;
 
@@ -91,6 +92,10 @@ class _MaterialsScreenState extends State<MaterialsScreen> {
           const SizedBox(height: 12),
           TextField(controller: batchC,
             decoration: const InputDecoration(labelText: 'Default Batch')),
+          const SizedBox(height: 12),
+          TextField(controller: odooC,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(labelText: 'Odoo Product ID (optional mapping)')),
           const SizedBox(height: 8),
           CheckboxListTile(
             title: const Text('Hidden from operators'),
@@ -112,6 +117,7 @@ class _MaterialsScreenState extends State<MaterialsScreen> {
                   category: cat,
                   batch: batchC.text.trim(),
                   isHidden: hidden,
+                  odooProductId: int.tryParse(odooC.text.trim()),
                 );
 
                 bool success;
@@ -218,6 +224,7 @@ class _MaterialsScreenState extends State<MaterialsScreen> {
             columns: const [
               DataColumn(label: Text('Material Type')),
               DataColumn(label: Text('Default Batch')),
+              DataColumn(label: Text('Mapped Odoo Product')),
               DataColumn(label: Text('Hidden')),
               DataColumn(label: Text('Actions')),
             ],
@@ -228,6 +235,15 @@ class _MaterialsScreenState extends State<MaterialsScreen> {
                   color: m.isHidden ? Colors.grey : Colors.deepPurple))),
               DataCell(Text((m.batch?.isEmpty ?? true) ? '-' : m.batch!,
                 style: const TextStyle(fontSize: 13))),
+              DataCell(m.odooProductId != null
+                ? Row(mainAxisSize: MainAxisSize.min, children: [
+                    const Icon(Icons.link, size: 16, color: Colors.green),
+                    const SizedBox(width: 4),
+                    Text('#${m.odooProductId}',
+                      style: const TextStyle(fontSize: 13, color: Colors.green, fontWeight: FontWeight.w600)),
+                  ])
+                : Text(m.source == 'odoo' ? 'Auto (unmapped)' : 'Local',
+                    style: const TextStyle(fontSize: 12, color: Colors.grey))),
               DataCell(Icon(
                 m.isHidden ? Icons.visibility_off : Icons.visibility,
                 size: 18,

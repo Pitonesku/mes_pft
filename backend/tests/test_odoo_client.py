@@ -43,7 +43,7 @@ class FakeClient(odoo_client.OdooClient):
 
     def read(self, model, ids, fields):
         if model == "uom.uom" and "factor" in fields:
-            return [{"name": "M pcs", "factor": self._ratio}]
+            return [{"name": "M pcs", "factor_inv": self._ratio, "factor": 1.0 / self._ratio}]
         if model == "uom.uom" and "rounding" in fields:
             return [{"rounding": self._rounding}]
         return [{"product_uom_id": [1]}]
@@ -97,6 +97,32 @@ class WriteMoQualityTests(unittest.TestCase):
         result = c.write_mo_quality(5, {"status": "PASS", "parameters": {}})
         self.assertTrue(result.get("skipped"))
         self.assertEqual(c.written, [])
+
+    def test_writes_length_weight_hardness_and_notes(self):
+        c = FakeClient()
+        run = {
+            "status": "PASS",
+            "rods_total": 100,
+            "rods_rejected": 0,
+            "remarks": "glue seam checked | hardness spot check",
+            "parameters": {
+                "length": {"n": 2, "mean": 108.0, "sd_samp": 0.2},
+                "weight": {"n": 2, "mean": 0.665, "sd_samp": 0.005, "report_scale": 100},
+                "hardness": {"n": 2, "mean": 83.5, "sd_samp": 0.5},
+            },
+        }
+        c.write_mo_quality(5, run)
+        values = c.written[0][2]
+        self.assertEqual(values[odoo_client.QC_FIELD_MEAN_LENGTH], 108.0)
+        self.assertEqual(values[odoo_client.QC_FIELD_SD_LENGTH], 0.2)
+        self.assertEqual(values[odoo_client.QC_FIELD_MEAN_WEIGHT], 66.5)
+        self.assertEqual(values[odoo_client.QC_FIELD_SD_WEIGHT], 0.5)
+        self.assertEqual(values[odoo_client.QC_FIELD_MEAN_HARDNESS], 83.5)
+        self.assertEqual(values[odoo_client.QC_FIELD_SD_HARDNESS], 0.5)
+        self.assertEqual(
+            values[odoo_client.QC_FIELD_QUALITY_NOTES],
+            "glue seam checked | hardness spot check",
+        )
 
 
 if __name__ == "__main__":

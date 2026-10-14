@@ -10,9 +10,19 @@ import '../../api_service.dart';
 import '../../local_db.dart';
 import '../../widgets/dev_banner.dart';
 import 'history_screen.dart';
+import 'manual_quality_checks_screen.dart';
+import 'pending_shifts_screen.dart';
+import '../../shift_context.dart';
 import 'package:intl/intl.dart';
 import 'dart:async';
 import 'dart:math';
+
+/// Result of the "Change MO" dialog.
+class _SwitchInput {
+  final double? endCounter;
+  final PurchaseOrder? po;
+  _SwitchInput({this.endCounter, this.po});
+}
 
 class ReportPage extends StatefulWidget {
   final User operator;
@@ -44,12 +54,17 @@ class _ReportPageState extends State<ReportPage> {
   bool _isSubmitting = false;
   bool _isSaving = false;
   String? _clientReportId;
+  // Shift / run the report being edited belongs to. Null = "use the active shift's
+  // current run" (a fresh report); a restored draft keeps the ids it was started with.
+  int? _reportShiftId;
+  int? _reportRunId;
   bool _adjustTime = false;
   DateTime? _manualShiftDate;
 
   Shift? _selectedShift;
   Machine? _selectedMachine;
   PurchaseOrder? _selectedPO;
+  ShiftContext? _activeShift;
 
   // Field controllers
   final _startTimeCtrl = TextEditingController();
@@ -136,272 +151,6 @@ class _ReportPageState extends State<ReportPage> {
     return null;
   }
 
-  // --- PREVIOUS REPORT COPY FEATURE ---
-
-  Future<Map<String, dynamic>?> _findLastReportForMachine(String machineName) async {
-    // 1. Try server first (works across all devices/tablets)
-    try {
-      final serverData = await ApiService.fetchLastReportByMachine(machineName);
-      if (serverData != null) {
-        // Use sync_at or report_date as the timestamp for display
-        final syncAt = serverData['sync_at'] as String? ?? serverData['report_date'] as String? ?? '';
-        serverData['_local_created_at'] = syncAt;
-        return serverData;
-      }
-    } catch (_) {}
-
-    // 2. Fallback: search local DB (offline mode)
-    final allReports = await LocalDB.instance.getAllReports();
-    final machineReports = allReports.where((row) {
-      final status = row['status'] as String? ?? '';
-      if (status != 'synced' && status != 'pending') return false;
-      try {
-        final data = jsonDecode(row['report_data'] as String) as Map<String, dynamic>;
-        return (data['machine_name']?.toString() ?? '') == machineName;
-      } catch (_) {
-        return false;
-      }
-    }).toList();
-
-    if (machineReports.isEmpty) return null;
-
-    // Already sorted by created_at DESC from getAllReports
-    final latest = machineReports.first;
-    final data = jsonDecode(latest['report_data'] as String) as Map<String, dynamic>;
-    data['_local_created_at'] = latest['created_at'];
-    return data;
-  }
-
-  Future<void> _checkForPreviousReportOnMachine(Machine machine) async {
-    final prevData = await _findLastReportForMachine(machine.name);
-    if (prevData == null) return;
-    if (!mounted) return;
-
-    final createdAtStr = prevData['_local_created_at'] as String? ?? '';
-    String formattedDate = '';
-    try {
-      final dt = DateTime.parse(createdAtStr);
-      formattedDate = DateFormat('dd.MM.yyyy HH:mm').format(dt);
-    } catch (_) {
-      formattedDate = createdAtStr;
-    }
-    final prevOperator = prevData['operator_name'] as String? ?? 'Unknown';
-
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        title: Row(
-          children: const [
-            Icon(Icons.history, color: Colors.deepPurple),
-            SizedBox(width: 8),
-            Text(
-              "Previous Report Found",
-              style: TextStyle(color: Colors.deepPurple, fontSize: 16),
-            ),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              "Machine: ${machine.name}",
-              style: const TextStyle(fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 6),
-            Text("Submitted: $formattedDate"),
-            Text("By operator: $prevOperator"),
-            const SizedBox(height: 12),
-            const Text(
-              "Would you like to use data from this report?\n\n"
-              "• PO number & lot will be copied\n"
-              "• Last bale of each material: batch & stop→start",
-              style: TextStyle(fontSize: 13),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text(
-              "NO, START FRESH",
-              style: TextStyle(color: Colors.grey),
-            ),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(context);
-              _copyFromPreviousReport(prevData);
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.deepPurple,
-              foregroundColor: Colors.white,
-            ),
-            child: const Text("YES, USE THIS DATA"),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _copyFromPreviousReport(Map<String, dynamic> d) {
-    // Find and select the PO
-    PurchaseOrder? foundPO;
-    try {
-      if (d['po_number'] != null) {
-        foundPO = AppData.activePOs.firstWhere(
-          (p) => p.poNumber == d['po_number'],
-        );
-      }
-    } catch (_) {}
-
-    setState(() {
-      // Copy PO and lot
-      if (foundPO != null) {
-        _selectedPO = foundPO;
-        _isModifyEnabled = false;
-        _boxTypeController.text = foundPO.boxType.toString();
-        _diameterController.text = foundPO.diameter.toString();
-        _lengthController.text = foundPO.length.toString();
-        _pdController.text = foundPO.pd.toString();
-        _weightController.text = foundPO.weight.toString();
-      }
-      _lotController.text = d['lot_number'] ?? '';
-
-      // Helper: get last item from a material list in the previous report data
-      // and create a new MaterialItem with type, batch, and stop→start
-      MaterialItem? buildFromLastItem(List<dynamic>? items) {
-        if (items == null || items.isEmpty) return null;
-        final last = items.last;
-        if (last is! Map<String, dynamic>) return null;
-        final type = last['type']?.toString() ?? '';
-        final batch = last['batch']?.toString() ?? '';
-        final stop = last['stop']?.toString() ?? '';
-        final item = MaterialItem(defaultType: type);
-        item.batch.text = batch;
-        item.start.text = stop; // previous stop becomes new start
-        return item;
-      }
-
-      // Acetate
-      final acetateList = d['acetate_list'] as List<dynamic>?;
-      final newAcetate = buildFromLastItem(acetateList);
-      if (newAcetate != null) {
-        _acetate.clear();
-        _acetate.add(newAcetate);
-      } else if (foundPO != null) {
-        _acetate.clear();
-        _acetate.add(MaterialItem(defaultType: foundPO.acetateType));
-      }
-
-      // Paper
-      final paperList = d['paper_list'] as List<dynamic>?;
-      final newPaper = buildFromLastItem(paperList);
-      if (newPaper != null) {
-        _paper.clear();
-        _paper.add(newPaper);
-      } else if (foundPO != null) {
-        _paper.clear();
-        _paper.add(MaterialItem(defaultType: foundPO.paperType));
-      }
-
-      // PVA Glue
-      final pvaList = d['pva_list'] as List<dynamic>?;
-      final newPva = buildFromLastItem(pvaList);
-      if (newPva != null) {
-        _pvaGlue.clear();
-        _pvaGlue.add(newPva);
-      } else if (foundPO != null) {
-        _pvaGlue.clear();
-        _pvaGlue.add(MaterialItem(defaultType: foundPO.pvaGlueType));
-      }
-
-      // HM Glue
-      final hmList = d['hm_list'] as List<dynamic>?;
-      final newHm = buildFromLastItem(hmList);
-      if (newHm != null) {
-        _hmGlue.clear();
-        _hmGlue.add(newHm);
-      } else if (foundPO != null) {
-        _hmGlue.clear();
-        _hmGlue.add(MaterialItem(defaultType: foundPO.hmGlueType));
-      }
-
-      // Triacetin
-      final triList = d['tri_list'] as List<dynamic>?;
-      final newTri = buildFromLastItem(triList);
-      if (newTri != null) {
-        _triacetin.clear();
-        _triacetin.add(newTri);
-      } else if (foundPO != null) {
-        _triacetin.clear();
-        _triacetin.add(MaterialItem(defaultType: foundPO.triacetinType));
-      }
-
-      _calculateProductionLog();
-    });
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text("✅ Data copied from previous report. Please fill in shift & production details."),
-        backgroundColor: Colors.deepPurple,
-        duration: Duration(seconds: 4),
-      ),
-    );
-  }
-
-  Future<void> _checkForUnfinishedDrafts() async {
-    final drafts = await LocalDB.instance.getReportsByStatus('draft');
-    final myDrafts = drafts.where((d) {
-      final data = jsonDecode(d['report_data']);
-      return data['operator_name'] == widget.operator.name;
-    }).toList();
-
-    if (myDrafts.isNotEmpty) {
-      final latestDraft = myDrafts.first;
-      final data = jsonDecode(latestDraft['report_data']);
-      final date = DateTime.parse(latestDraft['created_at']);
-      final formattedDate = DateFormat('dd.MM.yyyy HH:mm').format(date);
-
-      if (!mounted) return;
-
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (context) => AlertDialog(
-          title: const Text(
-            "Unfinished Draft Found",
-            style: TextStyle(color: Colors.deepPurple),
-          ),
-          content: Text(
-            "You have an unfinished report from $formattedDate.\n\nWould you like to continue editing it or start a new one?",
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text(
-                "START NEW",
-                style: TextStyle(color: Colors.grey),
-              ),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                Navigator.pop(context);
-                _loadDraftData(data, latestDraft['id']);
-              },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.deepPurple,
-                foregroundColor: Colors.white,
-              ),
-              child: const Text("CONTINUE DRAFT"),
-            ),
-          ],
-        ),
-      );
-    }
-  }
-
   @override
   void initState() {
     super.initState();
@@ -413,9 +162,638 @@ class _ReportPageState extends State<ReportPage> {
       _loadDraftData(widget.initialData!, widget.localId);
     } else {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        _checkForUnfinishedDrafts();
+        _ensureActiveShift();
       });
     }
+  }
+
+  Future<void> _ensureActiveShift() async {
+    final ctx = await ApiService.loadShiftContext();
+    if (!mounted) return;
+    if (ctx == null) {
+      setState(() => _activeShift = null);
+      return;
+    }
+
+    // The saved context may point at a shift that was stopped/closed on another
+    // device, or at a previous session. Re-validate it against the server so the
+    // screen either shows the real active shift (with machine/shift/MO) or the
+    // "Start Shift" view - never a blank form with no way to open a shift.
+    final detail = await ApiService.fetchShiftDetail(ctx.shiftId);
+    if (!mounted) return;
+
+    if (detail == null) {
+      if (ApiService.lastApiStatus == 404) {
+        await ApiService.clearShiftContext();
+        setState(() => _activeShift = null);
+      } else {
+        // Network/auth problem: keep the context, repopulate from the cache only.
+        _applyShiftContext(ctx, null);
+      }
+      return;
+    }
+
+    if (detail['ended_at'] != null) {
+      // Already closed / auto-closed elsewhere -> drop the stale context.
+      await ApiService.clearShiftContext();
+      setState(() => _activeShift = null);
+      return;
+    }
+
+    _applyShiftContext(ctx, detail);
+  }
+
+  void _applyShiftContext(ShiftContext ctx, Map<String, dynamic>? detail) {
+    final machineId = detail?['machine_id'] as int? ?? ctx.machineId;
+    final shiftName = (detail?['shift_name'] as String?) ?? ctx.shiftName;
+    final machine = _machineById(machineId) ?? _machineByName(ctx.machineName);
+    final shift = _shiftByName(shiftName);
+    final po = (detail != null ? _poByRun(detail['runs'] as List<dynamic>?) : null)
+        ?? _poByNumber(ctx.moRef);
+
+    setState(() {
+      _activeShift = ctx;
+      if (machine != null) _selectedMachine = machine;
+      if (shift != null) {
+        _selectedShift = shift;
+        _startTimeCtrl.text = shift.start;
+        _endTimeCtrl.text = shift.end;
+      }
+    });
+    if (po != null) _onPOSelected(po);
+  }
+
+  Machine? _machineById(int? id) {
+    if (id == null) return null;
+    for (final m in AppData.machines) {
+      if (m.id == id) return m;
+    }
+    return null;
+  }
+
+  Machine? _machineByName(String? name) {
+    if (name == null) return null;
+    for (final m in AppData.machines) {
+      if (m.name == name) return m;
+    }
+    return null;
+  }
+
+  Shift? _shiftByName(String? name) {
+    if (name == null) return null;
+    for (final s in AppData.shifts) {
+      if (s.name == name) return s;
+    }
+    return null;
+  }
+
+  PurchaseOrder? _poByNumber(String? poNumber) {
+    if (poNumber == null) return null;
+    for (final p in AppData.activePOs) {
+      if (p.poNumber == poNumber) return p;
+    }
+    return null;
+  }
+
+  PurchaseOrder? _poById(int? id) {
+    if (id == null) return null;
+    for (final p in AppData.activePOs) {
+      if (p.id == id) return p;
+    }
+    return null;
+  }
+
+  PurchaseOrder? _poByRun(List<dynamic>? runs) {
+    if (runs == null) return null;
+    Map<String, dynamic>? open;
+    for (final r in runs) {
+      final m = Map<String, dynamic>.from(r as Map);
+      if (m['ended_at'] == null) open = m;
+    }
+    if (open == null) return null;
+    return _poById(open['po_id'] as int?) ?? _poByNumber(open['mo_ref'] as String?);
+  }
+
+  Widget _buildInactiveShiftView() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Icon(Icons.timer_off_outlined, size: 72, color: Colors.grey),
+          const SizedBox(height: 16),
+          const Text(
+            'No Active Shift',
+            style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Please start a shift to log production.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.grey, fontSize: 15),
+          ),
+          const SizedBox(height: 28),
+          FilledButton.icon(
+            onPressed: _promptStartShift,
+            icon: const Icon(Icons.play_circle, size: 24),
+            label: const Text('Start Shift', style: TextStyle(fontSize: 16)),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  void _toast(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  Future<void> _promptStartShift() async {
+    final now = DateTime.now();
+    final availableShifts = availableShiftsForTime(now, AppData.shifts);
+    Shift? autoShift = resolveShiftForTime(now, AppData.shifts) ??
+        (availableShifts.isNotEmpty ? availableShifts.first : null);
+
+    Machine? selMachine;
+    for (final m in AppData.machines) {
+      if (!m.isInactive && m.id != null) {
+        selMachine = m;
+        break;
+      }
+    }
+    PurchaseOrder? selPO;
+    for (final p in AppData.activePOs) {
+      if (!p.isHidden) {
+        selPO = p;
+        break;
+      }
+    }
+    if (selMachine == null) {
+      _toast('No machines available — check connection and sync data.');
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDlg) => AlertDialog(
+          title: const Text('Start Shift'),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              DropdownButtonFormField<Machine>(
+                initialValue: selMachine,
+                decoration: const InputDecoration(labelText: 'Machine'),
+                items: AppData.machines
+                    .where((m) => !m.isInactive && m.id != null)
+                    .map((m) => DropdownMenuItem(value: m, child: Text(m.name)))
+                    .toList(),
+                onChanged: (v) => setDlg(() => selMachine = v),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<Shift>(
+                initialValue: autoShift,
+                decoration: const InputDecoration(labelText: 'Shift'),
+                items: availableShifts
+                    .map((s) => DropdownMenuItem(
+                        value: s, child: Text('${s.name} (${s.start}-${s.end})')))
+                    .toList(),
+                onChanged: (v) => setDlg(() => autoShift = v),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<PurchaseOrder>(
+                initialValue: selPO,
+                decoration: const InputDecoration(labelText: 'Manufacturing Order'),
+                items: AppData.activePOs
+                    .where((p) => !p.isHidden)
+                    .map((p) => DropdownMenuItem(value: p, child: Text(p.poNumber)))
+                    .toList(),
+                onChanged: (v) => setDlg(() => selPO = v),
+              ),
+            ]),
+          ),
+          actions: [
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Start Shift')),
+          ],
+        ),
+      ),
+    );
+
+    if (confirmed != true || selMachine == null) return;
+    await _doStartShift(selMachine!, autoShift, selPO);
+  }
+
+  Future<void> _doStartShift(
+      Machine machine, Shift? shift, PurchaseOrder? po) async {
+    if (machine.id == null) {
+      _toast('Machine not synced — please reconnect and retry.');
+      return;
+    }
+    bool takeover = false;
+    if (machine.id != null) {
+      final active = await ApiService.fetchShiftSessions(
+          machineId: machine.id, status: 'active');
+      if (!mounted) return;
+      if (active != null && active.isNotEmpty) {
+        final take = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Machine already has an open shift'),
+            content: const Text(
+                'Another operator has an active shift on this machine. Take over? Their shift will be auto-closed (data kept) so you can start fresh.'),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text('Cancel')),
+              FilledButton(
+                  onPressed: () => Navigator.pop(ctx, true),
+                  child: const Text('Take Over')),
+            ],
+          ),
+        );
+        if (take != true) return;
+        takeover = true;
+      }
+    }
+
+    final scheduledEnd =
+        shift != null ? scheduledEndForShift(DateTime.now(), shift) : null;
+    final r = await ApiService.startShift(
+      machineId: machine.id!,
+      poId: po?.id,
+      shiftName: shift?.name,
+      scheduledEndAt: scheduledEnd,
+      takeover: takeover,
+    );
+    if (r == null) {
+      _toast('Failed to start shift: ${ApiService.lastApiDetail}');
+      return;
+    }
+    final shiftId = r['id'] as int? ?? 0;
+    final run = r['run'] as Map?;
+    final runId = run?['id'] as int?;
+    final ctx = ShiftContext(
+      shiftId: shiftId,
+      machineId: machine.id,
+      machineName: machine.name,
+      runId: runId,
+      moRef: po?.poNumber ?? (run?['mo_ref'] as String?),
+      shiftName: shift?.name ?? (r['shift_name'] as String?),
+      startedAt: DateTime.tryParse(r['started_at']?.toString() ?? ''),
+      scheduledEndAt: scheduledEnd,
+    );
+    await ApiService.saveShiftContext(ctx);
+    if (!mounted) return;
+    setState(() {
+      _activeShift = ctx;
+      _selectedMachine = machine;
+      if (shift != null) {
+        _selectedShift = shift;
+        _startTimeCtrl.text = shift.start;
+        _endTimeCtrl.text = shift.end;
+      }
+    });
+    if (po != null) _onPOSelected(po);
+    // A new shift is a brand-new report: reset the idempotency key and clear the
+    // production-log fields so the previous report's values (boxes, counter, ...)
+    // never leak into this one. Without this, resubmitting after a shift close
+    // reuses the old client_report_id and the server silently rejects it as a
+    // duplicate while the UI still shows "Sent to server!".
+    _startNewReportIdentity();
+    _resetProductionLog();
+    _toast('Shift started');
+    await _checkForMatchingDraft(ctx);
+  }
+
+  Future<void> _changeMo() async {
+    final ctx = _activeShift;
+    if (ctx == null) {
+      _toast('No active shift');
+      return;
+    }
+
+    PurchaseOrder? selPO;
+    for (final p in AppData.activePOs) {
+      if (!p.isHidden && p.poNumber != ctx.moRef) {
+        selPO = p;
+        break;
+      }
+    }
+    final counterCtrl = TextEditingController(text: _machineCounterController.text.trim());
+    final input = await showDialog<_SwitchInput>(
+      context: context,
+      builder: (dctx) => StatefulBuilder(
+        builder: (dctx, setDlg) => AlertDialog(
+          title: const Text('Change MO / Order'),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Text('Now: ${ctx.moRef ?? '-'} on ${ctx.machineName ?? '-'}',
+                  style: const TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 6),
+              const Text(
+                  'What you entered for the current MO is saved as a draft report first '
+                  '(one report per MO). The new MO starts with an empty report.',
+                  style: TextStyle(fontSize: 12, color: Colors.grey)),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<PurchaseOrder>(
+                initialValue: selPO,
+                decoration: const InputDecoration(labelText: 'New Manufacturing Order'),
+                items: AppData.activePOs
+                    .where((p) => !p.isHidden && p.poNumber != ctx.moRef)
+                    .map((p) => DropdownMenuItem(value: p, child: Text(p.poNumber)))
+                    .toList(),
+                onChanged: (v) => setDlg(() => selPO = v),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: counterCtrl,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                decoration: InputDecoration(
+                    labelText: 'Final machine counter of ${ctx.moRef ?? 'current MO'}'),
+              ),
+            ]),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(dctx), child: const Text('Cancel')),
+            FilledButton(
+                onPressed: selPO == null
+                    ? null
+                    : () => Navigator.pop(
+                        dctx,
+                        _SwitchInput(
+                          po: selPO,
+                          endCounter: double.tryParse(
+                              counterCtrl.text.trim().replaceAll(',', '.')),
+                        )),
+                child: const Text('Switch')),
+          ],
+        ),
+      ),
+    );
+    counterCtrl.dispose();
+    final chosen = input?.po;
+    if (input == null || chosen == null) return;
+
+    await _saveDraftIfHasData();
+    final r = await ApiService.switchMo(ctx.shiftId,
+        poId: chosen.id, endCounter: input.endCounter);
+    if (r == null) {
+      if (ApiService.lastApiStatus == 409) {
+        await ApiService.clearShiftContext();
+        if (!mounted) return;
+        setState(() => _activeShift = null);
+        _toast('This shift is no longer active — start a new shift.');
+      } else {
+        _toast('Failed to switch MO: ${ApiService.lastApiDetail ?? ''}');
+      }
+      return;
+    }
+    final newRunId = r['id'] as int?;
+    final newMoRef = r['mo_ref'] as String? ?? chosen.poNumber;
+    final newCtx = ctx.copyWith(runId: newRunId, moRef: newMoRef);
+    await ApiService.saveShiftContext(newCtx);
+    if (!mounted) return;
+    setState(() => _activeShift = newCtx);
+    _startNewReportIdentity();
+    _onPOSelected(chosen);
+    _resetProductionLog();
+    _toast('Switched to ${chosen.poNumber}');
+  }
+
+  /// A report belongs to exactly one MO run: after an MO / machine change the next
+  /// report is a brand-new one (new idempotency key, new draft, new run link).
+  void _startNewReportIdentity() {
+    _currentDraftId = null;
+    _clientReportId = null;
+    _editingSourceId = null;
+    _originalServerReportId = null;
+    _originalReportDate = null;
+    _reportShiftId = null;
+    _reportRunId = null;
+  }
+
+  bool _hasProductionData() =>
+      _boxProducedController.text.trim().isNotEmpty ||
+      _machineCounterController.text.trim().isNotEmpty ||
+      _rodsProducedController.text.trim().isNotEmpty ||
+      _wasteController.text.trim().isNotEmpty;
+
+  Future<void> _saveDraftIfHasData() async {
+    if (_hasProductionData()) await _saveAsDraft();
+  }
+
+  void _resetProductionLog() {
+    _boxProducedController.clear();
+    _machineCounterController.clear();
+    _rodsProducedController.clear();
+    _differenceController.clear();
+    _diffPercentController.clear();
+    _wasteController.clear();
+    _efficiencyController.clear();
+    _calculateProductionLog();
+  }
+
+  Future<bool> _promptSmartShiftClose() async {
+    final ctx = _activeShift;
+    if (ctx == null) return false;
+    final scheduledEnd = ctx.scheduledEndAt;
+    final nearEnd = scheduledEnd != null &&
+        scheduledEnd.difference(DateTime.now()).inMinutes < 20;
+
+    if (nearEnd) {
+      final close = await showDialog<bool>(
+        context: context,
+        builder: (dctx) => AlertDialog(
+          title: const Text('End of Shift'),
+          content: const Text(
+              'Your shift is ending. Close the shift and log out after submitting?'),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(dctx, false),
+                child: const Text('Keep Shift Open')),
+            FilledButton(
+                onPressed: () => Navigator.pop(dctx, true),
+                child: const Text('Close Shift & Log Out')),
+          ],
+        ),
+      );
+      return close ?? true; // default to close
+    }
+
+    final close = await showDialog<bool>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        title: const Text('Submit Report'),
+        content: const Text(
+            'Submit the report and close the shift, or keep the shift open for more production?'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dctx, false),
+              child: const Text('Submit Report Only')),
+          FilledButton(
+              onPressed: () => Navigator.pop(dctx, true),
+              child: const Text('Submit & Close Shift')),
+        ],
+      ),
+    );
+    return close ?? false;
+  }
+
+  Future<void> _closeActiveShift() async {
+    final ctx = _activeShift;
+    if (ctx == null) return;
+    final logs = _buildShiftCloseLogs();
+    await ApiService.completeShift(
+      ctx.shiftId,
+      materialLogs: logs['material_logs']!,
+      scrapLogs: logs['scrap_logs']!,
+    );
+    await ApiService.clearShiftContext();
+    if (!mounted) return;
+    setState(() => _activeShift = null); // return to the "No Active Shift" state
+  }
+
+  Future<void> _endShift() async {
+    final ctx = _activeShift;
+    if (ctx == null) {
+      _toast('No active shift');
+      return;
+    }
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        title: const Text('Stop Shift'),
+        content: const Text(
+            'Choose how to finish this shift. Unsaved production data can be kept '
+            'as a draft, submitted, or discarded.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dctx, 'cancel'),
+              child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(dctx, 'discard'),
+              child: const Text('Stop Without Saving')),
+          TextButton(
+              onPressed: () => Navigator.pop(dctx, 'draft'),
+              child: const Text('Save Draft & Stop Shift')),
+          FilledButton(
+              onPressed: () => Navigator.pop(dctx, 'submit'),
+              child: const Text('Submit Report & Finish')),
+        ],
+      ),
+    );
+    if (choice == null || choice == 'cancel') return;
+    if (choice == 'submit') {
+      await _submitReport(closeShiftOverride: true);
+      return;
+    }
+    if (choice == 'discard') {
+      await _stopShift(saveDraft: false);
+      return;
+    }
+    await _stopShift();
+  }
+
+  Future<void> _stopShift({bool saveDraft = true}) async {
+    final ctx = _activeShift;
+    if (ctx == null) return;
+    if (saveDraft) {
+      await _saveAsDraft();
+    }
+    final ok = await ApiService.stopShift(ctx.shiftId);
+    if (!ok) {
+      if (ApiService.lastApiStatus == 409) {
+        // Stale context: the shift is already ended on the server.
+        await ApiService.clearShiftContext();
+        if (!mounted) return;
+        setState(() => _activeShift = null);
+        _toast('This shift is no longer active — start a new shift.');
+      } else {
+        _toast('Failed to stop shift');
+      }
+      return;
+    }
+    await ApiService.clearShiftContext();
+    if (!mounted) return;
+    setState(() => _activeShift = null);
+  }
+
+  Future<void> _checkForMatchingDraft(ShiftContext ctx) async {
+    final matching = await _findMatchingDrafts(
+        ctx.machineName, ctx.shiftName, _getShiftDateString(), ctx.moRef);
+    if (matching.isEmpty || !mounted) return;
+    final draftMo = (matching.first['data'] as Map<String, dynamic>)['po_number'];
+    final restore = await showDialog<bool>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        title: const Text('Unsaved Draft Found'),
+        content: Text(
+            'Found unsaved draft for MO ${draftMo ?? '-'} (this shift). Restore previous data?'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dctx, false),
+              child: const Text('Start Fresh')),
+          FilledButton(
+              onPressed: () => Navigator.pop(dctx, true),
+              child: const Text('Restore')),
+        ],
+      ),
+    );
+    if (restore == true && mounted) {
+      _loadDraftData(matching.first['data'] as Map<String, dynamic>,
+          matching.first['id'] as int?);
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _findMatchingDrafts(
+      String? machineName, String? shiftName, String shiftDate, String? mo) async {
+    final drafts = await LocalDB.instance.getReportsByStatus('draft');
+    final matching = <Map<String, dynamic>>[];
+    for (final d in drafts) {
+      final data = jsonDecode(d['report_data']) as Map<String, dynamic>;
+      final date = (data['shift_date'] ?? data['report_date']) as String?;
+      if (data['machine_name'] == machineName &&
+          data['shift_name'] == shiftName &&
+          date == shiftDate &&
+          data['po_number'] == mo) {
+        matching.add({'id': d['id'], 'data': data});
+      }
+    }
+    return matching;
+  }
+
+  Map<String, List<Map<String, dynamic>>> _buildShiftCloseLogs() {
+    final materialLogs = <Map<String, dynamic>>[];
+    void add(List<MaterialItem> items, String category) {
+      for (final it in items) {
+        final batch = it.batch.text.trim();
+        final used = it.used;
+        if (used > 0 || batch.isNotEmpty) {
+          materialLogs.add({
+            'category': category,
+            'batch_no': batch.isEmpty ? null : batch,
+            'qty_kg': used,
+            'source': 'manual',
+          });
+        }
+      }
+    }
+
+    add(_acetate, 'acetate');
+    add(_paper, 'paper');
+    add(_pvaGlue, 'glue');
+    add(_hmGlue, 'glue');
+    add(_triacetin, 'triacetin');
+
+    final scrapLogs = <Map<String, dynamic>>[];
+    final waste =
+        double.tryParse(_wasteController.text.trim().replaceAll(',', '.')) ?? 0.0;
+    if (waste > 0) {
+      scrapLogs.add({'reason_code': 'UNSPECIFIED', 'qty_kg': waste});
+    }
+    return {'material_logs': materialLogs, 'scrap_logs': scrapLogs};
   }
 
   void _loadDraftData(Map<String, dynamic> d, int? id) {
@@ -427,6 +805,8 @@ class _ReportPageState extends State<ReportPage> {
       }
       _originalServerReportId =
           (d['server_report_id'] as int?) ?? d['report_id'] as int?;
+      _reportShiftId = d['shift_id'] as int?;
+      _reportRunId = d['run_id'] as int?;
       _originalReportDate = d['report_date'] as String?;
       _startTimeCtrl.text = d['start_time'] ?? "08:00";
       _endTimeCtrl.text = d['end_time'] ?? "20:00";
@@ -658,6 +1038,8 @@ class _ReportPageState extends State<ReportPage> {
     setState(() => _isSaving = true);
     final reportData = {
       'client_report_id': _clientReportId ??= _generateClientReportId(),
+      'shift_id': _reportShiftId ?? _activeShift?.shiftId,
+      'run_id': _reportRunId ?? _activeShift?.runId,
       'operator_name': widget.operator.name,
       'report_date': _getShiftDateString(),
       'shift_date': _getShiftDateString(),
@@ -741,6 +1123,10 @@ class _ReportPageState extends State<ReportPage> {
 
     return {
       "client_report_id": _clientReportId ??= _generateClientReportId(),
+      // One report per MO run: link it to the shift / run it was produced on. The
+      // server re-validates these against the report's MO number.
+      "shift_id": _reportShiftId ?? _activeShift?.shiftId,
+      "run_id": _reportRunId ?? _activeShift?.runId,
       "report_date": date,
       "shift_date": date,
       "shift_name": _selectedShift?.name ?? "Unknown",
@@ -841,7 +1227,7 @@ class _ReportPageState extends State<ReportPage> {
             '${data['shift_name']} (${data['shift_time_range'] ?? ''})',
           );
           addRow('Machine', data['machine_name'] ?? 'Unknown');
-          addRow('PO Number', data['po_number'] ?? 'Unknown');
+          addRow('MO Number', data['po_number'] ?? 'Unknown');
           addRow('Lot Number', data['lot_number'] ?? '');
 
           addSection('PO Specifications');
@@ -1022,7 +1408,7 @@ class _ReportPageState extends State<ReportPage> {
                             "${_selectedShift?.name ?? ''} (${_startTimeCtrl.text} - ${_endTimeCtrl.text})",
                           ),
                           _previewRow("Machine", _selectedMachine?.name ?? ''),
-                          _previewRow("PO Number", _selectedPO?.poNumber ?? ''),
+                          _previewRow("MO Number", _selectedPO?.poNumber ?? ''),
                           _previewRow("Lot Number", _lotController.text),
 
                           _previewSectionTitle("2. PO Specifications"),
@@ -1286,7 +1672,7 @@ class _ReportPageState extends State<ReportPage> {
     return false;
   }
 
-  Future<void> _submitReport() async {
+  Future<void> _submitReport({bool? closeShiftOverride}) async {
     if (_isSubmitting) return;
     // Валидация формы
     if (!_formKey.currentState!.validate()) {
@@ -1327,23 +1713,21 @@ class _ReportPageState extends State<ReportPage> {
       return;
     }
 
-    setState(() => _isSubmitting = true);
+    final closeShiftAfter = closeShiftOverride ?? await _promptSmartShiftClose();
 
-    String timeRange = _adjustTime
-        ? "${_startTimeCtrl.text} - ${_endTimeCtrl.text}"
-        : "${_selectedShift?.start ?? '00:00'} - ${_selectedShift?.end ?? '00:00'}";
+    setState(() => _isSubmitting = true);
 
     // Use the canonical payload builder to include material lists and correct fields
     final reportData = _buildReportPayload();
 
     try {
-      bool isSent = await ApiService.submitProductionReport(reportData);
+      final reportId = await ApiService.submitProductionReport(reportData);
 
       if (_editingSourceId != null) {
         await LocalDB.instance.updateStatus(_editingSourceId!, 'obsolete');
       }
 
-      if (isSent) {
+      if (reportId != null) {
         if (_editingSourceId != null) {
           await LocalDB.instance.updateStatus(_editingSourceId!, 'obsolete');
         }
@@ -1385,7 +1769,7 @@ class _ReportPageState extends State<ReportPage> {
                 addRow('Shift Date', reportData['shift_date'] ?? reportData['report_date'] ?? '');
                 addRow('Shift', '${reportData['shift_name']} (${reportData['shift_time_range'] ?? ''})');
                 addRow('Machine', reportData['machine_name'] ?? '');
-                addRow('PO Number', reportData['po_number'] ?? '');
+                addRow('MO Number', reportData['po_number'] ?? '');
                 addRow('Lot Number', reportData['lot_number'] ?? '');
                 addSection('PO Specifications');
                 addRow('Box Type', reportData['box_type'].toString());
@@ -1462,6 +1846,7 @@ class _ReportPageState extends State<ReportPage> {
             pdfBytes: pdfBytes,
             filename: filename,
             reportDate: shiftDate,
+            reportId: reportId,
           ));
         } catch (pdfErr) {
           debugPrint('PDF upload error (non-critical): $pdfErr');
@@ -1480,12 +1865,16 @@ class _ReportPageState extends State<ReportPage> {
               backgroundColor: Colors.green,
             ),
           );
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(
-              builder: (_) => ReportPage(operator: widget.operator),
-            ),
-          );
+          if (closeShiftAfter) {
+            await _closeActiveShift();
+          } else {
+            Navigator.pushReplacement(
+              context,
+              MaterialPageRoute(
+                builder: (_) => ReportPage(operator: widget.operator),
+              ),
+            );
+          }
         }
       } else {
         await LocalDB.instance.saveReport(
@@ -1500,7 +1889,7 @@ class _ReportPageState extends State<ReportPage> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text("🌐 No internet. Saved to local queue."),
+              content: Text("⚠️ Report not sent. Saved to local queue."),
               backgroundColor: Colors.orange,
             ),
           );
@@ -1556,6 +1945,27 @@ class _ReportPageState extends State<ReportPage> {
         child,
       ],
     );
+  }
+
+  String _odooCategory(MaterialCategory c) {
+    switch (c) {
+      case MaterialCategory.acetate: return 'acetate';
+      case MaterialCategory.paper: return 'paper';
+      case MaterialCategory.coldGlue:
+      case MaterialCategory.hotMelt: return 'glue';
+      case MaterialCategory.triacetin: return 'triacetin';
+    }
+  }
+
+  List<String> _allowedTypes(MaterialCategory category) {
+    final am = _selectedPO?.allowedMaterials;
+    if (am == null) return [];
+    final list = am[_odooCategory(category)];
+    if (list is! List) return [];
+    return list
+        .map((e) => (e is Map ? e['product_name']?.toString() ?? '' : ''))
+        .where((s) => s.isNotEmpty)
+        .toList();
   }
 
   Widget _buildMaterialTable(
@@ -1617,10 +2027,13 @@ class _ReportPageState extends State<ReportPage> {
               ),
 
             ...list.asMap().entries.map((e) {
-              List<String> availableMaterials = AppData.materialDictionary
-                  .where((m) => m.category == category && !m.isHidden)
-                  .map((m) => m.type)
-                  .toList();
+              List<String> availableMaterials = _allowedTypes(category);
+              if (availableMaterials.isEmpty) {
+                availableMaterials = AppData.materialDictionary
+                    .where((m) => m.category == category && !m.isHidden)
+                    .map((m) => m.type)
+                    .toList();
+              }
               String currentType = e.value.type.text;
               if (currentType.isNotEmpty &&
                   !availableMaterials.contains(currentType)) {
@@ -1859,6 +2272,43 @@ class _ReportPageState extends State<ReportPage> {
               );
             },
           ),
+          if (_activeShift != null) ...[
+            IconButton(
+              icon: const Icon(Icons.swap_horiz),
+              tooltip: 'Change MO / Order',
+              onPressed: _changeMo,
+            ),
+            IconButton(
+              icon: const Icon(Icons.fact_check_outlined),
+              tooltip: 'Quality Checks',
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) =>
+                        ManualQualityChecksScreen(shiftContext: _activeShift),
+                  ),
+                );
+              },
+            ),
+          ],
+          IconButton(
+            icon: const Icon(Icons.assignment_late_outlined),
+            tooltip: 'Pending Reports',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (context) => PendingShiftsScreen(operator: widget.operator)),
+              );
+            },
+          ),
+          if (_activeShift != null)
+            IconButton(
+              icon: const Icon(Icons.stop_circle_outlined),
+              tooltip: 'End Shift',
+              onPressed: _endShift,
+            ),
           IconButton(
             icon: const Icon(Icons.logout),
             tooltip: 'Logout',
@@ -1870,7 +2320,9 @@ class _ReportPageState extends State<ReportPage> {
           ),
         ],
       ),
-      body: Center(
+      body: _activeShift == null
+          ? _buildInactiveShiftView()
+          : Center(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 650),
           child: Form(
@@ -1944,11 +2396,8 @@ class _ReportPageState extends State<ReportPage> {
                                   ),
                                 )
                                 .toList(),
-                            onChanged: (v) => setState(() {
-                              _selectedShift = v;
-                              _startTimeCtrl.text = v?.start ?? "";
-                              _endTimeCtrl.text = v?.end ?? "";
-                            }),
+                            // Locked: the shift is fixed when the shift is opened.
+                            onChanged: null,
                           ),
                         ),
                         const SizedBox(height: 12),
@@ -2022,15 +2471,9 @@ class _ReportPageState extends State<ReportPage> {
                                   ),
                                 )
                                 .toList(),
-                            onChanged: (v) {
-                              setState(() => _selectedMachine = v);
-                              if (v != null) {
-                                // Check for previous report on this machine
-                                WidgetsBinding.instance.addPostFrameCallback((_) {
-                                  _checkForPreviousReportOnMachine(v);
-                                });
-                              }
-                            },
+                            // Locked: the machine is part of the shift / run (like the MO).
+                            // Use the "Change machine" button in the app bar to move it.
+                            onChanged: null,
                           ),
                         ),
                       ],
@@ -2038,7 +2481,7 @@ class _ReportPageState extends State<ReportPage> {
                   ),
                 ),
 
-                _buildSectionHeader("Purchase Order"),
+                _buildSectionHeader("Manufacturing Order"),
                 Card(
                   child: Padding(
                     padding: const EdgeInsets.all(16),
@@ -2049,7 +2492,7 @@ class _ReportPageState extends State<ReportPage> {
                           children: [
                             Expanded(
                               child: _labeledField(
-                                "Select PO #",
+                                "Select MO #",
                                 DropdownButtonFormField<PurchaseOrder>(
                                   initialValue: _selectedPO,
                                   decoration: activeStyle,
@@ -2066,7 +2509,7 @@ class _ReportPageState extends State<ReportPage> {
                                         ),
                                       )
                                       .toList(),
-                                  onChanged: _onPOSelected,
+                                  onChanged: null, // locked: MO set via Start Shift / AppBar switch
                                   validator: (value) =>
                                       value == null ? 'Required' : null,
                                 ),
@@ -2383,7 +2826,9 @@ class _ReportPageState extends State<ReportPage> {
                           Expanded(
                             flex: 2,
                             child: ElevatedButton(
-                            onPressed: (_isSubmitting || _isSaving) ? null : _showPreviewAndSubmit,
+                            onPressed: (_isSubmitting || _isSaving || _activeShift == null)
+                  ? null
+                  : _showPreviewAndSubmit,
                               style: ElevatedButton.styleFrom(
                                 minimumSize: const Size(0, 56),
                                 backgroundColor: Colors.deepPurple,

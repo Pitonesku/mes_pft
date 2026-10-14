@@ -6,6 +6,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Configurable Odoo dispatch timing (2026-10-11)
+- The previously hardcoded dispatcher timing is now configurable via `PUT /api/v2/odoo/sync-settings` (and the web "Odoo Integration" screen): `odoo_verification_wait_minutes` (default 10), `odoo_error_retry_minutes` (default 5), `odoo_max_attempts` (default 5) and `odoo_poll_seconds` (default 30). Stored in `system_settings`, read by `outbound.py` helpers and the dispatcher loop, with validation (ints, minimums).
+
+### Odoo completion: fix double-backorder + auto-consume non-direct components (2026-10-11)
+- Fixed a partial-completion bug where `button_mark_done` returned a redirect action containing `mo_ids_to_backorder=None`, which Odoo's XML-RPC marshaller (`allow_none=False`) couldn't serialize; the MES then retried and completed the *next* backorder, double-counting production. `plan_completion` now sends `skip_redirection` (so `button_mark_done` returns `True`), and `post_completion` verifies `read_mo_state == "done"` before failing so a retry can never double-post.
+- Consumption write-back now also auto-consumes the remaining (non-direct) BOM components — boxes, pallets, labels, etc. — proportionally to `produced_qty / planned_qty` (the same scale Odoo would apply) instead of leaving them at 0. `plan_consumption` gained a `proportion` argument; `manual_consumption` lines and lot/serial-tracked products are still skipped.
+- Consumption write-back now detects "already consumed" via the move's `picked` flag and caps against the full demand (`product_uom_qty`) instead of `quantity`: Odoo 18 pre-populates raw `stock.move.quantity` to the reserved demand, which was making every reserved material look "already consumed" and silently skipping the reported paper/glue/triacetin and the boxes/pallets.
+
+### Base Packaging → box_type guard & payload (Odoo ↔ MES, 2026-10-11)
+- `mes_integration`: "Send to MES" and the auto-push on confirm now hard-fail when the finished product has zero or multiple `is_base_packaging` packagings — `_validate_base_packaging` raises a `UserError` (the post-commit auto-push marks the MO `error` and posts to chatter). The payload now carries top-level `box_type` (rods/box, e.g. a Case of 7.75 in the "1000pcs" UoM → 7750) and `base_packaging_name`.
+- MES `OdooMoEvent` accepts `box_type` / `base_packaging_name`; `handle_mo_event` stores the top-level `box_type` (falling back to `spec.box_type`) into `PurchaseOrder.box_type`, which the tablet pre-fills as "Box Type" via `build_spec_snapshot`.
+
+### Safe MO recall guardrails (backend, 2026-10-11)
+- New `POST /api/v2/odoo/mo-recall` (HMAC-protected, same `_verify_odoo_webhook` as `mo-event`): rejects with `409` when the MO is open on a machine or has production data (`end_counter`, manual QC checks, station measurements); otherwise archives/hides the unstarted order (`is_archived`, `is_hidden`, `odoo_state='recalled'`, `sync_mode='link_only'`) — never deletes. Logic in `services/odoo/recall.py` (pure, unit-tested). The Odoo `mrp.production` unlink/recall override is outlined in `docs/mes-roadmap-ideas.md` (to implement later).
+
+### Shift Quality Report overhaul (2026-10-11)
+- **Certificate-style shift quality report** in `pdf_generator.py` (`render_shift_quality_pdf`): header (PO + specification + **real machine name** + date + `DD.MM.YYYY HH:mm – HH:mm` shift interval + operator), the fixed **5-parameter matrix** (length `mm`, diameter `mm`, pressure drop `mm WG`, hardness `%`, weight `g/100`) with `Nominal / Lower SL / Upper SL / Mean / SD` (station data wins, manual fills gaps, SD only when n≥2, else dash), and a chronological **manual checks log table** (`# / Time / Length / Weight / Glue Seam / Cut Quality / Visual Cleanliness / Operator / Notes`), with a "No manual checks recorded for this shift" row when empty.
+- **UTF-8 font**: bundles DejaVu Sans (regular + bold) and registers it with reportlab, so Ukrainian/Hungarian/Latin characters render without tofu boxes.
+- `/shifts/{id}/certificate.pdf` now renders via the new report (machine binding fixed: `ShiftSession.machine_id → Machine.name`, fallback `ProductionReport.machine_name`).
+
+### Shift + MO quality reports (2026-10-11)
+- **Shift quality report**: the printable "Quality Report" is now a certificate-style document (English only) — header with `PO Number`, `Specification` (e.g. `7.72*108PD 380 CU 0`), machine/date/shift/operator, then the 5-parameter measurement table (length, diameter, pressure drop, hardness, weight) with `Nominal / Lower SL / Upper SL / Mean / SD`. Values come from the server's merged run/order summary, so the operator's manual length/hardness/weight appear.
+- **MO quality report** = average of the shift reports (`compute_order_summary`); a new **"Print MO Quality Report"** action on the Orders statistics tab opens it.
+- **Removed** the monitor-only `FINAL VERDICT` and the SD Yellow/Red threshold columns from the report — SD is shown as a plain value (yellow/red stays on the shop-floor monitor view).
+- `/v2/quality` now returns a `report` block (spec string + certificate + manual measurements + remarks); `_shift_quality_summary` merges the shift's manual QC checks into the station stats.
+
+### Manual measurements merged into station stats & Odoo QC (2026-10-11, migration 0020)
+- **Hardness** added to manual QC checks (`manual_quality_checks.hardness`, migration 0020), the check payload/evaluation rules and the Flutter QC screen (percent).
+- **Merge of manual + station measurements**: new pure helpers `quality_stats.manual_rods()` and `merge_manual_parameters()` convert operator checks into pseudo-rods (weight g/rod, length mm, hardness %) and fill any parameter the station did not measure — length and hardness always, weight only as a fallback — into the run/order `parameters`. A station measurement is never overwritten.
+- **Run/order summaries** now carry `remarks` (joined check notes) and `manual_measurements` (count + per-parameter mean/SD).
+- **Odoo QC tab** (`mes_integration` v18.0.1.1.0) gains `mean_length/sd_length`, `mean_weight/sd_weight` (g/100), `mean_hardness/sd_hardness` and `quality_notes`; the MES writes them from the merged summary (weight scaled to g/100). Diameter/PD/status/counts field names were already a match.
+- App version bumped to `2.1.1+44`.
+
+### Shift / machine / MO lifecycle (2026-10-10, migrations 0018-0019)
+- **Machine lives on the production run** (`production_runs.machine_id`); a shift is an operator session. New `POST /api/v2/shifts/{id}/change-machine` keeps the shift open and starts a new run on the new machine.
+- **Fixed MO switch**: `switch-mo` used a hard-coded `seq=1` (violating `UNIQUE (shift_id, seq)`), started the new run at the shift start and never recorded the final counter. Runs now get `max(seq)+1`, start now, store `end_counter` and are audited in `run_change_log`.
+- **No phantom runs**: close / stop / takeover / auto-close close the shift's open runs; one open run per machine is DB-enforced (`one_open_run_per_machine`). Migration 0018 repairs existing phantom runs.
+- **Manual QC checks** are bound server-side to the open run (machine + MO snapshot), weight is grams per N (default 10) rods, toggles are tri-state, verdicts are stored, checks can be voided and queued offline (`client_check_id`). They appear in each run of the shift summary (schema 1.2).
+- **One report per MO run**: `production_reports.run_id/shift_id`; the server re-validates the link by MO number. MO / machine of a linked report change only through the supervisor endpoint `POST /api/v2/runs/{id}/reassign` (reason required, cascades, audited).
+- **Fixes**: flat run spec snapshots gave no limits; overnight early-open produced an end time in the past (auto-close fired immediately); live ingest silently dropped `MO_MISMATCH`; `ended_at` was unvalidated.
+- **Removed**: unused `shift_quality_stats` table/model, `backend/_cats.py`, `backend/_t.txt`, `[DEBUG]` prints in `create_report`, unauthenticated `/api/debug/last-report`, the stale Flutter counter widget test.
+- Roadmap and remaining gaps: `docs/mes-roadmap-ideas.md`.
+
 ### Security & Reliability (2026-08-28 hardening)
 - **Bearer-token authentication** (`auth.py`): replaced the spoofable `X-User-Id` header with HMAC-signed bearer tokens. `POST /api/auth/login` now returns `access_token`; report-submission, admin, and AI endpoints require `Authorization: Bearer <token>`.
 - **Secrets hardening**: added `.gitignore` rules for `.env.txt`, `Gdrive_secret.json`, `token.json`, `nohup.out`, `*.jks`, `*.keystore`, `key.properties`.

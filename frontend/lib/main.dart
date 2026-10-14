@@ -7,6 +7,9 @@ import 'sync_manager.dart';
 import 'app_state.dart';
 import 'utils/logger_integration.dart';
 import 'api_service.dart';
+import 'theme/theme_controller.dart';
+
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -20,6 +23,22 @@ void main() async {
     await ApiService.loadSavedBaseUrl();
   }
   await ApiService.loadSavedAuthToken();
+
+  // Load the persisted UI theme (preset + mode) before first frame.
+  await ThemeController.instance.init();
+
+  // Any 401 from a protected endpoint (stale/expired token) kicks the user back
+  // to the login screen with a clean session instead of showing raw errors.
+  ApiService.onUnauthorized = () {
+    ApiService.clearSession();
+    final nav = navigatorKey.currentState;
+    if (nav != null && nav.mounted) {
+      nav.pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const LoginScreen()),
+        (_) => false,
+      );
+    }
+  };
 
   // SQLite offline queue is mobile/desktop only -- sqflite crashes on web.
   if (!kIsWeb) {
@@ -59,28 +78,21 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Production System',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        primarySwatch: Colors.deepPurple,
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF673AB7)),
-        scaffoldBackgroundColor: const Color(0xFFF0EBF8),
-        inputDecorationTheme: const InputDecorationTheme(
-          border: OutlineInputBorder(),
-          focusedBorder: OutlineInputBorder(
-            borderSide: BorderSide(color: Color(0xFF673AB7), width: 2.0),
-          ),
-          isDense: true,
-        ),
-        cardTheme: CardThemeData(
-          elevation: 2,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
-        ),
-      ),
-      home: _home(),
+    return ListenableBuilder(
+      listenable: ThemeController.instance,
+      builder: (context, _) {
+        final controller = ThemeController.instance;
+        return MaterialApp(
+          title: 'Production System',
+          navigatorKey: navigatorKey,
+          debugShowCheckedModeBanner: false,
+          builder: (context, child) => SelectionArea(child: child!),
+          theme: controller.lightTheme,
+          darkTheme: controller.darkTheme,
+          themeMode: controller.mode,
+          home: _home(),
+        );
+      },
     );
   }
 }

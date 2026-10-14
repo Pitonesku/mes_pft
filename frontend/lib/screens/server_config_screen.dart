@@ -19,7 +19,7 @@ class ServerConfigScreen extends StatefulWidget {
 class _ServerConfigScreenState extends State<ServerConfigScreen> {
   final _formKey = GlobalKey<FormState>();
   final _ipController = TextEditingController();
-  final _portController = TextEditingController(text: '8000');
+  final _portController = TextEditingController(text: '8001');
 
   bool _isSaving = false;
   String _preview = '—';

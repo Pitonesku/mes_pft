@@ -1,4 +1,4 @@
-// lib/screens/web/orders_screen.dart
+﻿// lib/screens/web/orders_screen.dart
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:pdf/pdf.dart';
@@ -9,10 +9,12 @@ import '../../app_state.dart';
 import '../../api_service.dart';
 import '../../widgets/sync_button.dart';
 import '../../widgets/resizable_panel.dart';
+import '../../widgets/quality_report_dialog.dart';
 
 class OrdersScreen extends StatefulWidget {
   final User user;
-  const OrdersScreen({super.key, required this.user});
+  final String? initialFilter;
+  const OrdersScreen({super.key, required this.user, this.initialFilter});
   @override State<OrdersScreen> createState() => _OrdersScreenState();
 }
 
@@ -26,6 +28,17 @@ class _OrdersScreenState extends State<OrdersScreen> {
   bool _showArchived = false;
   final Set<int> _checkedIds = {};
   bool _batchArchiving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.initialFilter != null) _filter = widget.initialFilter!;
+    // Load fresh POs on first frame so direct navigation / F5 don't show a
+    // stale or empty AppData.activePOs list.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _refresh();
+    });
+  }
 
   bool _matchesAll(PurchaseOrder p, String q) {
     if (q.isEmpty) return true;
@@ -154,7 +167,7 @@ class _OrdersScreenState extends State<OrdersScreen> {
                 prefixIcon: Icon(Icons.search), isDense: true),
               onChanged: (v) => setState(() { _filter = v; _checkedIds.clear(); }))),
           const Spacer(),
-          // ── Batch action bar ──────────────────────────────────────────
+          // â”€â”€ Batch action bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
           if (someChecked) ...[
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -205,9 +218,17 @@ class _OrdersScreenState extends State<OrdersScreen> {
               style: const TextStyle(color: Colors.grey, fontSize: 13)),
           ]),
           const SizedBox(width: 12),
+          IconButton(
+            icon: const Icon(Icons.cloud_sync, size: 22, color: Colors.deepPurple),
+            tooltip: 'Sync with Odoo',
+            onPressed: () => showDialog(
+              context: context,
+              builder: (_) => const SyncOdooDialog(),
+            ),
+          ),
           OutlinedButton.icon(
             icon: const Icon(Icons.add, size: 18),
-            label: const Text('New PO'),
+            label: const Text('New MO'),
             onPressed: () => _openPoForm(context, null)),
           const SizedBox(width: 8),
           FilledButton.icon(
@@ -221,7 +242,7 @@ class _OrdersScreenState extends State<OrdersScreen> {
         const SizedBox(height: 14),
         Expanded(
           child: filtered.isEmpty
-            ? const Center(child: Text('No purchase orders found'))
+            ? const Center(child: Text('No manufacturing orders found'))
             : Card(
               margin: EdgeInsets.zero,
               child: SingleChildScrollView(
@@ -243,7 +264,7 @@ class _OrdersScreenState extends State<OrdersScreen> {
                       return null;
                     }),
                     columns: [
-                      // ── Select-all checkbox column ──────────────────
+                      // â”€â”€ Select-all checkbox column â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                       DataColumn(label: Checkbox(
                         tristate: true,
                         value: allChecked ? true : (someChecked ? null : false),
@@ -256,7 +277,7 @@ class _OrdersScreenState extends State<OrdersScreen> {
                         materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                       )),
                       DataColumn(
-                        label: const Text('PO Number'),
+                        label: const Text('MO Number'),
                         onSort: (col, asc) =>
                             setState(() { _sortColumnIndex = col; _sortAscending = asc; }),
                       ),
@@ -316,7 +337,7 @@ class _OrdersScreenState extends State<OrdersScreen> {
                           : null,
                         onSelectChanged: (_) => _select(po),
                         cells: [
-                          // ── Row checkbox ──────────────────────────
+                          // â”€â”€ Row checkbox â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                           DataCell(Checkbox(
                             value: isChecked,
                             onChanged: po.id == null ? null : (v) {
@@ -327,9 +348,28 @@ class _OrdersScreenState extends State<OrdersScreen> {
                             },
                             materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                           )),
-                          DataCell(Text(po.poNumber, style: TextStyle(
-                            fontWeight: FontWeight.w600,
-                            color: po.isHidden ? Colors.grey : Colors.deepPurple))),
+                          DataCell(Row(mainAxisSize: MainAxisSize.min, children: [
+                            Text(po.moNumber, style: TextStyle(
+                              fontWeight: FontWeight.w600,
+                              color: po.isHidden ? Colors.grey : Colors.deepPurple)),
+                            if (po.isOdooLinked) ...[
+                              const SizedBox(width: 4),
+                              Chip(
+                                label: const Text('ODOO', style: TextStyle(fontSize: 9, color: Colors.white, fontWeight: FontWeight.bold)),
+                                backgroundColor: Colors.blue,
+                                padding: EdgeInsets.zero,
+                                visualDensity: VisualDensity.compact,
+                                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                            ] else ...[
+                              const SizedBox(width: 4),
+                              Chip(
+                                label: const Text('LOCAL', style: TextStyle(fontSize: 9, color: Colors.white, fontWeight: FontWeight.bold)),
+                                backgroundColor: Colors.orange,
+                                padding: EdgeInsets.zero,
+                                visualDensity: VisualDensity.compact,
+                                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                            ],
+                          ])),
                           DataCell(Text('${po.diameter} mm',
                             style: const TextStyle(fontSize: 13))),
                           DataCell(Text('${po.length} mm',
@@ -393,7 +433,7 @@ class _OrdersScreenState extends State<OrdersScreen> {
     );
   }
 
-  // ── Open PO create/edit form dialog ──────────────────────────────────────
+  // â”€â”€ Open PO create/edit form dialog â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   Future<void> _openPoForm(BuildContext context, PurchaseOrder? existing) async {
     final result = await showDialog<PurchaseOrder?>(
       context: context,
@@ -419,7 +459,7 @@ class _OrdersScreenState extends State<OrdersScreen> {
     }
   }
 }
-// ── PO detail side panel ─────────────────────────────────────────────────────
+// â”€â”€ PO detail side panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class _PoDetailPanel extends StatefulWidget {
   final PurchaseOrder po;
   final bool showAudit;
@@ -492,9 +532,28 @@ class _PoDetailPanelState extends State<_PoDetailPanel> {
           child: Row(children: [
             const Icon(Icons.receipt_long, size: 18, color: Colors.deepPurple),
             const SizedBox(width: 6),
-            Expanded(child: Text(po.poNumber,
-              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-              overflow: TextOverflow.ellipsis)),
+            Expanded(child: Row(children: [
+              Flexible(child: Text(po.moNumber,
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                overflow: TextOverflow.ellipsis)),
+              if (po.isOdooLinked) ...[
+                const SizedBox(width: 6),
+                Chip(
+                  label: const Text('ODOO', style: TextStyle(fontSize: 9, color: Colors.white, fontWeight: FontWeight.bold)),
+                  backgroundColor: Colors.blue,
+                  padding: EdgeInsets.zero,
+                  visualDensity: VisualDensity.compact,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap),
+              ] else ...[
+                const SizedBox(width: 6),
+                Chip(
+                  label: const Text('LOCAL', style: TextStyle(fontSize: 9, color: Colors.white, fontWeight: FontWeight.bold)),
+                  backgroundColor: Colors.orange,
+                  padding: EdgeInsets.zero,
+                  visualDensity: VisualDensity.compact,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap),
+              ],
+            ])),
             // Toggle audit/stats
             IconButton(
               icon: Icon(Icons.bar_chart_rounded, size: 18,
@@ -505,14 +564,14 @@ class _PoDetailPanelState extends State<_PoDetailPanel> {
             // Edit
             IconButton(
               icon: const Icon(Icons.edit, size: 18, color: Colors.orange),
-              tooltip: 'Edit PO',
+              tooltip: 'Edit MO',
               onPressed: widget.onEdit,
               padding: EdgeInsets.zero, constraints: const BoxConstraints(minWidth:30, minHeight:30)),
             // Archive/unarchive
             ActionSyncButton(
               isIcon: true,
               color: Colors.brown,
-              successMsg: po.isArchived ? 'PO unarchived' : 'PO archived',
+              successMsg: po.isArchived ? 'MO unarchived' : 'MO archived',
               errorMsg: 'Failed to update archive status',
               onSync: () async {
                 po.isArchived = !po.isArchived;
@@ -526,7 +585,7 @@ class _PoDetailPanelState extends State<_PoDetailPanel> {
             ActionSyncButton(
               isIcon: true,
               color: Colors.blueGrey,
-              successMsg: po.isHidden ? 'PO is now visible to operators' : 'PO hidden from operators',
+              successMsg: po.isHidden ? 'MO is now visible to operators' : 'MO hidden from operators',
               errorMsg: 'Failed to update visibility',
               onSync: () async {
                 po.isHidden = !po.isHidden;
@@ -550,6 +609,25 @@ class _PoDetailPanelState extends State<_PoDetailPanel> {
           ]),
         ),
         const Divider(height: 1),
+        if (po.isOdooLinked)
+          Container(
+            color: const Color(0xFFE8F0FE),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            child: Row(children: [
+              const Icon(Icons.cloud_done, size: 16, color: Colors.blue),
+              const SizedBox(width: 6),
+              Expanded(child: Text('Odoo MO: ${po.odooMoName ?? po.moNumber}',
+                  style: const TextStyle(fontSize: 12, color: Colors.blue, fontWeight: FontWeight.w600))),
+              TextButton(
+                onPressed: () async {
+                  await ApiService.dispatchOdooNow();
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Dispatched pending quantities to Odoo')));
+                },
+                child: const Text('Push Pending Quantities', style: TextStyle(fontSize: 12)),
+              ),
+            ]),
+          ),
         Expanded(child: widget.showAudit ? _buildAudit() : _buildDetails(po, pct)),
       ]),
     );
@@ -604,7 +682,7 @@ class _PoDetailPanelState extends State<_PoDetailPanel> {
     );
   }
 
-  // ── helpers ──────────────────────────────────────────────────────────────
+  // â”€â”€ helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   double _toDouble(dynamic v) {
     if (v == null) return 0.0;
     if (v is num) return v.toDouble();
@@ -618,7 +696,22 @@ class _PoDetailPanelState extends State<_PoDetailPanel> {
     return int.tryParse(v.toString()) ?? 0;
   }
 
-  // ── PDF generation (matches Android audit PDF) ────────────────────────────
+  // â”€â”€ PDF generation (matches Android audit PDF) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  Future<void> _printMoQualityReport(BuildContext context) async {
+    final po = widget.po;
+    final d = await ApiService.fetchQualityData(poId: po.id, window: 'po');
+    if (!mounted) return;
+    if (d == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No quality data for this order')));
+      return;
+    }
+    showDialog(
+      context: context,
+      builder: (_) => QualityReportDialog(data: d, machine: ''),
+    );
+  }
+
   Future<void> _generatePdf(BuildContext context) async {
     if (_auditData == null) return;
     final data = _auditData!;
@@ -633,7 +726,7 @@ class _PoDetailPanelState extends State<_PoDetailPanel> {
       build: (ctx) {
         final rows = <pw.Widget>[];
 
-        // ── Header ──────────────────────────────────────────────────────
+        // â”€â”€ Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         rows.add(pw.Text('PURCHASE ORDER AUDIT REPORT',
           style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)));
         rows.add(pw.SizedBox(height: 8));
@@ -650,7 +743,7 @@ class _PoDetailPanelState extends State<_PoDetailPanel> {
           style: const pw.TextStyle(fontSize: 10)));
         rows.add(pw.SizedBox(height: 16));
 
-        // ── Report Entries table ─────────────────────────────────────────
+        // â”€â”€ Report Entries table â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         rows.add(pw.Text('Report Entries',
           style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold)));
         rows.add(pw.Divider());
@@ -709,7 +802,7 @@ class _PoDetailPanelState extends State<_PoDetailPanel> {
         ));
         rows.add(pw.SizedBox(height: 16));
 
-        // ── Production Summary ───────────────────────────────────────────
+        // â”€â”€ Production Summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         rows.add(pw.Text('Production Summary',
           style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold)));
         rows.add(pw.Divider());
@@ -737,7 +830,7 @@ class _PoDetailPanelState extends State<_PoDetailPanel> {
         addSummaryRow('Total Scrap Waste:', '${wasteKg.toStringAsFixed(1)} kg');
         rows.add(pw.SizedBox(height: 16));
 
-        // ── Materials Consumption Details ────────────────────────────────
+        // â”€â”€ Materials Consumption Details â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         rows.add(pw.Text('Materials Consumption Details',
           style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold)));
         rows.add(pw.Divider());
@@ -819,7 +912,7 @@ class _PoDetailPanelState extends State<_PoDetailPanel> {
     );
   }
 
-  // ── Main audit widget ─────────────────────────────────────────────────────
+  // â”€â”€ Main audit widget â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   Widget _buildAudit() {
     if (_auditLoading) return const Center(child: CircularProgressIndicator());
     if (_auditData == null) {
@@ -836,7 +929,7 @@ class _PoDetailPanelState extends State<_PoDetailPanel> {
     final mats    = (data['materials_consumed'] as List?) ?? [];
     final reports = (data['report_rows']        as List?) ?? [];
 
-    // ── Compute report table rows + totals ──────────────────────────────
+    // â”€â”€ Compute report table rows + totals â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     int totalRods = 0, totalMachineCounter = 0;
     double totalDiff = 0, totalScrap = 0;
 
@@ -885,7 +978,7 @@ class _PoDetailPanelState extends State<_PoDetailPanel> {
       ));
     }
 
-    // ── Summary values ──────────────────────────────────────────────────
+    // â”€â”€ Summary values â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     final producedQty  = _toInt(data['produced_qty']);
     final targetQty    = _toInt(data['target_qty']);
     final remainingQty = _toInt(data['remaining_qty']);
@@ -900,20 +993,20 @@ class _PoDetailPanelState extends State<_PoDetailPanel> {
       padding: const EdgeInsets.all(12),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
 
-        // ── PO header ────────────────────────────────────────────────────
+        // â”€â”€ PO header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         Text('PO ${data["po_number"] ?? widget.po.poNumber}',
           style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold,
             color: Colors.deepPurple)),
         const SizedBox(height: 2),
         Text(
-          'Spec: ${widget.po.diameter} × ${widget.po.length}  '
+          'Spec: ${widget.po.diameter} Ã— ${widget.po.length}  '
           'PD ${widget.po.pd}  CU ${widget.po.cu}',
           style: TextStyle(fontSize: 11, color: Colors.grey[600])),
         Text(
           'Target: ${NumberFormat.decimalPattern().format(targetQty)} pcs',
           style: TextStyle(fontSize: 11, color: Colors.grey[600])),
 
-        // ── Report Entries ────────────────────────────────────────────────
+        // â”€â”€ Report Entries â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         _sec('Report Entries', [
           if (reports.isEmpty)
             const Text('No report entries', style: TextStyle(color: Colors.grey))
@@ -921,7 +1014,7 @@ class _PoDetailPanelState extends State<_PoDetailPanel> {
             _ReportEntriesTable(rows: reportRows),
         ]),
 
-        // ── Production Summary ────────────────────────────────────────────
+        // â”€â”€ Production Summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         _sec('Production Summary', [
           _row('Total rods produced', '${NumberFormat.decimalPattern().format(producedQty)} pcs'),
           _row('Remaining to produce','${NumberFormat.decimalPattern().format(remainingQty)} pcs'),
@@ -933,7 +1026,7 @@ class _PoDetailPanelState extends State<_PoDetailPanel> {
           _row('Total scrap waste',   '${wasteKg.toStringAsFixed(1)} kg'),
         ]),
 
-        // ── Materials Consumption Details — flat table ─────────────────────
+        // â”€â”€ Materials Consumption Details â€” flat table â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         _sec('Materials Consumption Details', [
           if (mats.isEmpty)
             const Text('No material data', style: TextStyle(color: Colors.grey))
@@ -941,7 +1034,7 @@ class _PoDetailPanelState extends State<_PoDetailPanel> {
             _MaterialsTable(mats: mats, toDouble: _toDouble),
         ]),
 
-        // ── Print PDF button ──────────────────────────────────────────────
+        // â”€â”€ Print PDF button â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         const SizedBox(height: 16),
         SizedBox(
           width: double.infinity,
@@ -950,6 +1043,15 @@ class _PoDetailPanelState extends State<_PoDetailPanel> {
             label: const Text('Print / Save PDF'),
             style: FilledButton.styleFrom(backgroundColor: Colors.deepPurple),
             onPressed: () => _generatePdf(context),
+          ),
+        ),
+        const SizedBox(height: 8),
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            icon: const Icon(Icons.description),
+            label: const Text('Print MO Quality Report'),
+            onPressed: () => _printMoQualityReport(context),
           ),
         ),
         const SizedBox(height: 16),
@@ -985,7 +1087,7 @@ class _PoDetailPanelState extends State<_PoDetailPanel> {
   }
 }
 
-// ── Responsive Report Entries table ──────────────────────────────────────────
+// â”€â”€ Responsive Report Entries table â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Uses LayoutBuilder so columns fill the available panel width instead of
 // requiring horizontal scrolling.
 class _ReportEntriesTable extends StatelessWidget {
@@ -1049,7 +1151,7 @@ class _ReportEntriesTable extends StatelessWidget {
   }
 }
 
-// ── Flat Materials Consumption table ─────────────────────────────────────────
+// â”€â”€ Flat Materials Consumption table â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Category | Material Type | Batch | Used
 // Total rows (type and category) are shown in bold.
 class _MaterialsTable extends StatelessWidget {
@@ -1152,7 +1254,7 @@ class _MaterialsTable extends StatelessWidget {
           fontWeight: bold ? FontWeight.bold : FontWeight.normal)));
 }
 
-// ── PO create/edit dialog ────────────────────────────────────────────────────
+// â”€â”€ PO create/edit dialog â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class _PoFormDialog extends StatefulWidget {
   final PurchaseOrder? existing;
   const _PoFormDialog({this.existing});
@@ -1270,9 +1372,9 @@ class _PoFormDialogState extends State<_PoFormDialog> {
           ]),
           const SizedBox(height:12),
           Row(children: [
-            Expanded(child: _fo(_diaTol, 'Diameter Tol ± (mm)')),
+            Expanded(child: _fo(_diaTol, 'Diameter Tol Â± (mm)')),
             const SizedBox(width:16),
-            Expanded(child: _fo(_pdTol, 'PD Tol ± (mm WG)')),
+            Expanded(child: _fo(_pdTol, 'PD Tol Â± (mm WG)')),
             const SizedBox(width:16),
             const Expanded(child: SizedBox()),
           ]),
@@ -1330,6 +1432,7 @@ class _PoFormDialogState extends State<_PoFormDialog> {
               },
               onSuccess: () => Navigator.pop(context, pending),
               child: Text(widget.existing==null?'CREATE ORDER':'SAVE CHANGES',
+
                 style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
             ),
           ]),
@@ -1338,3 +1441,123 @@ class _PoFormDialogState extends State<_PoFormDialog> {
     ]);
   }
 }
+
+// â”€â”€ On-demand Odoo sync dialog â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+class SyncOdooDialog extends StatefulWidget {
+  const SyncOdooDialog({super.key});
+  @override
+  State<SyncOdooDialog> createState() => _SyncOdooDialogState();
+}
+
+class _SyncOdooDialogState extends State<SyncOdooDialog> {
+  String _scope = 'active';
+  bool _busy = false;
+  Map<String, dynamic>? _result;
+  final Map<int, int?> _linkSelections = {};
+
+  Future<void> _sync() async {
+    setState(() => _busy = true);
+    final r = await ApiService.syncOdooOrders(scope: _scope);
+    if (!mounted) return;
+    setState(() { _busy = false; _result = r; });
+  }
+
+  Future<void> _link(int odooMoId, {int? localMoId}) async {
+    await ApiService.linkOdooOrder(odooMoId, localMoId: localMoId);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Order linked')));
+    await _sync();
+  }
+
+  Widget _specBadge(Map<String, dynamic> u, int? localId) {
+    final spec = u['spec'];
+    if (localId == null || spec == null) return const SizedBox.shrink();
+    PurchaseOrder? local;
+    for (final p in AppData.activePOs) {
+      if (p.id == localId) { local = p; break; }
+    }
+    if (local == null) return const SizedBox.shrink();
+    final dia = (spec['diameter'] as num?)?.toDouble();
+    final len = (spec['length'] as num?)?.toDouble();
+    final pd = (spec['pd'] as num?)?.toDouble();
+    final diaOk = dia == null || (local.diameter - dia).abs() < 0.05;
+    final lenOk = len == null || (local.length - len).abs() < 0.5;
+    final pdOk = pd == null || (local.pd - pd).abs() < 1.0;
+    final ok = diaOk && lenOk && pdOk;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(color: ok ? Colors.green.shade50 : Colors.amber.shade100, borderRadius: BorderRadius.circular(4)),
+      child: Text(ok ? 'Specs Verified' : '⚠️ Spec Mismatch', style: TextStyle(fontSize: 10, color: ok ? Colors.green.shade800 : Colors.orange.shade900, fontWeight: FontWeight.w600)),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final unmatched = (_result?['unmatched'] as List?) ?? [];
+    final localOrders = AppData.activePOs;
+    return AlertDialog(
+      title: const Text('Sync with Odoo'),
+      content: SizedBox(
+        width: 520,
+        child: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('Scope', style: TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 4),
+            DropdownButtonFormField<String>(
+              initialValue: _scope,
+              items: const [
+                DropdownMenuItem(value: 'active', child: Text('Active / Open MOs only')),
+                DropdownMenuItem(value: '7d', child: Text('Last 7 Days')),
+                DropdownMenuItem(value: '30d', child: Text('Last 30 Days')),
+                DropdownMenuItem(value: 'custom', child: Text('Custom Date Range')),
+              ],
+              onChanged: (v) => setState(() => _scope = v ?? 'active'),
+            ),
+            const SizedBox(height: 16),
+            if (_result != null) ...[
+              Text('Linked existing: ${_result!['linked_existing']}   Â·   Created new: ${_result!['created_new']}',
+                  style: const TextStyle(fontWeight: FontWeight.w600, color: Colors.deepPurple)),
+              if (unmatched.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                const Text('Unmatched â€” map or create:', style: TextStyle(fontWeight: FontWeight.w600)),
+                for (final u in unmatched)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(children: [
+                      Expanded(child: Text('${u['name']}${u['origin'] != null && u['origin'] != '' ? '  (origin: ${u['origin']})' : ''}',
+                          style: const TextStyle(fontSize: 12))),
+                      DropdownButton<int>(
+                        hint: const Text('Map to localâ€¦', style: TextStyle(fontSize: 12)),
+                        value: _linkSelections[u['odoo_mo_id']],
+                        items: [
+                          for (final p in localOrders)
+                            DropdownMenuItem(value: p.id, child: Text(p.moNumber, style: const TextStyle(fontSize: 12))),
+                        ],
+                        onChanged: (v) => setState(() => _linkSelections[u['odoo_mo_id']] = v),
+                      ),
+                      _specBadge(u, _linkSelections[u['odoo_mo_id']]),
+                      TextButton(
+                        onPressed: () => _link(u['odoo_mo_id'], localMoId: _linkSelections[u['odoo_mo_id']]),
+                        child: const Text('Link')),
+                      TextButton(onPressed: () => _link(u['odoo_mo_id']), child: const Text('Create new')),
+                    ]),
+                  ),
+              ],
+            ],
+          ]),
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
+        FilledButton.icon(
+          onPressed: _busy ? null : _sync,
+          icon: _busy
+              ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+              : const Icon(Icons.cloud_sync, size: 18),
+          label: Text(_result == null ? 'Start Sync' : 'Re-sync'),
+        ),
+      ],
+    );
+  }
+}
+

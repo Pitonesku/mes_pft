@@ -66,6 +66,9 @@ class MaterialDictionary(Base):
     odoo_product_id = Column(Integer, nullable=True)
     odoo_uom_id = Column(Integer, nullable=True)
 
+    # Data origin: 'odoo' (synced) or 'local' (manually added on the shop floor).
+    source = Column(String(20), nullable=False, default="local")
+
 class Machine(Base):
     __tablename__ = "machines"
     id = Column(Integer, primary_key=True, index=True)
@@ -131,8 +134,10 @@ class PurchaseOrder(Base):
     hm_glue_type = Column(String(100))
     triacetin_type = Column(String(100))
     
-    target_qty = Column(Integer, nullable=False)
-    produced_qty = Column(Integer, default=0)
+    # Rod quantities are BIGINT: an Odoo MO in a "1000pcs" unit easily exceeds
+    # the 32-bit range once converted to single rods (e.g. 10 M x 1000pcs).
+    target_qty = Column(BigInteger, nullable=False)
+    produced_qty = Column(BigInteger, default=0)
     is_hidden = Column(Boolean, default=False)
     is_archived = Column(Boolean, default=False)
     created_at = Column(DateTime, server_default=func.now())
@@ -140,6 +145,46 @@ class PurchaseOrder(Base):
     # Odoo integration: sale.order id for this customer PO (nullable; linked
     # non-destructively via inbound sync, never overwritten).
     odoo_id = Column(Integer, nullable=True)
+
+    # Root Manufacturing Order link (resolved through the Odoo backorder
+    # hierarchy; backorders are never imported as separate orders).
+    odoo_mo_id = Column(Integer, nullable=True)          # root mrp.production id
+    odoo_mo_name = Column(String(100), nullable=True)    # root MO name (e.g. WH/MO/00217)
+    odoo_linked_at = Column(DateTime(timezone=True), nullable=True)
+    # Currently open MO of the backorder chain (odoo_mo_id stays the root).
+    odoo_current_mo_id = Column(Integer, nullable=True)
+    # 'full' = post completion to Odoo; 'link_only' = link + quality data only.
+    sync_mode = Column(String(20), nullable=False, default="link_only")
+    # State of the Odoo MO chain: open | done | cancel | check | missing.
+    odoo_state = Column(String(20), nullable=True)
+    odoo_synced_at = Column(DateTime(timezone=True), nullable=True)
+    odoo_qty_drift = Column(Numeric, nullable=True)  # Odoo root qty - target_qty (info only)
+
+    # Explicit order lifecycle (distinct from odoo_state and the manual is_hidden
+    # toggle). Set by POST /v2/orders/{id}/close or the Odoo 'done' reconcile hook.
+    completion_status = Column(String(20), nullable=False, default="active")  # active | completed | cancelled
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    completed_by = Column(String(50), nullable=True)
+    # Immutable cumulative snapshots written once at finalize.
+    final_boxes = Column(BigInteger, nullable=True)
+    final_rods = Column(BigInteger, nullable=True)
+    final_waste_kg = Column(Numeric, nullable=True)
+    final_materials = Column(JSONB, nullable=True)  # {acetate, paper, pva, hm, triacetin}
+    final_quality = Column(JSONB, nullable=True)    # consolidated quality matrix + tested/rejected
+    odoo_summary_attachment_id = Column(Integer, nullable=True)
+
+    # Data origin: 'odoo' (synced MO) or 'local' (manually created MO).
+    source = Column(String(20), nullable=False, default="local")
+
+    # --- Manufacturing Order terminology (legacy DB column is po_number) -----
+    @property
+    def mo_number(self) -> str:
+        """Manufacturing Order number (alias of the legacy ``po_number`` column)."""
+        return self.po_number
+
+    @mo_number.setter
+    def mo_number(self, value: str) -> None:
+        self.po_number = value
 
 class ProductionReport(Base):
     __tablename__ = "production_reports"
@@ -174,8 +219,8 @@ class ProductionReport(Base):
     weight = Column(Float, default=0.0)
     
     lot_number = Column(String, nullable=True, default="")
-    machine_counter = Column(Integer, default=0)
-    produced_rods = Column(Integer, default=0)
+    machine_counter = Column(BigInteger, default=0)
+    produced_rods = Column(BigInteger, default=0)
     machine_efficiency = Column(Float, default=0.0)
     difference = Column(Float, default=0.0)
     diff_percent = Column(String, default="0%")
@@ -207,6 +252,17 @@ class ProductionReport(Base):
     parent_report_id = Column(Integer, ForeignKey("production_reports.id"))
     edited_by = Column(String(50))
     edited_at = Column(DateTime)
+
+    # Human-in-the-loop verification: operator data stays "pending" until a
+    # supervisor/admin approves it. Rejected reports are excluded from Odoo sync.
+    verification_status = Column(String(20), default="pending")  # pending | approved | rejected
+    verified_by = Column(String(50))
+    verified_at = Column(DateTime)
+
+    # One report per MO run: direct links to the shift session and the production
+    # run (nullable - legacy reports are linked via production_runs.report_id).
+    shift_id = Column(BigInteger, ForeignKey("shift_sessions.id"), nullable=True, index=True)
+    run_id = Column(BigInteger, ForeignKey("production_runs.id"), nullable=True, index=True)
 
 class TelegramQueue(Base):
     __tablename__ = "telegram_queue"
@@ -296,7 +352,7 @@ class ShiftSession(Base):
     operator_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     started_at = Column(DateTime(timezone=True), nullable=False)
     ended_at = Column(DateTime(timezone=True), nullable=True)  # NULL = open
-    status = Column(String(20), nullable=False, default="OPEN")  # OPEN | CLOSED | VOID
+    status = Column(String(20), nullable=False, default="OPEN")  # IN_PROGRESS | AUTO_CLOSED | CLOSED | OPEN(legacy)
     plant_tz = Column(String(50), nullable=False, default="Europe/Budapest")
     source = Column(String(20), nullable=False, default="tablet")  # tablet | auto | legacy
     client_shift_id = Column(String(64), nullable=True, unique=True)
@@ -304,6 +360,8 @@ class ShiftSession(Base):
     closed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     time_confidence = Column(String(20), nullable=True)  # exact | derived
     legacy_report_key = Column(String(100), nullable=True)
+    shift_name = Column(String(50), nullable=True)  # shift template label (e.g. "Shift 1")
+    scheduled_end_at = Column(DateTime(timezone=True), nullable=True)  # for auto-close sweep
 
 
 class ProductionRun(Base):
@@ -318,10 +376,100 @@ class ProductionRun(Base):
     ended_at = Column(DateTime(timezone=True), nullable=True)
     status = Column(String(20), nullable=False, default="OPEN")
     spec_snapshot = Column(JSONB, nullable=False, default=dict)  # frozen limits
+    end_counter = Column(Numeric, nullable=True)  # final machine counter at run split/close
     odoo_mo_id = Column(Integer, nullable=True)
     odoo_backorder_id = Column(Integer, nullable=True)  # mrp.production backorder id
     odoo_done_qty = Column(Numeric, nullable=True)      # last synced completion qty (product UoM)
     odoo_sync_status = Column(String(20), nullable=False, default="pending")  # pending | synced | error
+    # Authoritative operator report for this run's produced quantity (nullable).
+    report_id = Column(Integer, ForeignKey("production_reports.id"), nullable=True, index=True)
+    # Machine this run produced on. A shift is an operator session that may span
+    # several machines; the run is the "where/what/when" unit (Option 2 model).
+    machine_id = Column(Integer, ForeignKey("machines.id"), nullable=True, index=True)
+
+
+class ProductionRunComponent(Base):
+    """One direct filter-rod material (filtered BOM line) for a production order.
+
+    Populated from the Odoo MO push. Only the four direct material groups are
+    kept (acetate tow, paper, triacetin, glue) — never the full BOM. The raw
+    ``product_name`` is preserved verbatim and, when possible, matched to the
+    local ``material_dictionary`` for Odoo lot tracking.
+
+    ``po_id`` links the BOM to the order (available as soon as the MO is pushed);
+    ``run_id`` is filled once a production run opens for that order.
+    """
+    __tablename__ = "production_run_components"
+    id = Column(BigInteger, primary_key=True, index=True)
+    po_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=True, index=True)
+    run_id = Column(BigInteger, ForeignKey("production_runs.id"), nullable=True, index=True)
+    seq = Column(Integer, nullable=False, default=0)
+    category = Column(String(50), nullable=False)  # acetate | paper | triacetin | glue
+    product_name = Column(String(200), nullable=False)
+    product_qty = Column(Numeric(14, 4), nullable=False, default=0)
+    product_uom = Column(String(20), nullable=True)
+    material_id = Column(Integer, ForeignKey("material_dictionary.id"), nullable=True)
+    batch_no = Column(String(100), nullable=True)
+    odoo_bom_line_id = Column(Integer, nullable=True)
+    odoo_move_id = Column(Integer, nullable=True)
+
+
+class ManualQualityCheck(Base):
+    """An in-process manual QC log entry recorded by an operator during a shift.
+
+    Quantitative (sample_weight, length_mm) and qualitative (glue seam, cut
+    quality, visual appearance) checks, linked to the active shift and MO run.
+    """
+    __tablename__ = "manual_quality_checks"
+    id = Column(BigInteger, primary_key=True, index=True)
+    shift_id = Column(BigInteger, ForeignKey("shift_sessions.id"), nullable=False, index=True)
+    mo_id = Column(BigInteger, ForeignKey("production_runs.id"), nullable=True, index=True)
+    operator_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    sample_weight = Column(Numeric, nullable=True)   # grams per ``sample_rods`` rods
+    length_mm = Column(Numeric, nullable=True)        # millimetres
+    hardness = Column(Numeric, nullable=True)         # percent (manual, not station)
+    # Tri-state: True = OK, False = FAIL, NULL = not checked.
+    glue_seam_ok = Column(Boolean, nullable=True)
+    cut_quality_ok = Column(Boolean, nullable=True)
+    visual_appearance_ok = Column(Boolean, nullable=True)
+    notes = Column(Text, nullable=True)
+
+    # Snapshot taken server-side at the time of the check (the tablet's cached
+    # context is never trusted): machine / MO of the shift's open run.
+    machine_id = Column(Integer, ForeignKey("machines.id"), nullable=True, index=True)
+    po_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=True)
+    mo_ref = Column(String(100), nullable=True)
+    sample_rods = Column(Integer, nullable=False, default=10)  # weight is g per N rods
+    verdicts = Column(JSONB, nullable=True)           # persisted pass/fail per parameter
+    overall_status = Column(String(10), nullable=True)  # PASS | FAIL | NULL (no limits)
+    measured_at = Column(DateTime(timezone=True), nullable=True)
+    client_check_id = Column(String(64), nullable=True)  # offline-queue idempotency key
+    voided_at = Column(DateTime(timezone=True), nullable=True)
+    voided_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    void_reason = Column(Text, nullable=True)
+
+
+class RunChangeLog(Base):
+    """Immutable audit trail for MO / machine changes and supervisor corrections."""
+    __tablename__ = "run_change_log"
+    id = Column(BigInteger, primary_key=True, index=True)
+    run_id = Column(BigInteger, ForeignKey("production_runs.id"), nullable=False, index=True)
+    shift_id = Column(BigInteger, ForeignKey("shift_sessions.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    action = Column(String(30), nullable=False)  # SWITCH_MO | CHANGE_MACHINE | REASSIGN_MO | REASSIGN_MACHINE
+    old_values = Column(JSONB, nullable=False, default=dict)
+    new_values = Column(JSONB, nullable=False, default=dict)
+    reason = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class SystemSetting(Base):
+    """Small key-value store for system toggles (e.g. Odoo integration mode)."""
+    __tablename__ = "system_settings"
+    key = Column(String(100), primary_key=True)
+    value = Column(JSONB, nullable=False, default=dict)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class MachineAlias(Base):
@@ -334,6 +482,47 @@ class MachineAlias(Base):
     alias_value = Column(String(100), nullable=False)
     valid_from = Column(DateTime(timezone=True), nullable=True)
     valid_to = Column(DateTime(timezone=True), nullable=True)
+
+
+class StationProfile(Base):
+    """Per-station parser profile: overrides the column/metadata mapping.
+
+    A station may emit files with a different column order or a different set of
+    parameters (e.g. no weight, hardness instead). Rows are keyed by a station
+    identifier resolved from the file header (instrument_id -> maker -> team).
+    """
+    __tablename__ = "station_profiles"
+    id = Column(Integer, primary_key=True, index=True)
+    source = Column(String(50), nullable=False)          # 'quantum_neo'
+    match_key = Column(String(50), nullable=False)       # 'instrument_id' | 'maker' | 'team'
+    match_value = Column(String(100), nullable=False)
+    label = Column(String(100), nullable=True)           # human station name
+    data_start_row = Column(Integer, nullable=True)
+    encoding = Column(String(20), nullable=True)
+    mo_field = Column(String(30), nullable=True)         # batch_description | comments | brand
+    metadata_map = Column(JSONB, nullable=True)          # {field: csv key}
+    column_map = Column(JSONB, nullable=True)            # {field: index or null}
+    delivery_mode = Column(String(10), nullable=False, default="push")  # push | pull
+    watch_path = Column(String(500), nullable=True)      # pull-mode network folder
+    station_key_id = Column(Integer, ForeignKey("station_keys.id"), nullable=True)
+    valid_from = Column(DateTime(timezone=True), nullable=True)
+    valid_to = Column(DateTime(timezone=True), nullable=True)
+
+
+class StationKey(Base):
+    """Long-lived API key for the station push agent (scoped to quality ingest).
+
+    Only the SHA-256 hash of a key is stored, so the plaintext can be issued once
+    and never recovered. Keys are revocable via ``is_active``.
+    """
+    __tablename__ = "station_keys"
+    id = Column(Integer, primary_key=True, index=True)
+    key_hash = Column(String(64), unique=True, nullable=False, index=True)  # SHA-256 hex
+    label = Column(String(100), nullable=False)          # e.g. "Station 1 - Quantum Neo"
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 
 
 class QualitySpec(Base):
@@ -453,29 +642,6 @@ class IngestionFile(Base):
     processed_at = Column(DateTime(timezone=True), nullable=True)
 
 
-class ShiftQualityStat(Base):
-    """One aggregated statistic for a shift/run version and parameter."""
-    __tablename__ = "shift_quality_stats"
-    id = Column(BigInteger, primary_key=True, index=True)
-    shift_id = Column(BigInteger, ForeignKey("shift_sessions.id"), nullable=False, index=True)
-    run_id = Column(BigInteger, ForeignKey("production_runs.id"), nullable=True, index=True)
-    version = Column(Integer, nullable=False, default=1)
-    parameter = Column(String(30), nullable=False)
-    n = Column(Integer, nullable=False, default=0)
-    n_rejected = Column(Integer, nullable=False, default=0)
-    mean = Column(Numeric, nullable=True)
-    sd_samp = Column(Numeric, nullable=True)
-    sd_pop = Column(Numeric, nullable=True)
-    min = Column(Numeric, nullable=True)
-    max = Column(Numeric, nullable=True)
-    target = Column(Numeric, nullable=True)
-    lsl = Column(Numeric, nullable=True)
-    usl = Column(Numeric, nullable=True)
-    n_out_of_spec = Column(Integer, nullable=False, default=0)
-    pass_rate = Column(Numeric, nullable=True)
-    status = Column(String(20), nullable=True)  # PASS | WARN | FAIL | NOT_MEASURED
-
-
 class ShiftSummary(Base):
     """Versioned, immutable shift summary (the final aggregated JSON)."""
     __tablename__ = "shift_summaries"
@@ -486,6 +652,19 @@ class ShiftSummary(Base):
     input_fingerprint = Column(String(100), nullable=True)
     is_stale = Column(Boolean, nullable=False, default=False)
     payload = Column(JSONB, nullable=False)
+
+
+class OdooShadowLog(Base):
+    """Odoo writes the dispatcher WOULD have made (ODOO_SHADOW_MODE), per run."""
+    __tablename__ = "odoo_shadow_log"
+    id = Column(BigInteger, primary_key=True, index=True)
+    outbox_id = Column(BigInteger, ForeignKey("odoo_outbox.id", ondelete="SET NULL"), nullable=True, index=True)
+    run_id = Column(BigInteger, ForeignKey("production_runs.id", ondelete="SET NULL"), nullable=True, index=True)
+    odoo_mo_id = Column(Integer, nullable=True)
+    link_only = Column(Boolean, nullable=False, default=False)
+    actions = Column(JSONB, nullable=False, default=list)
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class OdooOutbox(Base):

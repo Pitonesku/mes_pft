@@ -4,14 +4,19 @@
 import 'package:flutter/material.dart';
 
 import '../../api_service.dart';
+import '../../core/app_navigation.dart';
 import '../../core/open_new_tab.dart';
 import '../../widgets/quality_control_chart.dart';
 import '../../widgets/quality_report_dialog.dart';
+import '../../widgets/report_verification_card.dart';
+import '../../widgets/report_edit_form.dart';
+import '../../widgets/report_history_dialog.dart';
 
 class ReportFullScreen extends StatefulWidget {
   final int reportId;
   final VoidCallback onBack;
-  const ReportFullScreen({super.key, required this.reportId, required this.onBack});
+  final bool canModify;
+  const ReportFullScreen({super.key, required this.reportId, required this.onBack, required this.canModify});
   @override
   State<ReportFullScreen> createState() => _ReportFullScreenState();
 }
@@ -140,16 +145,34 @@ class _ReportFullScreenState extends State<ReportFullScreen> {
   }
 
   void _openQualityControl() {
-    final machine = _report?['machine_name']?.toString() ?? '';
-    final po = _report?['po_number']?.toString() ?? '';
-    final shiftId = _quality?['shift_id'];
-    final parts = <String>[
-      if (machine.isNotEmpty) 'machine=${Uri.encodeComponent(machine)}',
-      if (po.isNotEmpty) 'po=${Uri.encodeComponent(po)}',
-      if (shiftId != null) 'shift_id=${Uri.encodeComponent('$shiftId')}',
-    ];
-    final suffix = parts.isEmpty ? '' : '?${parts.join('&')}';
-    openInNewTab(absoluteAppUrl('/quality$suffix'));
+    final shiftIdRaw = _quality?['shift_id'];
+    AppNavigation.openQualityControl(
+      machine: _report?['machine_name']?.toString(),
+      shiftId: shiftIdRaw is int
+          ? shiftIdRaw
+          : (shiftIdRaw != null ? int.tryParse('$shiftIdRaw') : null),
+      po: _report?['po_number']?.toString(),
+    );
+  }
+
+  Future<void> _editReport() async {
+    final report = _report;
+    if (report == null) return;
+    final payload = await showReportEditOverlay(context, report);
+    if (payload == null || payload.isEmpty) return;
+    final ok = await ApiService.updateReport(_currentId, payload);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(ok ? 'Report updated — re-verification required.' : 'Failed to update report.'),
+      backgroundColor: ok ? Colors.green : Colors.red,
+    ));
+    if (ok) _load();
+  }
+
+  void _openHistory() {
+    final report = _report;
+    if (report == null) return;
+    showReportHistoryDialog(context, report, onReverted: _load);
   }
 
   Widget _body() {
@@ -243,6 +266,9 @@ class _ReportFullScreenState extends State<ReportFullScreen> {
           ),
           const SizedBox(height: 16),
         ],
+        _card('VERIFICATION', [
+          ReportVerificationCard(report: _report!, canVerify: widget.canModify, onVerified: _load),
+        ]),
         _card('QUALITY SUMMARY', [_qualitySummary()]),
         _card('OUTLIERS', [_outliers()]),
         _card('ACTIONS', [
@@ -251,6 +277,20 @@ class _ReportFullScreenState extends State<ReportFullScreen> {
             label: const Text('Open in Quality Control'),
             onPressed: _openQualityControl,
           ),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.history, size: 16),
+            label: const Text('History'),
+            onPressed: _openHistory,
+          ),
+          if (widget.canModify) ...[
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              icon: const Icon(Icons.edit, size: 16),
+              label: const Text('Edit Report'),
+              onPressed: _editReport,
+            ),
+          ],
         ]),
       ];
 

@@ -14,6 +14,7 @@ import hmac
 import json
 import os
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import Depends, HTTPException, Header
@@ -96,3 +97,65 @@ def get_current_user(
         raise HTTPException(status_code=403, detail="User not found or inactive")
 
     return user
+
+
+def _hash_station_key(raw: str) -> str:
+    """SHA-256 hex of a station API key (only the hash is ever stored)."""
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _resolve_station_key(db: Session, raw: str) -> models.User:
+    """Resolve a raw station API key to its linked (station_ingest) user."""
+    key_hash = _hash_station_key(raw.strip())
+    row = (
+        db.query(models.StationKey)
+        .filter(
+            models.StationKey.key_hash == key_hash,
+            models.StationKey.is_active.is_(True),
+        )
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=401, detail="Invalid station key")
+
+    user_id = row.user_id
+    now = datetime.now(timezone.utc)
+    if row.last_used_at is None or (now - row.last_used_at).total_seconds() > 60:
+        row.last_used_at = now
+        db.commit()
+
+    if user_id is None:
+        raise HTTPException(status_code=403, detail="Station key has no linked user")
+    user = (
+        db.query(models.User)
+        .filter(models.User.id == user_id, models.User.is_inactive.is_(False))
+        .first()
+    )
+    if user is None:
+        raise HTTPException(status_code=403, detail="Station key user not found or inactive")
+    return user
+
+
+def get_ingest_identity(
+    station_key: Optional[str] = Header(default=None, alias="X-Station-Key"),
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+    db: Session = Depends(get_db),
+) -> models.User:
+    """Accept either a station API key or a signed user bearer token.
+
+    The station key is honoured ONLY here (the quality ingest endpoint), so it is
+    strictly scoped to measurement uploads. It may be sent as ``X-Station-Key``
+    or as ``Authorization: Bearer <key>``; a signed user token (which contains a
+    ``.`` separator) is also accepted for manual web-console uploads.
+    """
+    key = (station_key or "").strip()
+    if key:
+        return _resolve_station_key(db, key)
+
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+        if token and "." not in token:
+            return _resolve_station_key(db, token)
+        return get_current_user(authorization=authorization, db=db)
+
+    raise HTTPException(status_code=401, detail="Station key or bearer token required")

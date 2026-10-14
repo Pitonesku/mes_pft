@@ -25,4 +25,10 @@ class AppNavigation {
   static void openReport(int reportId) {
     reportRequest.value = reportId;
   }
+
+  static final ValueNotifier<String?> orderRequest = ValueNotifier<String?>(null);
+
+  static void openOrder(String poNumber) {
+    orderRequest.value = poNumber;
+  }
 }
