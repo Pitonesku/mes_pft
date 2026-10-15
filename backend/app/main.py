@@ -2314,11 +2314,29 @@ def verify_report(
             except Exception as exc:  # noqa: BLE001 - approval must never fail
                 print(f"[Odoo] run dispatch enqueue failed for report {db_report.id}: {exc}")
 
+        # If this approval completes the order (cumulative rods >= target), auto-finalize:
+        # generate the consolidated Order Summary PDF and push it to the Odoo root MO.
+        finalized = False
+        if db_report.po_number:
+            try:
+                from app.services import order_finalize
+                po = (
+                    db.query(models.PurchaseOrder)
+                    .filter(models.PurchaseOrder.po_number == db_report.po_number)
+                    .order_by(models.PurchaseOrder.id.desc())
+                    .first()
+                )
+                if po is not None:
+                    finalized = order_finalize.maybe_auto_finalize(db, po, current_user.username)
+            except Exception as exc:  # noqa: BLE001 - approval must never fail
+                print(f"[Odoo] auto-finalize failed for report {db_report.id}: {exc}")
+
     return {
         "status": "success",
         "report_id": db_report.id,
         "verification_status": db_report.verification_status,
         "verified_by": db_report.verified_by,
+        "order_finalized": finalized,
     }
 
 

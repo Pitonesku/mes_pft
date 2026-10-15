@@ -85,7 +85,7 @@ def match_reports_to_mos(
 def csv_rows(rods: List[Dict[str, Any]]) -> List[List[Any]]:
     """Rod dicts -> CSV rows (header first) for the Odoo measurements attachment."""
     header = ["measured_at", "rod_no", "machine", "diameter", "pd", "weight",
-              "ovality", "roundness", "shape", "hardness"]
+              "ovality", "roundness", "shape", "hardness", "length"]
     out: List[List[Any]] = [header]
     for r in rods:
         out.append([r.get(k) if r.get(k) is not None else "" for k in header])

@@ -45,7 +45,7 @@ ALLOWED_FIELDS = frozenset({
     "x_lot_number",
 })
 
-_PARAMS = ("pd", "weight", "diameter", "ovality", "roundness", "shape", "hardness")
+_PARAMS = ("pd", "weight", "diameter", "ovality", "roundness", "shape", "hardness", "length")
 
 
 def _f(value) -> Optional[float]:
@@ -86,7 +86,7 @@ def measurements_csv(rods, machine_name: str) -> bytes:
             "rod_no": r.rod_no, "machine": machine_name,
             "diameter": _f(r.diameter), "pd": _f(r.pd), "weight": _f(r.weight),
             "ovality": _f(r.ovality), "roundness": _f(r.roundness),
-            "shape": _f(r.shape), "hardness": _f(r.hardness),
+            "shape": _f(r.shape), "hardness": _f(r.hardness), "length": _f(r.length),
         }
         for r in rods
     ]):

@@ -1,17 +1,16 @@
 // lib/widgets/quality_report_dialog.dart
 // Printable A4 quality certificate report: header (PO + specification + machine /
-// date / shift / operator) and the measurement-results table (length, diameter,
-// pressure drop, hardness, weight) with nominal / lower / upper / mean / SD.
-// Values come from the server's merged run/order summary (station + manual).
-// No verdict and no monitor-only SD color thresholds.
+// date / shift / operator), the Automatic Measurements table (station mean/SD),
+// and the Manual Measurements table (each check + a computed Mean row).
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 
 const _paramLabels = <String, String>{
-  'length': 'Filter rods length',
-  'diameter': 'Filter rods diameter',
+  'length': 'Length',
+  'diameter': 'Diameter',
   'pd': 'Pressure drop',
   'hardness': 'Hardness',
   'weight': 'Weight',
@@ -29,10 +28,12 @@ class QualityReportDialog extends StatefulWidget {
 class _QualityReportDialogState extends State<QualityReportDialog> {
   bool _printing = false;
 
-  Map<String, dynamic>? get _report => (widget.data['report'] as Map<String, dynamic>?);
-  List<Map<String, dynamic>> get _rows {
+  Map<String, dynamic>? get _report =>
+      (widget.data['report'] as Map<String, dynamic>?);
+
+  List<Map<String, dynamic>> _orderedRows(String key) {
     final byParam = <String, Map<String, dynamic>>{};
-    for (final r in ((_report?['certificate'] as List<dynamic>?) ?? const [])) {
+    for (final r in ((_report?[key] as List<dynamic>?) ?? const [])) {
       if (r is Map) byParam['${r['parameter']}'] = r.cast<String, dynamic>();
     }
     final ordered = <Map<String, dynamic>>[];
@@ -45,7 +46,17 @@ class _QualityReportDialogState extends State<QualityReportDialog> {
     return ordered;
   }
 
-  String _s(dynamic v, [String fb = '—']) => (v == null || '$v'.isEmpty) ? fb : '$v';
+  List<Map<String, dynamic>> get _autoRows => _orderedRows('automatic');
+
+  List<Map<String, dynamic>> get _manualChecks {
+    final out = <Map<String, dynamic>>[];
+    for (final c in ((_report?['manual_checks'] as List<dynamic>?) ?? const [])) {
+      if (c is Map) out.add(c.cast<String, dynamic>());
+    }
+    return out;
+  }
+
+  String _s(dynamic v, [String fb = '-']) => (v == null || '$v'.isEmpty) ? fb : '$v';
   String _f(dynamic v) {
     if (v == null) return '';
     if (v is num) {
@@ -55,22 +66,30 @@ class _QualityReportDialogState extends State<QualityReportDialog> {
     }
     return '$v';
   }
+  String _flag(dynamic v) => v == null ? '-' : (v == true ? 'OK' : 'FAIL');
 
-  List<String> _manualLines() {
-    final m = _report?['manual_measurements'];
-    if (m is! Map || m.isEmpty) return const [];
-    final lines = <String>[];
-    final count = m['count'];
-    if (count is num && count > 0) lines.add('Manual checks: $count');
-    for (final k in _paramOrder) {
-      final e = m[k];
-      if (e is Map) {
-        final mm = e.cast<String, dynamic>();
-        final sd = mm['sd'] != null ? ', SD ${_f(mm['sd'])}' : '';
-        lines.add('${_paramLabels[k]}: mean ${_f(mm['mean'])}$sd (n=${mm['n'] ?? '-'})');
+  String _fmtTime(dynamic v) {
+    if (v == null || '$v'.isEmpty) return '-';
+    try {
+      return DateFormat('HH:mm').format(DateTime.parse('$v').toLocal());
+    } catch (_) {
+      return '$v';
+    }
+  }
+
+  double? _meanOf(List<Map<String, dynamic>> rows, String key) {
+    final vals = <double>[];
+    for (final r in rows) {
+      final v = r[key];
+      if (v is num) {
+        vals.add(v.toDouble());
+      } else if (v != null) {
+        final d = double.tryParse('$v');
+        if (d != null) vals.add(d);
       }
     }
-    return lines;
+    if (vals.isEmpty) return null;
+    return vals.reduce((a, b) => a + b) / vals.length;
   }
 
   Future<void> _print() async {
@@ -84,79 +103,111 @@ class _QualityReportDialogState extends State<QualityReportDialog> {
       if (mounted) setState(() => _printing = false);
     }
   }
+
   pw.Document _buildPdf() {
     final doc = pw.Document();
     final r = _report ?? const <String, dynamic>{};
-    final rows = _rows;
-    final manual = _manualLines();
+    final autoRows = _autoRows;
+    final manual = _manualChecks;
 
     pw.Widget kv(String l, String v) => pw.Row(
           crossAxisAlignment: pw.CrossAxisAlignment.start,
           children: [
-            pw.SizedBox(width: 120, child: pw.Text(l, style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 10))),
-            pw.Expanded(child: pw.Text(v, style: const pw.TextStyle(fontSize: 10))),
+            pw.SizedBox(
+                width: 120,
+                child: pw.Text(l,
+                    style: pw.TextStyle(
+                        fontWeight: pw.FontWeight.bold, fontSize: 9))),
+            pw.Expanded(child: pw.Text(v, style: const pw.TextStyle(fontSize: 9))),
           ],
         );
 
-    final header = ['#', 'Parameter', 'Measure', 'Nominal', 'Lower SL', 'Upper SL', 'Mean', 'SD'];
-    final cells = <List<String>>[header];
-    var i = 0;
-    for (final row in rows) {
-      i++;
-      final p = '${row['parameter']}';
-      cells.add([
-        '$i', _paramLabels[p] ?? p, _s(row['unit']),
-        _f(row['nominal']), _f(row['lower']), _f(row['upper']),
-        _f(row['mean']), _f(row['sd']),
-      ]);
+    pw.Widget section(String t) => pw.Padding(
+          padding: const pw.EdgeInsets.only(top: 8, bottom: 4),
+          child: pw.Text(t,
+              style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 11)),
+        );
+
+    List<List<String>> autoCells() {
+      final cells = <List<String>>[
+        ['#', 'Parameter', 'Measure', 'Nominal', 'Lower SL', 'Upper SL', 'Mean', 'SD']
+      ];
+      var i = 0;
+      for (final row in autoRows) {
+        i++;
+        final p = '${row['parameter']}';
+        cells.add([
+          '$i', _paramLabels[p] ?? p, _s(row['unit']), _f(row['nominal']),
+          _f(row['lower']), _f(row['upper']), _f(row['mean']), _f(row['sd']),
+        ]);
+      }
+      return cells;
+    }
+
+    List<List<String>> manualCells() {
+      final cells = <List<String>>[
+        ['#', 'Time', 'Weight (mg)', 'Length (mm)', 'Hardness (%)', 'Glue Seam', 'Cut Quality', 'Visual']
+      ];
+      var i = 0;
+      for (final c in manual) {
+        i++;
+        cells.add([
+          '$i', _fmtTime(c['measured_at']), _f(c['weight_mg']), _f(c['length_mm']),
+          _f(c['hardness']), _flag(c['glue_seam_ok']), _flag(c['cut_quality_ok']),
+          _flag(c['visual_appearance_ok']),
+        ]);
+      }
+      if (manual.isNotEmpty) {
+        cells.add([
+          '', 'Mean', _f(_meanOf(manual, 'weight_mg')),
+          _f(_meanOf(manual, 'length_mm')), _f(_meanOf(manual, 'hardness')),
+          '', '', '',
+        ]);
+      }
+      return cells;
     }
 
     doc.addPage(pw.MultiPage(
       pageFormat: PdfPageFormat.a4,
-      margin: const pw.EdgeInsets.all(32),
+      margin: const pw.EdgeInsets.all(28),
       build: (ctx) => [
-        pw.Center(child: pw.Text('QUALITY REPORT', style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold))),
-        pw.SizedBox(height: 12),
-        pw.Text('Header', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 11)),
-        pw.Divider(),
+        pw.Text('QUALITY REPORT',
+            textAlign: pw.TextAlign.center,
+            style: pw.TextStyle(
+                fontSize: 15,
+                fontWeight: pw.FontWeight.bold)),
+        pw.SizedBox(height: 10),
+        section('Header'),
         kv('PO Number', _s(r['po_number'])),
         kv('Specification', _s(r['spec_string'])),
         kv('Machine', _s(r['machine'])),
         kv('Date', _s(r['date'])),
         kv('Shift Interval', _s(r['shift_label'])),
         kv('Operator', _s(r['operator'])),
-        pw.SizedBox(height: 14),
-        pw.Text('Measurement Results', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 11)),
-        pw.Divider(),
-        pw.Table(
-          border: pw.TableBorder.all(color: PdfColors.grey),
-          children: [
-            for (var ri = 0; ri < cells.length; ri++)
-              pw.TableRow(
-                decoration: ri == 0 ? const pw.BoxDecoration(color: PdfColor.fromInt(0xFFEEEEEE)) : null,
-                children: [
-                  for (final cell in cells[ri])
-                    pw.Padding(
-                      padding: const pw.EdgeInsets.all(4),
-                      child: pw.Text(cell, style: pw.TextStyle(fontSize: 9, fontWeight: ri == 0 ? pw.FontWeight.bold : pw.FontWeight.normal)),
-                    ),
-                ],
-              ),
-          ],
-        ),
-        if (manual.isNotEmpty) ...[
-          pw.SizedBox(height: 8),
-          ...manual.map((l) => pw.Text('• $l', style: const pw.TextStyle(fontSize: 9))),
-        ],
+        section('Automatic Measurements'),
+        pw.Table.fromTextArray(
+            headers: autoCells().first,
+            data: autoCells().sublist(1),
+            headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 8),
+            cellStyle: const pw.TextStyle(fontSize: 8),
+            headerDecoration: const pw.BoxDecoration(color: PdfColors.grey300)),
+        section('Manual Measurements'),
+        pw.Table.fromTextArray(
+            headers: manualCells().first,
+            data: manualCells().sublist(1),
+            headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 8),
+            cellStyle: const pw.TextStyle(fontSize: 8),
+            headerDecoration: const pw.BoxDecoration(color: PdfColors.grey300)),
         if (_s(r['remarks'], '').trim().isNotEmpty)
           pw.Padding(
-            padding: const pw.EdgeInsets.only(top: 8),
-            child: pw.Text('Notes: ${r['remarks']}', style: const pw.TextStyle(fontSize: 9)),
-          ),
+              padding: const pw.EdgeInsets.only(top: 8),
+              child: pw.Text('Notes: ${r['remarks']}',
+                  style: const pw.TextStyle(fontSize: 9))),
       ],
     ));
     return doc;
   }
+
   @override
   Widget build(BuildContext context) {
     final r = _report;
@@ -165,7 +216,8 @@ class _QualityReportDialogState extends State<QualityReportDialog> {
         const Expanded(child: Text('Quality Report')),
         IconButton(
           icon: _printing
-              ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+              ? const SizedBox(
+                  width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
               : const Icon(Icons.print),
           tooltip: 'Print / Save PDF',
           onPressed: _printing || r == null ? null : _print,
@@ -178,33 +230,70 @@ class _QualityReportDialogState extends State<QualityReportDialog> {
             ? const Center(child: Text('No quality report data for this selection'))
             : SingleChildScrollView(child: _preview(r)),
       ),
-      actions: [TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Close'))],
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.of(context).pop(), child: const Text('Close'))
+      ],
     );
   }
 
   Widget _preview(Map<String, dynamic> r) {
-    final rows = _rows;
-    final manual = _manualLines();
+    final autoRows = _autoRows;
+    final manual = _manualChecks;
     Widget kv(String l, String v) => Padding(
           padding: const EdgeInsets.symmetric(vertical: 1),
           child: Row(children: [
-            SizedBox(width: 120, child: Text(l, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12, color: Colors.black54))),
+            SizedBox(
+                width: 120,
+                child: Text(l,
+                    style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 12,
+                        color: Colors.black54))),
             Expanded(child: Text(v, style: const TextStyle(fontSize: 12))),
           ]),
         );
-    final tableRows = <TableRow>[
-      TableRow(children: [for (final c in ['#', 'Parameter', 'Measure', 'Nominal', 'Lower SL', 'Upper SL', 'Mean', 'SD']) _th(c)]),
+    final autoTableRows = <TableRow>[
+      TableRow(children: [
+        for (final c in ['#', 'Parameter', 'Measure', 'Nominal', 'Lower SL', 'Upper SL', 'Mean', 'SD'])
+          _th(c)
+      ]),
     ];
     var i = 0;
-    for (final row in rows) {
+    for (final row in autoRows) {
       i++;
       final p = '${row['parameter']}';
-      tableRows.add(TableRow(children: [
+      autoTableRows.add(TableRow(children: [
         _td('$i'), _td(_paramLabels[p] ?? p), _td(_s(row['unit'])),
         _td(_f(row['nominal'])), _td(_f(row['lower'])), _td(_f(row['upper'])),
         _td(_f(row['mean'])), _td(_f(row['sd'])),
       ]));
     }
+
+    final manualTableRows = <TableRow>[
+      TableRow(children: [
+        for (final c in ['#', 'Time', 'Weight (mg)', 'Length (mm)', 'Hardness (%)', 'Glue Seam', 'Cut Quality', 'Visual'])
+          _th(c)
+      ]),
+    ];
+    var j = 0;
+    for (final c in manual) {
+      j++;
+      manualTableRows.add(TableRow(children: [
+        _td('$j'), _td(_fmtTime(c['measured_at'])), _td(_f(c['weight_mg'])),
+        _td(_f(c['length_mm'])), _td(_f(c['hardness'])),
+        _td(_flag(c['glue_seam_ok'])), _td(_flag(c['cut_quality_ok'])),
+        _td(_flag(c['visual_appearance_ok'])),
+      ]));
+    }
+    if (manual.isNotEmpty) {
+      manualTableRows.add(TableRow(children: [
+        _td(''), _th('Mean'), _td(_f(_meanOf(manual, 'weight_mg'))),
+        _td(_f(_meanOf(manual, 'length_mm'))),
+        _td(_f(_meanOf(manual, 'hardness'))), _td(''), _td(''), _td(''),
+      ]));
+    }
+
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       const Text('Header', style: TextStyle(fontWeight: FontWeight.bold)),
       kv('PO Number', _s(r['po_number'])),
@@ -214,15 +303,15 @@ class _QualityReportDialogState extends State<QualityReportDialog> {
       kv('Shift Interval', _s(r['shift_label'])),
       kv('Operator', _s(r['operator'])),
       const SizedBox(height: 12),
-      const Text('Measurement Results', style: TextStyle(fontWeight: FontWeight.bold)),
+      const Text('Automatic Measurements',
+          style: TextStyle(fontWeight: FontWeight.bold)),
       const SizedBox(height: 4),
-      Table(border: TableBorder.all(color: Colors.grey.shade300), children: tableRows),
-      if (manual.isNotEmpty) ...[
-        const SizedBox(height: 8),
-        ...manual.map((l) => Padding(
-            padding: const EdgeInsets.symmetric(vertical: 1),
-            child: Text('• $l', style: const TextStyle(fontSize: 12)))),
-      ],
+      Table(border: TableBorder.all(color: Colors.grey.shade300), children: autoTableRows),
+      const SizedBox(height: 12),
+      const Text('Manual Measurements',
+          style: TextStyle(fontWeight: FontWeight.bold)),
+      const SizedBox(height: 4),
+      Table(border: TableBorder.all(color: Colors.grey.shade300), children: manualTableRows),
       if (_s(r['remarks'], '').trim().isNotEmpty)
         Padding(
           padding: const EdgeInsets.only(top: 8),

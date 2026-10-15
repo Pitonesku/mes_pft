@@ -300,7 +300,7 @@ const _matchKeys = ['instrument_id', 'maker', 'team'];
 const _moFields = ['batch_description', 'comments', 'brand'];
 const _encodings = ['utf-8', 'cp1251', 'cp1252', 'latin-1'];
 const _columnFields = [
-  'rod_no', 'pd', 'weight', 'diameter', 'ovality', 'roundness', 'shape', 'hardness'
+  'rod_no', 'pd', 'weight', 'diameter', 'ovality', 'roundness', 'shape', 'hardness', 'length'
 ];
 const _columnLabels = {
   'rod_no': 'Rod Number Index',
@@ -311,6 +311,7 @@ const _columnLabels = {
   'roundness': 'Roundness Index',
   'shape': 'Shape Index',
   'hardness': 'Hardness Index',
+  'length': 'Length Index',
 };
 
 class _StationProfileDialog extends StatefulWidget {
@@ -327,6 +328,12 @@ class _StationProfileDialogState extends State<_StationProfileDialog> {
   late final TextEditingController _dataStartRow;
   late final TextEditingController _watchPath;
   late final Map<String, TextEditingController> _col;
+  late final TextEditingController _cf1Label;
+  late final TextEditingController _cf1Unit;
+  late final TextEditingController _cf1Index;
+  late final TextEditingController _cf2Label;
+  late final TextEditingController _cf2Unit;
+  late final TextEditingController _cf2Index;
   String _matchKey = 'instrument_id';
   String _moField = 'batch_description';
   String _encoding = 'utf-8';
@@ -353,11 +360,22 @@ class _StationProfileDialogState extends State<_StationProfileDialog> {
       for (final f in _columnFields)
         f: TextEditingController(text: cm[f]?.toString() ?? ''),
     };
+    final cfs = (_e['custom_fields'] as List?) ?? [];
+    Map<String, dynamic> cf(int i) => (i < cfs.length && cfs[i] is Map)
+        ? (cfs[i] as Map).cast<String, dynamic>()
+        : {};
+    _cf1Label = TextEditingController(text: cf(0)['label'] ?? '');
+    _cf1Unit = TextEditingController(text: cf(0)['unit'] ?? '');
+    _cf1Index = TextEditingController(text: cf(0)['index']?.toString() ?? '');
+    _cf2Label = TextEditingController(text: cf(1)['label'] ?? '');
+    _cf2Unit = TextEditingController(text: cf(1)['unit'] ?? '');
+    _cf2Index = TextEditingController(text: cf(1)['index']?.toString() ?? '');
   }
 
   @override
   void dispose() {
-    for (final c in [_label, _matchValue, _dataStartRow, _watchPath, ..._col.values]) {
+    for (final c in [_label, _matchValue, _dataStartRow, _watchPath, ..._col.values,
+        _cf1Label, _cf1Unit, _cf1Index, _cf2Label, _cf2Unit, _cf2Index]) {
       c.dispose();
     }
     super.dispose();
@@ -369,6 +387,16 @@ class _StationProfileDialogState extends State<_StationProfileDialog> {
       final t = _col[f]!.text.trim();
       cm[f] = t.isEmpty ? null : int.tryParse(t);
     }
+    final customFields = <Map<String, dynamic>>[];
+    void addCf(String label, String unit, String index) {
+      final l = label.trim();
+      final i = index.trim().isEmpty ? null : int.tryParse(index.trim());
+      if (l.isNotEmpty || i != null) {
+        customFields.add({'label': l, 'unit': unit.trim(), 'index': i});
+      }
+    }
+    addCf(_cf1Label.text, _cf1Unit.text, _cf1Index.text);
+    addCf(_cf2Label.text, _cf2Unit.text, _cf2Index.text);
     return {
       'label': _label.text.trim(),
       'match_key': _matchKey,
@@ -381,6 +409,7 @@ class _StationProfileDialogState extends State<_StationProfileDialog> {
       'watch_path': _watchPath.text.trim(),
       'generate_key': _genKeyOnSave,
       'column_map': cm,
+      'custom_fields': customFields,
     };
   }
 
@@ -475,6 +504,44 @@ class _StationProfileDialogState extends State<_StationProfileDialog> {
         Expanded(child: Text(_columnLabels[field] ?? field, style: const TextStyle(fontSize: 13))),
         const SizedBox(width: 12),
         _indexField(field),
+      ]),
+    );
+  }
+
+  Widget _customFieldRow(String title, TextEditingController label,
+      TextEditingController unit, TextEditingController index) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(title, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 6),
+        Row(children: [
+          Expanded(
+            child: TextField(
+              controller: label,
+              decoration: const InputDecoration(
+                  hintText: 'Label / Name (e.g. Inner Diameter)', isDense: true),
+            ),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 90,
+            child: TextField(
+              controller: unit,
+              decoration: const InputDecoration(hintText: 'Unit', isDense: true),
+            ),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 80,
+            child: TextField(
+              controller: index,
+              keyboardType: TextInputType.number,
+              textAlign: TextAlign.center,
+              decoration: const InputDecoration(hintText: 'Col', isDense: true),
+            ),
+          ),
+        ]),
       ]),
     );
   }
@@ -640,6 +707,7 @@ class _StationProfileDialogState extends State<_StationProfileDialog> {
               _mapRow('pd'),
               _mapRow('diameter'),
               _mapRow('weight'),
+              _mapRow('length'),
               const SizedBox(height: 8),
               ExpansionTile(
                 tilePadding: EdgeInsets.zero,
@@ -653,6 +721,15 @@ class _StationProfileDialogState extends State<_StationProfileDialog> {
                   _mapRow('shape'),
                 ],
               ),
+              const SizedBox(height: 12),
+              Text('Custom Measurements',
+                  style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: Theme.of(context).colorScheme.primary)),
+              const SizedBox(height: 4),
+              _customFieldRow('Custom Field 1', _cf1Label, _cf1Unit, _cf1Index),
+              _customFieldRow('Custom Field 2', _cf2Label, _cf2Unit, _cf2Index),
             ],
           ),
         ),

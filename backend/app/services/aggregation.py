@@ -161,13 +161,11 @@ def manual_measurements(
     """Compact manual roll-up (count + per-parameter mean/SD) for the summary."""
     out: Dict[str, Any] = {"count": len(check_dicts)}
     for name, p in parameters.items():
-        if p.get("source") == "manual":
+        if p.get("manual_n"):
             out[name] = {
-                "mean": p.get("mean"),
-                "sd": p.get("sd_samp"),
-                "n": p.get("n"),
-                "min": p.get("min"),
-                "max": p.get("max"),
+                "mean": p.get("manual_mean"),
+                "sd": p.get("manual_sd"),
+                "n": p.get("manual_n"),
             }
     return out
 
@@ -213,6 +211,7 @@ def compute_run_summary(
     specs = load_run_specs(session, run)
     rods = load_rods(session, run.id)
     stats = compute_run_stats(rods, specs)
+    auto_rows = certificate_rows(stats, specs, manual=manual, sd_kind=sd_kind)
 
     check_dicts = manual_check_dicts(load_manual_checks(session, run.id))
     merge_manual_parameters(stats["parameters"], manual_rods(check_dicts), specs)
@@ -230,6 +229,7 @@ def compute_run_summary(
         "rods_rejected": stats["rods_rejected"],
         "rods_used": stats["rods_used"],
         "parameters": stats["parameters"],
+        "automatic": auto_rows,
         "certificate": rows,
         "remarks": manual_remarks(check_dicts),
         "manual_measurements": manual_measurements(stats["parameters"], check_dicts),
@@ -268,18 +268,19 @@ def compute_order_summary(session: Session, po_id: int) -> Dict:
             )
             .all()
         )
-    keys = ("pd", "weight", "diameter", "ovality", "roundness", "shape", "hardness")
+    keys = ("pd", "weight", "diameter", "ovality", "roundness", "shape", "hardness", "length")
     rod_dicts = [{k: _f(getattr(r, k)) for k in keys} for r in rods]
     stats = compute_run_stats(rod_dicts, specs)
+    auto_rows = certificate_rows(stats, specs)
 
-    # Merge the operator's manual QC checks across every run of the order. As in
-    # the per-run summary, a manual value only fills a parameter the station did
-    # not measure (length, hardness; weight as a fallback).
+    # Merge the operator's manual QC checks across every run of the order, matched
+    # by po_id OR by the order's runs (some checks only carry mo_id).
     order_checks = (
         session.query(models.ManualQualityCheck)
+        .filter(models.ManualQualityCheck.voided_at.is_(None))
         .filter(
-            models.ManualQualityCheck.po_id == po_id,
-            models.ManualQualityCheck.voided_at.is_(None),
+            (models.ManualQualityCheck.po_id == po_id)
+            | (models.ManualQualityCheck.mo_id.in_(run_ids))
         )
         .order_by(models.ManualQualityCheck.id)
         .all()
@@ -308,12 +309,14 @@ def compute_order_summary(session: Session, po_id: int) -> Dict:
         "rods_rejected": stats["rods_rejected"],
         "rods_used": stats["rods_used"],
         "parameters": stats["parameters"],
+        "automatic": auto_rows,
         "certificate": certificate_rows(stats, specs),
         "runs": per_run,
         "first_measured_at": first,
         "last_measured_at": last,
         "remarks": manual_remarks(order_check_dicts),
         "manual_measurements": manual_measurements(stats["parameters"], order_check_dicts),
+        "manual_checks": manual_table_rows(order_check_dicts),
     }
 
 

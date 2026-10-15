@@ -44,11 +44,9 @@ def _spec_string(po: models.PurchaseOrder) -> Optional[str]:
     return " ".join(parts) or None
 
 
-def _summary_pdf_data(
-    session: Session, po: models.PurchaseOrder, production: Dict, quality: Dict
-) -> Dict[str, Any]:
-    """Assemble the data dict consumed by ``render_order_summary_pdf``."""
-    reports = (
+def _summary_reports(session: Session, po: models.PurchaseOrder) -> list:
+    """Return the non-obsolete reports of an order (used by the audit summary PDF)."""
+    return (
         session.query(models.ProductionReport)
         .filter(
             models.ProductionReport.po_number == po.po_number,
@@ -59,29 +57,84 @@ def _summary_pdf_data(
         .order_by(models.ProductionReport.report_date)
         .all()
     )
-    machines = ", ".join(sorted({r.machine_name for r in reports if r.machine_name})) or None
-    operators = ", ".join(sorted({r.operator_name for r in reports if r.operator_name})) or None
-    dates = [r.report_date for r in reports if r.report_date]
-    date_range = None
-    if dates:
-        date_range = f"{min(dates)} – {max(dates)}" if len(dates) > 1 else dates[0]
 
-    return {
-        "header": {
-            "mo_number": po.po_number,
-            "spec_string": _spec_string(po),
-            "machines": machines,
-            "date_range": date_range,
-            "operator": operators,
-        },
-        "production": production,
-        "quality": {
-            "certificate": quality.get("certificate") or [],
-            "rods_total": quality.get("rods_total"),
-            "rods_rejected": quality.get("rods_rejected"),
-            "status": quality.get("status"),
-        },
-    }
+
+def summary_pdf_bytes(session: Session, po: models.PurchaseOrder) -> Optional[bytes]:
+    """Return the consolidated Order Summary PDF bytes.
+
+    Prefer the Flutter-generated PDF uploaded by the client (the primary source of
+    truth); fall back to the ReportLab render only when none has been uploaded yet
+    (backend-initiated finalize with no client in the loop). Returns ``None`` when
+    neither is available.
+    """
+    if po.order_summary_pdf_base64:
+        try:
+            import base64
+
+            return base64.b64decode(po.order_summary_pdf_base64)
+        except Exception as exc:  # noqa: BLE001 - invalid payload falls through
+            logger.warning("Invalid Flutter order-summary PDF for order %s: %s", po.id, exc)
+    try:
+        from app.pdf_generator import render_order_summary_pdf
+
+        reports = _summary_reports(session, po)
+        quality = po.final_quality or {}
+        return render_order_summary_pdf(po, reports, quality)
+    except Exception as exc:  # noqa: BLE001 - never break finalize over the PDF
+        logger.warning("Order summary PDF render failed for %s: %s", po.id, exc)
+        return None
+
+
+def push_order_summary(
+    session: Session,
+    po: models.PurchaseOrder,
+    quality: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Attach the consolidated Order Summary PDF to Odoo (root + backorder MO).
+
+    Idempotent against duplicate chatter attachments (``attach_file`` replaces by
+    name + record), so a late Flutter upload can re-push and replace an earlier
+    ReportLab render. Returns a status dict and never raises.
+    """
+    result: Dict[str, Any] = {"odoo_attached": False}
+    if not po.odoo_mo_id:
+        return result
+    pdf_bytes = summary_pdf_bytes(session, po)
+    if not pdf_bytes:
+        result["odoo_error"] = "no summary PDF available"
+        return result
+    quality = quality or po.final_quality or {}
+    try:
+        from app.services.odoo.client import OdooClient, OdooConfig
+
+        cfg = OdooConfig.from_env()
+        if not (cfg.enabled and cfg.valid()):
+            result["odoo_error"] = "Odoo not configured"
+            return result
+        client = OdooClient(cfg)
+        client.connect()
+        filename = po.order_summary_pdf_filename or (
+            f"Order_Summary_{_safe_name(po.po_number)}.pdf")
+        root_id = int(po.odoo_mo_id)
+        backorder_id = int(po.odoo_current_mo_id) if po.odoo_current_mo_id else None
+        # attach_file REPLACES by name+record, so re-pushing never stacks
+        # duplicate chatter attachments.
+        att_id = client.attach_file(
+            filename, "mrp.production", root_id, pdf_bytes, "application/pdf")
+        backorder_att_id = None
+        if backorder_id and backorder_id != root_id:
+            backorder_att_id = client.attach_file(
+                filename, "mrp.production", backorder_id, pdf_bytes, "application/pdf")
+        client.write_final_quality(root_id, quality)
+        po.odoo_summary_attachment_id = att_id
+        session.commit()
+        result["odoo_attached"] = True
+        result["odoo_attachment_id"] = att_id
+        result["odoo_backorder_attachment_id"] = backorder_att_id
+    except Exception as exc:  # noqa: BLE001 - never raise over Odoo
+        logger.warning("Odoo summary push failed for order %s: %s", po.id, exc)
+        result["odoo_error"] = str(exc)
+    return result
 
 
 def finalize_order(
@@ -92,9 +145,9 @@ def finalize_order(
 ) -> Dict[str, Any]:
     """Compute + persist the final rollup; render + (optionally) push the Summary PDF.
 
-    ``push_odoo`` should be ``True`` only for ``sync_mode == 'full'`` orders: it
-    gates the Odoo attachment and the ``x_final_*`` root-MO write. The snapshot and
-    ``completion_status`` are written regardless, so a ``link_only`` order is still
+    ``push_odoo`` gates the Odoo attachment and the ``x_final_*`` root-MO write; it
+    is ``True`` for any linked order (regardless of ``sync_mode``). The snapshot and
+    ``completion_status`` are written regardless, so an unlinked order is still
     finalized locally.
     """
     production = aggregation.compute_order_production_summary(session, po.id)
@@ -131,34 +184,38 @@ def finalize_order(
         "odoo_attached": False,
     }
 
-    # Render the summary PDF always (the web console can expose it directly).
-    try:
-        from app.pdf_generator import render_order_summary_pdf
-        pdf_bytes = render_order_summary_pdf(_summary_pdf_data(session, po, production, quality))
-        result["pdf_bytes_len"] = len(pdf_bytes) if pdf_bytes else 0
-    except Exception as exc:  # noqa: BLE001 - never break finalize over the PDF
-        logger.warning("Order summary PDF render failed for %s: %s", po.id, exc)
-        result["pdf_error"] = str(exc)
-        pdf_bytes = None
+    # Render the summary PDF (the Flutter-generated one when the client uploaded
+    # it; ReportLab only as a fallback). Always populated so the web console and
+    # the Odoo print endpoint can expose it.
+    pdf_bytes = summary_pdf_bytes(session, po)
+    result["pdf_bytes_len"] = len(pdf_bytes) if pdf_bytes else 0
+    result["pdf_source"] = "flutter" if po.order_summary_pdf_base64 else "reportlab"
 
-    # Push to Odoo (attach + x_final_*) only for full-sync linked orders.
+    # Push to Odoo whenever the order is linked, regardless of sync_mode.
     if push_odoo and po.odoo_mo_id and pdf_bytes:
-        try:
-            from app.services.odoo.client import OdooClient, OdooConfig
-            cfg = OdooConfig.from_env()
-            if cfg.enabled and cfg.valid():
-                client = OdooClient(cfg)
-                client.connect()
-                filename = f"Order_Summary_{_safe_name(po.po_number)}.pdf"
-                att_id = client.attach_pdf(
-                    filename, "mrp.production", int(po.odoo_mo_id), pdf_bytes)
-                client.write_final_quality(int(po.odoo_mo_id), quality)
-                po.odoo_summary_attachment_id = att_id
-                session.commit()
-                result["odoo_attached"] = True
-                result["odoo_attachment_id"] = att_id
-        except Exception as exc:  # noqa: BLE001 - finalize must not fail on Odoo
-            logger.warning("Odoo summary push failed for order %s: %s", po.id, exc)
-            result["odoo_error"] = str(exc)
+        result.update(push_order_summary(session, po, quality=quality))
 
     return result
+
+
+def maybe_auto_finalize(session: Session, po: models.PurchaseOrder, actor: str) -> bool:
+    """Finalize an order once its cumulative production reaches the target.
+
+    Called after a report is approved. Generates the consolidated Order Summary
+    PDF and - for linked orders (regardless of sync_mode) - attaches it to the Odoo
+    **root MO** (``po.odoo_mo_id``) and the latest backorder MO so the full
+    production history lives on the main order.
+
+    Idempotent: no-ops when the order is already completed or the target is not
+    yet reached. Returns True when a finalize ran.
+    """
+    if po is None or po.completion_status == COMPLETED or not po.target_qty:
+        return False
+    production = aggregation.compute_order_production_summary(session, po.id)
+    if (production.get("total_rods") or 0) < po.target_qty:
+        return False
+    finalize_order(
+        session, po, actor=actor,
+        push_odoo=(po.odoo_mo_id is not None),
+    )
+    return True

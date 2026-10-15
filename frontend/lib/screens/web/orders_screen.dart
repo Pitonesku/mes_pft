@@ -1,12 +1,11 @@
 ﻿// lib/screens/web/orders_screen.dart
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import 'package:pdf/pdf.dart';
-import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import '../../models.dart';
 import '../../app_state.dart';
 import '../../api_service.dart';
+import '../../features/pdf_export/order_summary_pdf.dart';
 import '../../widgets/sync_button.dart';
 import '../../widgets/resizable_panel.dart';
 import '../../widgets/quality_report_dialog.dart';
@@ -417,6 +416,7 @@ class _OrdersScreenState extends State<OrdersScreen> {
     final detailPanel = _PoDetailPanel(
       po: _selected!,
       showAudit: _showAudit,
+      isSuperadmin: widget.user.role == UserRole.superAdmin,
       onClose: () => setState(() => _selected = null),
       onToggleAudit: () => setState(() => _showAudit = !_showAudit),
       onEdit: () => _openPoForm(context, _selected!),
@@ -463,9 +463,10 @@ class _OrdersScreenState extends State<OrdersScreen> {
 class _PoDetailPanel extends StatefulWidget {
   final PurchaseOrder po;
   final bool showAudit;
+  final bool isSuperadmin;
   final VoidCallback onClose, onToggleAudit, onEdit, onDeleted, onVisibilityChanged;
   const _PoDetailPanel({
-    required this.po, required this.showAudit,
+    required this.po, required this.showAudit, required this.isSuperadmin,
     required this.onClose, required this.onToggleAudit, required this.onEdit,
     required this.onDeleted, required this.onVisibilityChanged,
   });
@@ -713,203 +714,70 @@ class _PoDetailPanelState extends State<_PoDetailPanel> {
   }
 
   Future<void> _generatePdf(BuildContext context) async {
-    if (_auditData == null) return;
-    final data = _auditData!;
+    final data = _auditData;
     final po = widget.po;
-    final totals  = (data['audit_totals']      as Map?)?.cast<String,dynamic>() ?? {};
-    final mats    = (data['materials_consumed'] as List?) ?? [];
-    final reports = (data['report_rows']        as List?) ?? [];
+    if (data == null || po.id == null) return;
 
-    final pdf = pw.Document();
-    pdf.addPage(pw.MultiPage(
-      pageFormat: PdfPageFormat.a4,
-      build: (ctx) {
-        final rows = <pw.Widget>[];
+    final quality = await ApiService.fetchQualityData(poId: po.id!, window: 'po');
+    final report = (quality?['report'] as Map?)?.cast<String, dynamic>();
+    final certificate = (report?['certificate'] as List?) ?? const [];
 
-        // â”€â”€ Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        rows.add(pw.Text('PURCHASE ORDER AUDIT REPORT',
-          style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)));
-        rows.add(pw.SizedBox(height: 8));
-        rows.add(pw.Text('PO Number: ${data["po_number"] ?? po.poNumber}',
-          style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)));
-        rows.add(pw.Text(
-          'Specification: ${po.diameter} x ${po.length}  PD ${po.pd}  CU ${po.cu}',
-          style: const pw.TextStyle(fontSize: 10)));
-        rows.add(pw.Text(
-          'Target Quantity: ${NumberFormat.decimalPattern().format(po.targetQty)} pcs',
-          style: const pw.TextStyle(fontSize: 10)));
-        rows.add(pw.Text(
-          'Report generated: ${DateFormat('dd.MM.yyyy HH:mm').format(DateTime.now())}',
-          style: const pw.TextStyle(fontSize: 10)));
-        rows.add(pw.SizedBox(height: 16));
-
-        // â”€â”€ Report Entries table â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        rows.add(pw.Text('Report Entries',
-          style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold)));
-        rows.add(pw.Divider());
-
-        int totalRods = 0, totalMachineCounter = 0;
-        double totalDiff = 0, totalScrap = 0;
-
-        final tableData = <List<String>>[];
-        for (final r in reports) {
-          final rr = (r as Map).cast<String,dynamic>();
-          final rods    = _toInt(rr['produced_rods']);
-          final counter = _toInt(rr['machine_counter']);
-          final diff    = _toDouble(rr['difference']);
-          final diffPct = _toDouble(rr['difference_percent']);
-          final scrap   = _toDouble(rr['scrap']);
-          totalRods += rods;
-          totalMachineCounter += counter;
-          totalDiff += diff;
-          totalScrap += scrap;
-          tableData.add([
-            rr['date']?.toString() ?? '-',
-            rr['time']?.toString() ?? '-',
-            rr['operator']?.toString() ?? '-',
-            NumberFormat.decimalPattern().format(rods),
-            NumberFormat.decimalPattern().format(counter),
-            '${diff.toStringAsFixed(0)} (${diffPct.toStringAsFixed(2)}%)',
-            scrap.toStringAsFixed(2),
-          ]);
-        }
-        // TOTAL row
-        final totalDiffPct = totalMachineCounter > 0
-            ? (totalDiff / totalMachineCounter) * 100 : 0.0;
-        tableData.add([
-          'TOTAL', '', '',
-          NumberFormat.decimalPattern().format(totalRods),
-          NumberFormat.decimalPattern().format(totalMachineCounter),
-          '${totalDiff.toStringAsFixed(0)} (${totalDiffPct.toStringAsFixed(2)}%)',
-          totalScrap.toStringAsFixed(2),
-        ]);
-
-        rows.add(pw.Table.fromTextArray(
-          headers: ['Date', 'Time', 'Operator', 'Rods Produced', 'Machine Counter', 'Difference', 'Scrap'],
-          data: tableData,
-          headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 8),
-          cellStyle: const pw.TextStyle(fontSize: 8),
-          headerDecoration: const pw.BoxDecoration(color: PdfColors.grey300),
-          columnWidths: {
-            0: const pw.FlexColumnWidth(2),
-            1: const pw.FlexColumnWidth(2),
-            2: const pw.FlexColumnWidth(2),
-            3: const pw.FlexColumnWidth(2),
-            4: const pw.FlexColumnWidth(2),
-            5: const pw.FlexColumnWidth(2.5),
-            6: const pw.FlexColumnWidth(1.5),
-          },
-        ));
-        rows.add(pw.SizedBox(height: 16));
-
-        // â”€â”€ Production Summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        rows.add(pw.Text('Production Summary',
-          style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold)));
-        rows.add(pw.Divider());
-        void addSummaryRow(String label, String value) {
-          rows.add(pw.Row(children: [
-            pw.Expanded(child: pw.Text(label, style: const pw.TextStyle(fontSize: 10))),
-            pw.Text(value, style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold)),
-          ]));
-          rows.add(pw.SizedBox(height: 3));
-        }
-        final producedQty  = _toInt(data['produced_qty']);
-        final targetQty    = _toInt(data['target_qty']);
-        final remainingQty = _toInt(data['remaining_qty']);
-        final totalBoxes   = _toInt(totals['total_boxes_submitted']);
-        final machCounter  = _toInt(totals['total_machine_counter'] ?? totalMachineCounter);
-        final diffPcs      = machCounter - producedQty;
-        final diffPctSumm  = machCounter > 0 ? (diffPcs / machCounter) * 100 : 0.0;
-        final wasteKg      = _toDouble(totals['total_waste_kg']);
-
-        addSummaryRow('Total rods produced:', '${NumberFormat.decimalPattern().format(producedQty)} pcs');
-        addSummaryRow('Remaining to Produce:', '${NumberFormat.decimalPattern().format(remainingQty)} pcs');
-        addSummaryRow('Boxes Submitted:', '$totalBoxes');
-        addSummaryRow('Machine counter:', NumberFormat.decimalPattern().format(machCounter));
-        addSummaryRow('Difference:', '${NumberFormat.decimalPattern().format(diffPcs)} pcs (${diffPctSumm.toStringAsFixed(2)}%)');
-        addSummaryRow('Total Scrap Waste:', '${wasteKg.toStringAsFixed(1)} kg');
-        rows.add(pw.SizedBox(height: 16));
-
-        // â”€â”€ Materials Consumption Details â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        rows.add(pw.Text('Materials Consumption Details',
-          style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold)));
-        rows.add(pw.Divider());
-
-        final matTableData = <List<String>>[];
-        for (final cat in mats) {
-          final catMap = (cat as Map).cast<String,dynamic>();
-          final catName = catMap['category']?.toString() ?? '-';
-          final unit    = catMap['unit']?.toString() ?? 'kg';
-          final breakdowns = (catMap['breakdown'] as List?) ?? [];
-          double catTotal = 0;
-
-          for (final typeEntry in breakdowns) {
-            final te = (typeEntry as Map).cast<String,dynamic>();
-            final typeName = te['type_name']?.toString() ?? '-';
-            final batches  = (te['batches'] as List?) ?? [];
-            double typeTotal = 0;
-
-            for (final b in batches) {
-              final bm   = (b as Map).cast<String,dynamic>();
-              final batch = bm['batch_number']?.toString() ?? 'No Batch';
-              // API sends 'consumed' (not 'total_used')
-              final used  = _toDouble(bm['consumed'] ?? bm['total_used']);
-              typeTotal += used;
-              matTableData.add([catName, typeName, batch, '${used.toStringAsFixed(1)} $unit']);
-            }
-            matTableData.add(['', 'Total $typeName', '', '${typeTotal.toStringAsFixed(1)} $unit']);
-            catTotal += typeTotal;
-          }
-          matTableData.add(['Total $catName', '', '', '${catTotal.toStringAsFixed(1)} $unit']);
-        }
-
-        // Build materials table manually so Total rows can be bold
-        final matColWidths = {
-          0: const pw.FlexColumnWidth(2.0),
-          1: const pw.FlexColumnWidth(2.0),
-          2: const pw.FlexColumnWidth(1.5),
-          3: const pw.FlexColumnWidth(1.5),
-        };
-        final matHeaders = ['Category', 'Material Type', 'Batch', 'Used'];
-        pw.Widget matCell(String text, {bool bold = false}) =>
-          pw.Padding(
-            padding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 3),
-            child: pw.Text(text,
-              style: bold
-                ? pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold)
-                : const pw.TextStyle(fontSize: 9)));
-
-        rows.add(pw.Table(
-          columnWidths: matColWidths,
-          border: pw.TableBorder.all(color: PdfColors.grey300, width: 0.5),
-          children: [
-            // Header
-            pw.TableRow(
-              decoration: const pw.BoxDecoration(color: PdfColors.grey300),
-              children: matHeaders.map((h) => matCell(h, bold: true)).toList()),
-            // Data rows
-            for (final row in matTableData)
-              pw.TableRow(
-                decoration: pw.BoxDecoration(
-                  color: (row[0].startsWith('Total ') && row[1].isEmpty)
-                    ? PdfColors.deepPurple50
-                    : (row[1].startsWith('Total '))
-                      ? PdfColors.blueGrey50
-                      : PdfColors.white),
-                children: row.asMap().entries.map((e) =>
-                  matCell(e.value,
-                    bold: row[0].startsWith('Total ') || row[1].startsWith('Total '))).toList()),
-          ],
-        ));
-
-        return rows;
-      },
-    ));
+    final pdfBytes = await OrderSummaryPdfService.build(
+      data: data,
+      po: po,
+      certificate: certificate,
+    );
 
     await Printing.layoutPdf(
-      onLayout: (_) => pdf.save(),
-      name: 'PO_Audit_${data["po_number"] ?? po.poNumber}.pdf',
+      onLayout: (_) => pdfBytes,
+      name: 'PO_Audit_${data['po_number'] ?? po.poNumber}.pdf',
     );
+  }
+
+  Future<void> _finalizeAndPushSummary() async {
+    final po = widget.po;
+    final data = _auditData;
+    final poId = po.id;
+    if (poId == null || data == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No audit data available for this order')));
+      return;
+    }
+
+    // Consolidated quality certificate for the trailing section.
+    final quality = await ApiService.fetchQualityData(poId: poId, window: 'po');
+    final report = (quality?['report'] as Map?)?.cast<String, dynamic>();
+    final certificate = (report?['certificate'] as List?) ?? const [];
+
+    final pdfBytes = await OrderSummaryPdfService.build(
+      data: data,
+      po: po,
+      certificate: certificate,
+    );
+    final filename = 'Order_Summary_${po.poNumber.replaceAll('/', '-')}.pdf';
+
+    final uploaded = await ApiService.uploadOrderSummaryPdf(
+      orderId: poId,
+      pdfBytes: pdfBytes,
+      filename: filename,
+    );
+    if (!mounted) return;
+    if (!uploaded) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to upload the Order Summary PDF')));
+      return;
+    }
+
+    final result = await ApiService.closeOrder(poId);
+    if (!mounted) return;
+    final attached = result?['odoo_attached'] == true;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(attached
+          ? 'Order finalized — summary attached to Odoo'
+          : 'Order finalized — summary stored locally'),
+    ));
+    await AppData.loadDataFromServer(forceSync: true);
+    if (mounted) setState(() {});
   }
 
   // â”€â”€ Main audit widget â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1045,6 +913,17 @@ class _PoDetailPanelState extends State<_PoDetailPanel> {
             onPressed: () => _generatePdf(context),
           ),
         ),
+        const SizedBox(height: 8),
+        if (widget.isSuperadmin)
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              icon: const Icon(Icons.cloud_upload_outlined),
+              label: const Text('Finalize & Push Summary'),
+              style: FilledButton.styleFrom(backgroundColor: Colors.green),
+              onPressed: () => _finalizeAndPushSummary(),
+            ),
+          ),
         const SizedBox(height: 8),
         SizedBox(
           width: double.infinity,

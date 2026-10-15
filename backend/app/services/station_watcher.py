@@ -137,10 +137,10 @@ class StationWatcher:
                 self._move(path, archive_path)
                 return
 
-            sample, _ = profiles.parse_file_with_profile(
+            sample, profile = profiles.parse_file_with_profile(
                 session, data, self.config.source, self.config.mo_field
             )
-            self._persist(session, sample, digest, md5, os.path.basename(path))
+            self._persist(session, sample, profile, digest, md5, os.path.basename(path))
             session.commit()
             self._move(path, archive_path)
         except Exception:
@@ -151,7 +151,7 @@ class StationWatcher:
         finally:
             session.close()
 
-    def _persist(self, session: Session, sample, sha256: str, md5: str, filename: str) -> None:
+    def _persist(self, session: Session, sample, profile, sha256: str, md5: str, filename: str) -> None:
         machine_id = shift_resolver.resolve_machine(
             session, self.config.source, self.config.alias_field, sample.maker
         )
@@ -199,6 +199,7 @@ class StationWatcher:
             rods_declared=sample.rods_count,
             file_sha256=sha256,
             file_md5=md5,
+            custom_metrics=profiles.compute_custom_metrics(sample, profile),
         )
         session.add(db_sample)
         session.flush()
@@ -219,6 +220,7 @@ class StationWatcher:
                     roundness=rod.roundness,
                     shape=rod.shape,
                     hardness=rod.hardness,
+                    length=rod.length,
                 )
             )
 

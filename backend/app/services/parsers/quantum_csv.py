@@ -23,7 +23,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 # Mirrors [METADATA_MAP] from Data_Bridge/src/config.ini (csv key -> field).
 DEFAULT_METADATA_MAP: Dict[str, str] = {
@@ -51,6 +51,8 @@ DEFAULT_COLUMN_MAP: Dict[str, Optional[int]] = {
     "ovality": 4,
     "roundness": 5,
     "shape": 6,
+    "hardness": 7,
+    "length": 8,
 }
 
 DEFAULT_DATA_START_ROW = 18
@@ -70,6 +72,8 @@ class Rod:
     roundness: Optional[float]
     shape: Optional[float]
     hardness: Optional[float] = None
+    length: Optional[float] = None
+    extra: Dict[str, Optional[float]] = field(default_factory=dict)
 
     def as_dict(self) -> Dict[str, Optional[float]]:
         return {
@@ -81,6 +85,7 @@ class Rod:
             "roundness": self.roundness,
             "shape": self.shape,
             "hardness": self.hardness,
+            "length": self.length,
         }
 
 
@@ -162,12 +167,14 @@ class QuantumCsvParser:
         data_start_row: int = DEFAULT_DATA_START_ROW,
         encoding: str = "utf-8",
         mo_field: str = "batch_description",
+        custom_fields: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         self.metadata_map = metadata_map or dict(DEFAULT_METADATA_MAP)
         self.column_map = column_map or dict(DEFAULT_COLUMN_MAP)
         self.data_start_row = data_start_row
         self.encoding = encoding
         self.mo_field = mo_field
+        self.custom_fields = custom_fields or []
 
     def parse(self, content: str) -> ParsedSample:
         """Parse CSV text (already decoded)."""
@@ -228,6 +235,20 @@ class QuantumCsvParser:
                 return None
             return row[index]
 
+        extra: Dict[str, Optional[float]] = {}
+        for cf in self.custom_fields:
+            if not isinstance(cf, dict):
+                continue
+            label = (cf.get("label") or "").strip()
+            idx = cf.get("index")
+            if idx is not None and not isinstance(idx, int):
+                try:
+                    idx = int(idx)
+                except (TypeError, ValueError):
+                    idx = None
+            if label and idx is not None:
+                extra[label] = _to_number(cell(idx))
+
         return Rod(
             rod_no=_to_int(cell(self.column_map.get("rod_no"))),
             pd=_to_number(cell(self.column_map.get("pd"))),
@@ -236,7 +257,9 @@ class QuantumCsvParser:
             ovality=_to_number(cell(self.column_map.get("ovality"))),
             roundness=_to_number(cell(self.column_map.get("roundness"))),
             shape=_to_number(cell(self.column_map.get("shape"))),
-            hardness=None,
+            hardness=_to_number(cell(self.column_map.get("hardness"))),
+            length=_to_number(cell(self.column_map.get("length"))),
+            extra=extra,
         )
 
 
@@ -247,11 +270,13 @@ def parse_bytes(
     column_map: Optional[Dict[str, Optional[int]]] = None,
     data_start_row: int = DEFAULT_DATA_START_ROW,
     mo_field: str = "batch_description",
+    custom_fields: Optional[List[Dict[str, Any]]] = None,
 ) -> ParsedSample:
     """Decode raw file bytes and parse; falls back to cp1251 like the old daemon.
 
     ``metadata_map`` / ``column_map`` / ``data_start_row`` / ``mo_field`` let the
     caller override the default Quantum Neo layout (used by per-station profiles).
+    ``custom_fields`` is a list of ``{label, unit, index}`` for generic metrics.
     """
     parser = QuantumCsvParser(
         encoding=encoding,
@@ -259,6 +284,7 @@ def parse_bytes(
         column_map=column_map,
         data_start_row=data_start_row,
         mo_field=mo_field,
+        custom_fields=custom_fields,
     )
     try:
         text = data.decode(encoding)

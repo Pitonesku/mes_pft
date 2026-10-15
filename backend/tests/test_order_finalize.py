@@ -89,6 +89,49 @@ class FinalizeOrderTests(DbTestCase):
         self.assertIsNotNone(po.final_quality)
         self.assertGreater(out.get("pdf_bytes_len", 0), 0)
 
+    def test_auto_finalize_when_target_reached(self):
+        po = _fresh_po(self.db)
+        po.target_qty = 47000
+        self.db.flush()
+        s = self.make_shift()
+        rep = self.make_report(s, po)
+        rep.produced_rods = 47000
+        self.db.flush()
+
+        ran = order_finalize.maybe_auto_finalize(self.db, po, actor="test")
+
+        self.assertTrue(ran)
+        self.assertEqual(po.completion_status, "completed")
+        self.assertTrue(po.is_hidden)
+
+    def test_auto_finalize_skips_below_target(self):
+        po = _fresh_po(self.db)
+        po.target_qty = 100000
+        self.db.flush()
+        s = self.make_shift()
+        rep = self.make_report(s, po)
+        rep.produced_rods = 47000
+        self.db.flush()
+
+        ran = order_finalize.maybe_auto_finalize(self.db, po, actor="test")
+
+        self.assertFalse(ran)
+        self.assertEqual(po.completion_status, "active")
+
+    def test_auto_finalize_idempotent_after_completion(self):
+        po = _fresh_po(self.db)
+        po.target_qty = 47000
+        po.completion_status = "completed"
+        self.db.flush()
+        s = self.make_shift()
+        rep = self.make_report(s, po)
+        rep.produced_rods = 47000
+        self.db.flush()
+
+        ran = order_finalize.maybe_auto_finalize(self.db, po, actor="test")
+
+        self.assertFalse(ran)
+
 
 if __name__ == "__main__":
     unittest.main()

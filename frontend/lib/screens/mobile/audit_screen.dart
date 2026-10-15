@@ -623,7 +623,7 @@ class _AuditPageState extends State<AuditPage> {
             pw.Header(
               level: 0,
               child: pw.Text(
-                'PURCHASE ORDER AUDIT REPORT',
+                'MANUFACTURING ORDER AUDIT REPORT',
                 style: pw.TextStyle(
                   fontSize: 22,
                   fontWeight: pw.FontWeight.bold,

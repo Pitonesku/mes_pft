@@ -11,6 +11,7 @@ const _columnAliases = <String, List<String>>{
   'roundness': ['roundness', 'round'],
   'shape': ['shape'],
   'hardness': ['hardness', 'hard'],
+  'length': ['length', 'len'],
 };
 
 String _norm(String s) =>

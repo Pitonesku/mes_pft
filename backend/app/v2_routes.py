@@ -132,7 +132,7 @@ def _run_dict(r: models.ProductionRun) -> Dict[str, Any]:
     }
 
 
-_MEASURE_PARAM_KEYS = ("pd", "weight", "diameter", "ovality", "roundness", "shape", "hardness")
+_MEASURE_PARAM_KEYS = ("pd", "weight", "diameter", "ovality", "roundness", "shape", "hardness", "length")
 
 
 BUDAPEST = get_plant_timezone()
@@ -884,7 +884,7 @@ def _shift_quality_report_data(db: Session, shift) -> Dict[str, Any]:
     }
 
 
-def _shift_quality_summary(db: Session, shift_id: int) -> Dict[str, Any]:
+def _shift_quality_summary(db: Session, shift_id: int, run_id: Optional[int] = None) -> Dict[str, Any]:
     """Aggregate quality stats for ALL rods in a shift (shift-level).
 
     Rods are only reliably linked to shifts (the station data has no PO/MO ref),
@@ -905,15 +905,17 @@ def _shift_quality_summary(db: Session, shift_id: int) -> Dict[str, Any]:
         for r in rods
     ]
     stats = compute_run_stats(rod_dicts, specs)
-    checks = (
-        db.query(models.ManualQualityCheck)
-        .filter(
-            models.ManualQualityCheck.shift_id == shift_id,
-            models.ManualQualityCheck.voided_at.is_(None),
-        )
-        .order_by(models.ManualQualityCheck.id)
-        .all()
+    auto_rows = certificate_rows(stats, specs)
+    checks_query = db.query(models.ManualQualityCheck).filter(
+        models.ManualQualityCheck.voided_at.is_(None)
     )
+    if run_id is not None:
+        # A single-report modal is scoped to its production run; a shift-level
+        # view spans every run of the shift.
+        checks_query = checks_query.filter(models.ManualQualityCheck.mo_id == run_id)
+    else:
+        checks_query = checks_query.filter(models.ManualQualityCheck.shift_id == shift_id)
+    checks = checks_query.order_by(models.ManualQualityCheck.id).all()
     check_dicts = aggregation.manual_check_dicts(checks)
     merge_manual_parameters(stats["parameters"], manual_rods(check_dicts), specs)
     return {
@@ -922,9 +924,11 @@ def _shift_quality_summary(db: Session, shift_id: int) -> Dict[str, Any]:
         "rods_rejected": stats["rods_rejected"],
         "rods_used": stats["rods_used"],
         "parameters": stats["parameters"],
+        "automatic": auto_rows,
         "certificate": certificate_rows(stats, specs),
         "remarks": aggregation.manual_remarks(check_dicts),
         "manual_measurements": aggregation.manual_measurements(stats["parameters"], check_dicts),
+        "manual_checks": aggregation.manual_table_rows(check_dicts),
     }
 
 
@@ -1061,7 +1065,7 @@ async def ingest_quality(
     data = await file.read()
 
     try:
-        sample, _ = profiles.parse_file_with_profile(
+        sample, profile = profiles.parse_file_with_profile(
             db, data, "quantum_neo", os.getenv("STATION_MO_FIELD", "batch_description")
         )
     except Exception as exc:  # noqa: BLE001
@@ -1097,6 +1101,7 @@ async def ingest_quality(
         batch_ended_at=local_to_utc(sample.batch_end),
         rods_declared=sample.rods_count,
         file_sha256=sha256,
+        custom_metrics=profiles.compute_custom_metrics(sample, profile),
     )
     db.add(db_sample)
     db.flush()
@@ -1105,7 +1110,7 @@ async def ingest_quality(
             sample_id=db_sample.id, shift_id=shift_id, run_id=run_id, machine_id=machine_id,
             measured_at=produced_at, rod_no=rod.rod_no, pd=rod.pd, weight=rod.weight,
             diameter=rod.diameter, ovality=rod.ovality, roundness=rod.roundness,
-            shape=rod.shape, hardness=rod.hardness,
+            shape=rod.shape, hardness=rod.hardness, length=rod.length,
         ))
     db.add(models.IngestionFile(
         sha256=sha256, filename=file.filename, status="processed",
@@ -1763,15 +1768,67 @@ def close_order(
     current_user: models.User = Depends(get_current_user),
 ):
     """Finalize an order (admin): compute cumulative production + consolidated
-    quality, mark it COMPLETED, render the Summary PDF and — for ``full``-sync
-    linked orders — attach it to the Odoo root MO and write the ``x_final_*``
-    consolidated quality fields."""
+    quality, mark it COMPLETED, render the Summary PDF and — for linked orders
+    (regardless of sync_mode) — attach it to the Odoo root MO + latest backorder MO
+    and write the ``x_final_*`` consolidated quality fields."""
     _require_superadmin(current_user)
     po = _get_or_404(db, models.PurchaseOrder, order_id)
     from app.services import order_finalize
-    push_odoo = po.sync_mode == "full" and po.odoo_mo_id is not None
+    push_odoo = po.odoo_mo_id is not None
     return order_finalize.finalize_order(
         db, po, actor=current_user.username, push_odoo=push_odoo)
+
+
+@router.post("/orders/{order_id}/summary-pdf")
+def upload_order_summary_pdf(
+    order_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Receive the Flutter-generated consolidated Order Summary PDF.
+
+    Stored on the order so ``finalize_order`` attaches THIS document (root MO +
+    latest backorder MO) instead of the ReportLab fallback render.
+    """
+    role = current_user.role
+    is_admin = role is not None and role.role_name.lower() in ("admin", "superadmin")
+    can_verify = is_admin or (role is not None and role.can_edit_report)
+    if not can_verify:
+        raise HTTPException(
+            status_code=403,
+            detail="Only admin/superadmin (or can_edit_report) may upload the order summary.",
+        )
+    po = _get_or_404(db, models.PurchaseOrder, order_id)
+    pdf_base64 = (payload or {}).get("pdf_base64", "")
+    filename = (payload or {}).get("filename", "")
+    if not pdf_base64:
+        raise HTTPException(status_code=400, detail="No PDF data provided")
+    try:
+        import base64
+
+        base64.b64decode(pdf_base64, validate=True)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="Invalid base64 PDF data") from exc
+    po.order_summary_pdf_base64 = pdf_base64
+    po.order_summary_pdf_filename = filename or f"Order_Summary_{po.po_number}.pdf"
+    db.commit()
+
+    # If the order was already finalized (e.g. the server-side auto-finalize used
+    # the ReportLab fallback because no client had uploaded yet), re-push now so
+    # the Flutter PDF replaces it on Odoo (attach_file replaces by name+record).
+    pushed = None
+    if po.completion_status == "completed" and po.odoo_mo_id:
+        from app.services import order_finalize as _of
+
+        pushed = _of.push_order_summary(db, po)
+
+    return {
+        "status": "stored",
+        "order_id": po.id,
+        "filename": po.order_summary_pdf_filename,
+        "odoo_attached": (pushed or {}).get("odoo_attached", False),
+    }
 
 
 @router.get("/orders/{order_id}/summary.pdf")
@@ -1780,23 +1837,77 @@ def order_summary_pdf(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """Download the finalized Order Summary PDF (admin)."""
+    """Download the finalized Order Summary PDF (admin).
+
+    Serves the Flutter-generated PDF when the client uploaded one; otherwise the
+    ReportLab fallback render.
+    """
     _require_superadmin(current_user)
     po = _get_or_404(db, models.PurchaseOrder, order_id)
     from app.services import order_finalize as _of
     if not po.final_quality:
         raise HTTPException(status_code=404, detail="Order not finalized yet")
-    production = {
-        "total_boxes": po.final_boxes,
-        "total_rods": po.final_rods,
-        "total_waste_kg": float(po.final_waste_kg) if po.final_waste_kg is not None else None,
-        "materials": po.final_materials or {},
-        "report_count": None,
-    }
-    quality = po.final_quality or {}
-    data = _of._summary_pdf_data(db, po, production, quality)
-    from app.pdf_generator import render_order_summary_pdf
-    pdf = render_order_summary_pdf(data)
+    pdf = _of.summary_pdf_bytes(db, po)
+    if not pdf:
+        raise HTTPException(status_code=500, detail="Failed to render summary PDF")
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"inline; filename=order_summary_{po.po_number}.pdf"},
+    )
+
+
+@router.get("/orders/by-mo/{mo_number}/summary-pdf")
+def order_summary_pdf_by_mo(
+    mo_number: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Download the finalized Order Summary PDF by MO number (admin)."""
+    _require_superadmin(current_user)
+    po = (
+        db.query(models.PurchaseOrder)
+        .filter(models.PurchaseOrder.po_number == mo_number)
+        .order_by(models.PurchaseOrder.id.desc())
+        .first()
+    )
+    if po is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not po.final_quality:
+        raise HTTPException(status_code=404, detail="Order not finalized yet")
+    from app.services import order_finalize as _of
+    pdf = _of.summary_pdf_bytes(db, po)
+    if not pdf:
+        raise HTTPException(status_code=500, detail="Failed to render summary PDF")
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"inline; filename=order_summary_{po.po_number}.pdf"},
+    )
+
+
+@router.get("/odoo/order-summary-pdf")
+def odoo_order_summary_pdf(
+    mo_number: str,
+    db: Session = Depends(get_db),
+    x_odoo_signature: Optional[str] = Header(default=None, alias="X-Odoo-Signature"),
+):
+    """Odoo -> MES: fetch the finalized order summary PDF by MO number (HMAC-signed)."""
+    _verify_odoo_webhook(mo_number, x_odoo_signature)
+    po = (
+        db.query(models.PurchaseOrder)
+        .filter(models.PurchaseOrder.po_number == mo_number)
+        .order_by(models.PurchaseOrder.id.desc())
+        .first()
+    )
+    if po is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not po.final_quality:
+        raise HTTPException(status_code=404, detail="Order not finalized yet")
+    from app.services import order_finalize as _of
+    pdf = _of.summary_pdf_bytes(db, po)
+    if not pdf:
+        raise HTTPException(status_code=500, detail="Failed to render summary PDF")
     return Response(
         content=pdf,
         media_type="application/pdf",
@@ -2700,7 +2811,8 @@ def _quality_header(db: Session, machine, shift, po_id) -> Dict[str, Any]:
 
 
 def _quality_report_payload(
-    db: Session, header: Dict[str, Any], po_id: Optional[int], shift
+    db: Session, header: Dict[str, Any], po_id: Optional[int], shift,
+    run_id: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
     """Certificate-style payload for the printable quality report.
 
@@ -2721,16 +2833,20 @@ def _quality_report_payload(
             **base,
             "scope": "mo",
             "certificate": s.get("certificate", []),
+            "automatic": s.get("automatic", []),
             "manual_measurements": s.get("manual_measurements"),
+            "manual_checks": s.get("manual_checks", []),
             "remarks": s.get("remarks"),
         }
     if shift is not None:
-        s = _shift_quality_summary(db, shift.id)
+        s = _shift_quality_summary(db, shift.id, run_id=run_id)
         return {
             **base,
             "scope": "shift",
             "certificate": s.get("certificate", []),
+            "automatic": s.get("automatic", []),
             "manual_measurements": s.get("manual_measurements"),
+            "manual_checks": s.get("manual_checks", []),
             "remarks": s.get("remarks"),
         }
     return None
@@ -2893,7 +3009,12 @@ def quality_overview(
 
     pd_warn, pd_fail, dia_warn, dia_fail = _sd_thresholds(db)
     header = _quality_header(db, machine, shift, po_id)
-    report = _quality_report_payload(db, header, po_id, shift)
+    run_id = None
+    if report_id is not None:
+        db_report = db.get(models.ProductionReport, report_id)
+        if db_report is not None:
+            run_id = db_report.run_id
+    report = _quality_report_payload(db, header, po_id, shift, run_id=run_id)
     raw_rows = [row_of(r) for r in rods] if include_raw else None
 
     return {
@@ -2926,7 +3047,7 @@ def quality_overview(
 # Station profiles (Settings -> Quality Stations)
 # ---------------------------------------------------------------------------
 
-_COLUMN_FIELDS = ("rod_no", "pd", "weight", "diameter", "ovality", "roundness", "shape", "hardness")
+_COLUMN_FIELDS = ("rod_no", "pd", "weight", "diameter", "ovality", "roundness", "shape", "hardness", "length")
 
 
 def _to_index(val) -> Optional[int]:
@@ -2957,6 +3078,7 @@ def _station_profile_dict(db: Session, p: models.StationProfile) -> Dict[str, An
             "last_used_at": key.last_used_at.isoformat() if key.last_used_at else None,
         } if key else None,
         "column_map": {f: column_map.get(f) for f in _COLUMN_FIELDS},
+        "custom_fields": p.custom_fields or [],
         "valid_from": p.valid_from.isoformat() if p.valid_from else None,
         "valid_to": p.valid_to.isoformat() if p.valid_to else None,
     }
@@ -2975,6 +3097,27 @@ def _apply_station_profile_fields(p: models.StationProfile, payload: Dict[str, A
     cm = payload.get("column_map")
     if isinstance(cm, dict):
         p.column_map = {f: _to_index(cm.get(f)) for f in _COLUMN_FIELDS}
+    if "custom_fields" in payload:
+        cf = payload.get("custom_fields")
+        if isinstance(cf, list):
+            cleaned = []
+            for item in cf:
+                if not isinstance(item, dict):
+                    continue
+                label = (item.get("label") or "").strip()
+                idx = item.get("index")
+                if idx is None or idx == "" or idx == "null":
+                    idx = None
+                else:
+                    try:
+                        idx = int(idx)
+                    except (TypeError, ValueError):
+                        idx = None
+                if label or idx is not None:
+                    cleaned.append({"label": label, "unit": (item.get("unit") or "").strip(), "index": idx})
+            p.custom_fields = cleaned or None
+        else:
+            p.custom_fields = None
 
 
 def _new_station_key(db: Session, label: str):

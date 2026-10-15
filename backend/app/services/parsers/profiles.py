@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional, Tuple
 from sqlalchemy.orm import Session
 
 from app import models
+from app.quality_stats import _describe
 from app.services.parsers.quantum_csv import ParsedSample, parse_bytes
 
 _MATCH_PRIORITY = ("instrument_id", "maker", "team")
@@ -61,6 +62,9 @@ def profile_to_parser_kwargs(profile: Optional[models.StationProfile]) -> Dict[s
         kwargs["metadata_map"] = dict(profile.metadata_map)
     if profile.column_map:
         kwargs["column_map"] = {k: v for k, v in profile.column_map.items()}
+    custom_fields = getattr(profile, "custom_fields", None)
+    if custom_fields:
+        kwargs["custom_fields"] = list(custom_fields)
     if profile.mo_field:
         kwargs["mo_field"] = profile.mo_field
     return kwargs
@@ -85,3 +89,28 @@ def parse_file_with_profile(
     kwargs = profile_to_parser_kwargs(profile)
     kwargs.setdefault("mo_field", default_mo_field)
     return parse_bytes(data, **kwargs), profile
+
+
+def compute_custom_metrics(sample: ParsedSample, profile) -> Optional[Dict[str, Any]]:
+    """Aggregate configured custom fields into ``{label: {n, mean, sd_samp, sd_pop, min, max, unit}}``.
+
+    Pure aggregation over the already-parsed rods; the values were captured per
+    rod into ``Rod.extra`` during parsing using each field's column index.
+    """
+    fields = getattr(profile, "custom_fields", None) if profile is not None else None
+    if not fields:
+        return None
+    out: Dict[str, Any] = {}
+    for cf in fields:
+        if not isinstance(cf, dict):
+            continue
+        label = (cf.get("label") or "").strip()
+        if not label:
+            continue
+        values = [r.extra.get(label) for r in sample.rods if r.extra.get(label) is not None]
+        if not values:
+            continue
+        agg = _describe(values)
+        agg["unit"] = cf.get("unit") or ""
+        out[label] = agg
+    return out or None

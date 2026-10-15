@@ -4,6 +4,9 @@
 import 'package:flutter/material.dart';
 
 import '../api_service.dart';
+import '../app_state.dart';
+import '../features/pdf_export/order_summary_pdf.dart';
+import '../models.dart';
 
 /// Chip showing the report's version status: original / edited / obsolete.
 class ReportStatusChip extends StatelessWidget {
@@ -78,17 +81,59 @@ class _ReportVerificationCardState extends State<ReportVerificationCard> {
     if (id == null) return;
 
     setState(() => _busy = true);
-    final ok = await ApiService.verifyReport(id, action);
+    final result = await ApiService.verifyReport(id, action);
     if (!mounted) return;
     setState(() => _busy = false);
 
+    final ok = result != null;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text(ok
           ? 'Report ${action == 'approve' ? 'approved' : 'rejected'}.'
           : 'Verification failed.'),
       backgroundColor: ok ? Colors.green : Colors.red,
     ));
-    if (ok) widget.onVerified?.call();
+    if (ok) {
+      widget.onVerified?.call();
+      // Approving the final report completes the order server-side (auto-finalize
+      // uses the ReportLab fallback since no client PDF is uploaded yet). Generate
+      // + upload the Flutter Order Summary now; the dispatcher re-pushes it and
+      // replaces the ReportLab render on Odoo.
+      if (action == 'approve' && result?['order_finalized'] == true) {
+        await _maybeUploadOrderSummary();
+      }
+    }
+  }
+
+  Future<void> _maybeUploadOrderSummary() async {
+    final poNumber = widget.report['po_number']?.toString();
+    if (poNumber == null || poNumber.isEmpty) return;
+    PurchaseOrder? po;
+    for (final p in AppData.activePOs) {
+      if (p.poNumber == poNumber) {
+        po = p;
+        break;
+      }
+    }
+    if (po == null || po.id == null || !po.isOdooLinked) return;
+
+    final audit = await ApiService.getPoAudit(po.id!);
+    if (audit == null) return;
+
+    final quality = await ApiService.fetchQualityData(poId: po.id!, window: 'po');
+    final qReport = (quality?['report'] as Map?)?.cast<String, dynamic>();
+    final certificate = (qReport?['certificate'] as List?) ?? const [];
+
+    final pdfBytes = await OrderSummaryPdfService.build(
+      data: audit,
+      po: po,
+      certificate: certificate,
+    );
+    final filename = 'Order_Summary_${po.poNumber.replaceAll('/', '-')}.pdf';
+    await ApiService.uploadOrderSummaryPdf(
+      orderId: po.id!,
+      pdfBytes: pdfBytes,
+      filename: filename,
+    );
   }
 
   @override

@@ -45,6 +45,16 @@ CERTIFICATE_PARAMS = [
     ("weight", "Weight", "mg"),
 ]
 
+# Fallback report units per parameter. quality_specs rows may leave report_unit
+# NULL, but the certificate / automatic table must still show the right measure.
+_UNIT_FALLBACK = {
+    "length": "mm",
+    "diameter": "mm",
+    "pd": "mm WG",
+    "hardness": "%",
+    "weight": "mg",
+}
+
 
 @dataclass(frozen=True)
 class ParamSpec:
@@ -188,9 +198,15 @@ def manual_rods(checks: Sequence[Mapping[str, Any]]) -> List[Dict[str, Optional[
     return rods
 
 
-# Parameters where a manual operator measurement overrides the station value for
-# the final Mean/SD (the operator's lab check is authoritative for these).
-MANUAL_PRIORITY_PARAMS = frozenset({"weight"})
+def _in_spec(mean, spec):
+    """True when mean lies within the spec lower/upper limits (or is None)."""
+    if mean is None:
+        return True
+    if spec.lower is not None and mean < spec.lower:
+        return False
+    if spec.upper is not None and mean > spec.upper:
+        return False
+    return True
 
 
 def merge_manual_parameters(
@@ -198,38 +214,88 @@ def merge_manual_parameters(
     pseudo_rods: Sequence[Mapping[str, Any]],
     specs: Mapping[str, ParamSpec],
 ) -> Dict[str, Dict[str, Any]]:
-    """Merge operator manual QC checks into the run's parameter statistics.
+    """Smart consolidation of automatic (station) and manual measurements.
 
-    ``pseudo_rods`` are produced by :func:`manual_rods` (measurement units: weight
-    per rod, length mm, hardness %).
+    ``pseudo_rods`` are produced by :func:`manual_rods` (units: weight g/rod,
+    length mm, hardness %). ``parameters`` holds the station's per-parameter stats.
 
-    * For parameters in ``MANUAL_PRIORITY_PARAMS`` (e.g. weight) a manual value
-      **overrides** the station value for the final Mean/SD.
-    * For every other parameter a manual value is used only when the station has
-      no data (``n`` is falsy), so a station measurement is never overwritten.
+    Per-parameter routing against the spec limits (``mrp_bom`` tolerances):
+      * Both exist and both in-spec  -> Auto (source="auto")
+      * Auto missing (n=0)           -> Manual (source="manual")
+      * Manual missing               -> Auto (source="auto")
+      * Either available mean out of the Lower/Upper SL -> flag the row and mark
+        the parameter WARN (or FAIL when the chosen mean is itself out of spec).
 
-    Mutates and returns ``parameters``.
+    Each entry records ``auto_mean``/``auto_sd``/``auto_n`` and
+    ``manual_mean``/``manual_sd``/``manual_n`` (measurement units) plus ``source``
+    and ``flagged`` for the certificate renderer. Mutates and returns ``parameters``.
     """
+    for entry in parameters.values():
+        entry["source"] = "auto" if entry.get("n") else "not_measured"
+        entry["auto_mean"] = entry.get("mean")
+        entry["auto_sd"] = entry.get("sd_samp")
+        entry["auto_n"] = entry.get("n") or 0
+        entry["manual_mean"] = None
+        entry["manual_sd"] = None
+        entry["manual_n"] = 0
+        entry["flagged"] = False
+
     if not pseudo_rods:
         return parameters
+
     mstats = compute_run_stats(pseudo_rods, specs)
-    for name, mstat in mstats["parameters"].items():
-        if not mstat.get("n"):
-            continue
+    for name, spec in specs.items():
         entry = parameters.get(name)
         if entry is None:
-            spec = specs[name]
             entry = {
                 "nominal": spec.nominal, "lower": spec.lower, "upper": spec.upper,
-                "report_unit": spec.report_unit,
-                "report_scale": spec.report_scale,
-                "decimals": spec.decimals,
+                "report_unit": spec.report_unit, "report_scale": spec.report_scale,
+                "decimals": spec.decimals, "n": 0, "mean": None, "sd_samp": None,
+                "sd_pop": None, "min": None, "max": None,
+                "status": STATUS_NOT_MEASURED,
             }
             parameters[name] = entry
-        if entry.get("n") and name not in MANUAL_PRIORITY_PARAMS:
-            continue  # a station measurement wins unless manual has priority
-        entry.update(mstat)
-        entry["source"] = "manual"
+        mstat = mstats["parameters"].get(name, {})
+
+        auto_n = entry.get("auto_n") or 0
+        auto_mean = entry.get("auto_mean")
+        manual_n = mstat.get("n") or 0
+        manual_mean = mstat.get("mean")
+        entry["manual_mean"] = manual_mean
+        entry["manual_sd"] = mstat.get("sd_samp")
+        entry["manual_n"] = manual_n
+
+        if auto_n == 0 and manual_n == 0:
+            entry["source"] = "not_measured"
+            entry["flagged"] = False
+            continue
+
+        if auto_n == 0:
+            entry.update(mstat)
+            entry["source"] = "manual"
+        elif manual_n == 0:
+            entry["source"] = "auto"
+        else:
+            auto_ok = _in_spec(auto_mean, spec)
+            manual_ok = _in_spec(manual_mean, spec)
+            if auto_ok and manual_ok:
+                entry["source"] = "auto"
+            elif auto_ok and not manual_ok:
+                entry["source"] = "auto"
+            elif not auto_ok and manual_ok:
+                entry.update(mstat)
+                entry["source"] = "manual"
+            else:
+                entry["source"] = "auto"
+
+        flagged = (
+            (auto_n > 0 and not _in_spec(auto_mean, spec))
+            or (manual_n > 0 and not _in_spec(manual_mean, spec))
+        )
+        entry["flagged"] = flagged
+        if flagged:
+            final_mean = entry.get("mean")
+            entry["status"] = STATUS_FAIL if not _in_spec(final_mean, spec) else STATUS_WARN
     return parameters
 
 
@@ -260,7 +326,7 @@ def certificate_rows(
         measured = stats.get("parameters", {}).get(name, {})
         row: Dict[str, Any] = {
             "parameter": name,
-            "unit": spec.report_unit,
+            "unit": spec.report_unit or _UNIT_FALLBACK.get(name, ""),
             "nominal": _scaled(spec.nominal, spec),
             "lower": _scaled(spec.lower, spec),
             "upper": _scaled(spec.upper, spec),
@@ -271,8 +337,13 @@ def certificate_rows(
                     "mean": _scaled(measured["mean"], spec),
                     "sd": _scaled(measured.get(f"sd_{sd_kind}"), spec),
                     "n": measured["n"],
-                    "source": "measured",
-                    "status": measured["status"],
+                    "source": measured.get("source") or "auto",
+                    "status": measured.get("status"),
+                    "flagged": bool(measured.get("flagged")),
+                    "auto_mean": _scaled(measured.get("auto_mean"), spec),
+                    "auto_sd": _scaled(measured.get("auto_sd"), spec),
+                    "manual_mean": _scaled(measured.get("manual_mean"), spec),
+                    "manual_sd": _scaled(measured.get("manual_sd"), spec),
                 }
             )
         elif name in manual:

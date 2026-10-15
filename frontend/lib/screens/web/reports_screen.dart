@@ -8,7 +8,6 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../../models.dart';
 import '../../api_service.dart';
-import '../../core/app_navigation.dart';
 import '../../widgets/resizable_panel.dart';
 import '../../widgets/report_detail_panel.dart';
 import '../../widgets/report_verification_card.dart';
@@ -288,7 +287,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                           onSort: (col, asc) => setState(() { _sortColumnIndex = col; _sortAscending = asc; })),
                         DataColumn(label: const Text('Operator'),
                           onSort: (col, asc) => setState(() { _sortColumnIndex = col; _sortAscending = asc; })),
-                        DataColumn(label: const Text('PO'),
+                        DataColumn(label: const Text('MO Number'),
                           onSort: (col, asc) => setState(() { _sortColumnIndex = col; _sortAscending = asc; })),
                         DataColumn(label: const Text('Submitted'),
                           onSort: (col, asc) => setState(() { _sortColumnIndex = col; _sortAscending = asc; })),
@@ -332,21 +331,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                              DataCell(Text(r['shift_name']    ?? '', style: TextStyle(fontSize: 13, color: r['is_archived'] == true ? Colors.grey : null))),
                              DataCell(Text(r['machine_name']  ?? '', style: TextStyle(fontSize: 13, color: r['is_archived'] == true ? Colors.grey : null))),
                              DataCell(Text(r['operator_name'] ?? '', style: TextStyle(fontSize: 13, color: r['is_archived'] == true ? Colors.grey : null))),
-                             DataCell(InkWell(
-                               onTap: (r['po_number'] ?? '').toString().isEmpty
-                                   ? null
-                                   : () => AppNavigation.openOrder(r['po_number'].toString()),
-                               mouseCursor: (r['po_number'] ?? '').toString().isEmpty
-                                   ? MouseCursor.defer
-                                   : SystemMouseCursors.click,
-                               child: Text(r['po_number'] ?? '',
-                                 style: TextStyle(fontSize: 13,
-                                   fontWeight: FontWeight.w600,
-                                   color: r['is_archived'] == true ? Colors.grey : Colors.deepPurple,
-                                   decoration: (r['po_number'] ?? '').toString().isEmpty
-                                       ? null
-                                       : TextDecoration.underline)),
-                             )),
+                              DataCell(Text(r['po_number'] ?? '', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: r['is_archived'] == true ? Colors.grey : Colors.deepPurple))),
                              DataCell(Text(_fmtSync(r['sync_at']),
                                style: const TextStyle(fontSize: 12, color: Colors.grey))),
                              DataCell(Row(mainAxisSize: MainAxisSize.min, children: [

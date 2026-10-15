@@ -80,8 +80,8 @@ _FONT_REGISTERED = False
 
 # Official Quality Certificate parameter matrix (fixed order + units).
 _PARAM_META = [
-    ("length", "Filter rods length", "mm"),
-    ("diameter", "Filter rods diameter", "mm"),
+    ("length", "Length", "mm"),
+    ("diameter", "Diameter", "mm"),
     ("pd", "Pressure drop", "mm WG"),
     ("hardness", "Hardness", "%"),
     ("weight", "Weight", "mg"),
@@ -192,109 +192,69 @@ def _trend_chart(values, lower, upper, nominal, width=500, height=130):
         return None
 
 
-def render_order_summary_pdf(data: dict) -> bytes:
-    """Render the aggregated Order Summary PDF (production + consolidated quality).
+# ---------------------------------------------------------------------------
+# Branded purple theme (shared by Order Summary + audit reports)
+# ---------------------------------------------------------------------------
+_PURPLE = colors.HexColor('#673AB7')
+_PURPLE_TINT = colors.HexColor('#F3EFFF')
+_GRID_GREY = colors.HexColor('#E5E7EB')
 
-    ``data`` keys:
-      * ``header``: mo_number, spec_string, machines, date_range, operator
-      * ``production``: total_boxes, total_rods, total_waste_kg, materials{...}
-      * ``quality``: certificate[...], rods_total, rods_rejected, status
-    """
-    _register_dejavu_fonts()
+_STATUS_COLORS = {
+    'PASS': colors.HexColor('#16A34A'),
+    'WARNING': colors.HexColor('#F59E0B'),
+    'FAIL': colors.HexColor('#DC2626'),
+    'NO_DATA': colors.HexColor('#9CA3AF'),
+}
 
-    header = data.get("header") or {}
-    production = data.get("production") or {}
-    quality = data.get("quality") or {}
-    materials = production.get("materials") or {}
 
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buf, pagesize=A4, topMargin=14 * mm, bottomMargin=14 * mm,
-        leftMargin=14 * mm, rightMargin=14 * mm, title="Order Summary",
+def _status_badge(status) -> Table:
+    """Rounded pill badge for PASS / WARNING / FAIL / NO_DATA."""
+    label = (status or '-').replace('_', ' ')
+    bg = _STATUS_COLORS.get(str(status or '').upper(), _STATUS_COLORS['NO_DATA'])
+    p = Paragraph(
+        f'<b>{label}</b>',
+        ParagraphStyle('BadgeText', fontName='Helvetica-Bold', fontSize=9,
+                       leading=11, textColor=colors.white, alignment=TA_CENTER),
     )
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("OrderTitle", parent=styles["Title"],
-                                 fontName="DejaVu-Bold", fontSize=16)
-    section_style = ParagraphStyle("OrderSection", parent=styles["Heading2"],
-                                   fontName="DejaVu-Bold", fontSize=11)
-    cell = ParagraphStyle("OrderCell", parent=styles["Normal"], fontName="DejaVu", fontSize=8)
-    cell_bold = ParagraphStyle("OrderCellBold", parent=cell, fontName="DejaVu-Bold")
-
-    def _kv_table(rows, left_w=50 * mm):
-        t = Table([[Paragraph(k, cell_bold), Paragraph(str(v), cell)] for k, v in rows],
-                  colWidths=[left_w, None])
-        t.setStyle(TableStyle([
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("TOPPADDING", (0, 0), (-1, -1), 2),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-        ]))
-        return t
-
-    story = [Paragraph("Order Summary", title_style), Spacer(1, 6)]
-    story.append(_kv_table([
-        ("MO Number", header.get("mo_number") or "-"),
-        ("Specification", header.get("spec_string") or "-"),
-        ("Machine(s)", header.get("machines") or "-"),
-        ("Production Period", header.get("date_range") or "-"),
-        ("Operator(s)", header.get("operator") or "-"),
+    t = Table([[p]], colWidths=[32 * mm])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), bg),
+        ('ROUNDEDCORNERS', [8, 8, 8, 8]),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('TOPPADDING', (0, 0), (-1, -1), 2),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+        ('LEFTPADDING', (0, 0), (-1, -1), 8),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 8),
     ]))
-    story.append(Spacer(1, 10))
+    return t
 
-    # Production rollup
-    story.append(Paragraph("Production", section_style))
-    story.append(_kv_table([
-        ("Reports", production.get("report_count") or 0),
-        ("Total Boxes", production.get("total_boxes") or 0),
-        ("Total Rods", production.get("total_rods") or 0),
-        ("Total Waste (kg)", _fmt_num(production.get("total_waste_kg"))),
-        ("Acetate (kg)", _fmt_num(materials.get("acetate"))),
-        ("Paper (Bob)", _fmt_num(materials.get("paper"))),
-        ("PVA / Cold Glue (kg)", _fmt_num(materials.get("pva"))),
-        ("Hot Melt Glue (kg)", _fmt_num(materials.get("hm"))),
-        ("Triacetin (kg)", _fmt_num(materials.get("triacetin"))),
-    ]))
-    story.append(Spacer(1, 10))
 
-    # Consolidated quality matrix
-    story.append(Paragraph("Consolidated Quality", section_style))
-    from app.quality_stats import CERTIFICATE_PARAMS
-    cert = quality.get("certificate") or []
-    cert_by_param = {str(r.get("parameter")): r for r in cert}
-    qh = ["Parameter", "Unit", "Nominal", "Lower SL", "Upper SL", "Mean", "SD", "N"]
-    qrows = [qh]
-    for param, label, unit in CERTIFICATE_PARAMS:
-        r = cert_by_param.get(param) or {}
-        qrows.append([
-            label, r.get("unit") or unit,
-            _fmt_num(r.get("nominal")), _fmt_num(r.get("lower")), _fmt_num(r.get("upper")),
-            _fmt_num(r.get("mean")), _fmt_num(r.get("sd")),
-            str(r.get("n") or ""),
-        ])
-    qt = Table(qrows, repeatRows=1)
-    qt.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#333333")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-        ("FONTNAME", (0, 0), (-1, -1), "DejaVu"),
-        ("FONTNAME", (0, 0), (-1, 0), "DejaVu-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ("ALIGN", (3, 1), (-1, -1), "RIGHT"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), 2),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-    ]))
-    story.append(qt)
-    story.append(Spacer(1, 4))
-    story.append(Paragraph(
-        f"Tested rods: {quality.get('rods_total') or 0} · "
-        f"Rejected: {quality.get('rods_rejected') or 0} · "
-        f"Status: {quality.get('status') or '-'}",
-        cell,
-    ))
+def render_order_summary_pdf(po, reports, quality) -> bytes:
+    """Render the consolidated Order Summary using the branded audit template.
 
-    doc.build(story)
-    return buf.getvalue()
+    Reuses ``PDFReportGenerator.generate_audit_pdf`` (the ``Production System.pdf``
+    layout: Report Entries, Production Summary, Materials Consumption) and appends
+    the Consolidated Quality section.
+
+    ``po`` / ``reports`` are the PurchaseOrder + ProductionReport model instances;
+    ``quality`` is the consolidated order-quality dict ({certificate, rods_total,
+    rods_rejected, status}).
+    """
+    consolidated = {
+        "certificate": quality.get("certificate") or [],
+        "rods_total": quality.get("rods_total"),
+        "rods_rejected": quality.get("rods_rejected"),
+        "status": quality.get("status"),
+    }
+    gen = PDFReportGenerator()
+    result = gen.generate_audit_pdf(po, reports, consolidated_quality=consolidated)
+    if not result.get("success"):
+        return None
+    try:
+        with open(result["path"], "rb") as fh:
+            return fh.read()
+    except OSError:
+        return None
 
 
 def render_shift_quality_pdf(data: dict) -> bytes:
@@ -569,7 +529,8 @@ class PDFReportGenerator:
         folder_path = Path(self.archive_path) / year / month
         folder_path.mkdir(parents=True, exist_ok=True)
 
-        base = f"{date_str} PO_Audit_{po_number}"
+        safe_po = (po_number or "MO").replace("/", "_").replace("\\", "_")
+        base = f"{date_str} PO_Audit_{safe_po}"
         filename = f"{base}.pdf"
         full_path = folder_path / filename
 
@@ -814,7 +775,7 @@ class PDFReportGenerator:
         except OSError:
             return None
 
-    def generate_audit_pdf(self, po, reports: list) -> dict:
+    def generate_audit_pdf(self, po, reports: list, consolidated_quality: dict = None) -> dict:
         """
         Generate an audit PDF for a Purchase Order matching the web app format.
         Includes: Report Entries table, Production Summary, Materials Consumption.
@@ -831,7 +792,7 @@ class PDFReportGenerator:
 
             # --- Header ---
             story.append(Paragraph(
-                "PURCHASE ORDER AUDIT REPORT",
+                "MANUFACTURING ORDER AUDIT REPORT",
                 self.styles['CustomTitle']
             ))
             story.append(Spacer(1, 0.1*inch))
@@ -1046,6 +1007,10 @@ class PDFReportGenerator:
                     bt.setStyle(TableStyle(bt_style))
                     story.append(bt)
 
+            # --- Consolidated Quality ---
+            if consolidated_quality:
+                self._add_consolidated_quality(story, consolidated_quality)
+
             # Build PDF
             doc.build(story)
 
@@ -1060,6 +1025,61 @@ class PDFReportGenerator:
                 'success': False,
                 'error': str(e)
             }
+
+    def _add_consolidated_quality(self, story: list, quality: dict):
+        """Append the Consolidated Quality matrix + status footer (purple card style)."""
+        from app.quality_stats import CERTIFICATE_PARAMS
+
+        _register_dejavu_fonts()
+        story.append(Spacer(1, 0.2 * inch))
+        story.append(Paragraph("<b>Consolidated Quality</b>", self.styles['CustomHeading']))
+        cert = quality.get("certificate") or []
+        cert_by_param = {str(r.get("parameter")): r for r in cert if isinstance(r, dict)}
+        qh = ["Parameter", "Unit", "Nominal", "Lower SL", "Upper SL", "Mean", "SD", "Sample Count (N)"]
+        qrows = [qh]
+        for param, label, unit in CERTIFICATE_PARAMS:
+            r = cert_by_param.get(param) or {}
+            qrows.append([
+                label, r.get("unit") or unit,
+                _fmt_num(r.get("nominal")), _fmt_num(r.get("lower")), _fmt_num(r.get("upper")),
+                _fmt_num(r.get("mean")), _fmt_num(r.get("sd")),
+                str(r.get("n") or ""),
+            ])
+        qt = Table(qrows, repeatRows=1)
+        qt.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), _PURPLE),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, _PURPLE_TINT]),
+            ("GRID", (0, 0), (-1, -1), 0.25, _GRID_GREY),
+            ("FONTNAME", (0, 0), (-1, -1), "DejaVu"),
+            ("FONTNAME", (0, 0), (-1, 0), "DejaVu-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("ALIGN", (3, 1), (-1, -1), "RIGHT"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(qt)
+        story.append(Spacer(1, 8))
+
+        footer = Table([[
+            Paragraph("Tested Rods", self.styles['CellBold']),
+            Paragraph(str(quality.get("rods_total") or 0), self.styles['CellNormal']),
+            Paragraph("Rejected Rods", self.styles['CellBold']),
+            Paragraph(str(quality.get("rods_rejected") or 0), self.styles['CellNormal']),
+            Paragraph("Quality Status", self.styles['CellBold']),
+            _status_badge(quality.get("status") or "NO_DATA"),
+        ]], colWidths=[28 * mm, 20 * mm, 30 * mm, 20 * mm, 32 * mm, 34 * mm])
+        footer.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), _PURPLE_TINT),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("ROUNDEDCORNERS", [6, 6, 6, 6]),
+        ]))
+        story.append(footer)
 
     @classmethod
     def _get_oauth_credentials(cls):

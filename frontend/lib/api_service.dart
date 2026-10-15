@@ -648,18 +648,23 @@ class ApiService {
   }
 
   /// Verify (approve/reject) operator-entered report data (human-in-the-loop).
-  /// [action] is "approve" or "reject". Returns true on success (HTTP 200).
-  static Future<bool> verifyReport(int reportId, String action) async {
+  /// [action] is "approve" or "reject". Returns the response body on success,
+  /// or null on failure. On approve, `order_finalized` is true when this
+  /// approval completed the order (cumulative rods reached the target).
+  static Future<Map<String, dynamic>?> verifyReport(int reportId, String action) async {
     try {
       final response = await _httpClient.post(
         Uri.parse('$effectiveBaseUrl/reports/$reportId/verify'),
         headers: _authHeaders(),
         body: jsonEncode({'action': action}),
       );
-      return response.statusCode == 200;
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      return null;
     } catch (e) {
       AppLog.e("Error verifying report: $e");
-      return false;
+      return null;
     }
   }
 
@@ -1240,7 +1245,8 @@ class ApiService {
   }
 
   /// Finalize an order: computes cumulative production + consolidated quality,
-  /// marks it completed, renders the summary PDF and pushes it to Odoo (full sync).
+  /// marks it completed, and pushes the Order Summary PDF to Odoo (root MO +
+  /// latest backorder MO) for any linked order, regardless of sync_mode.
   static Future<Map<String, dynamic>?> closeOrder(int orderId) async {
     try {
       final response = await _httpClient.post(
@@ -1256,6 +1262,30 @@ class ApiService {
       AppLog.e("closeOrder error: $e");
       _fail(null, e.toString());
       return null;
+    }
+  }
+
+  /// Upload the Flutter-generated consolidated Order Summary PDF (base64).
+  /// Stored on the order so finalization attaches THIS document to Odoo instead
+  /// of the ReportLab fallback render.
+  static Future<bool> uploadOrderSummaryPdf({
+    required int orderId,
+    required List<int> pdfBytes,
+    required String filename,
+  }) async {
+    try {
+      final base64Pdf = base64Encode(pdfBytes);
+      final response = await _httpClient.post(
+        Uri.parse('$effectiveBaseUrl/v2/orders/$orderId/summary-pdf'),
+        headers: _authHeaders(),
+        body: jsonEncode({'pdf_base64': base64Pdf, 'filename': filename}),
+      ).timeout(const Duration(seconds: 60));
+      if (response.statusCode == 200) return true;
+      _fail(response.statusCode, _detailFrom(response.body));
+      return false;
+    } catch (e) {
+      AppLog.e("uploadOrderSummaryPdf error: $e");
+      return false;
     }
   }
 

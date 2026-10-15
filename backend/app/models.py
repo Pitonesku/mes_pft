@@ -172,6 +172,11 @@ class PurchaseOrder(Base):
     final_materials = Column(JSONB, nullable=True)  # {acetate, paper, pva, hm, triacetin}
     final_quality = Column(JSONB, nullable=True)    # consolidated quality matrix + tested/rejected
     odoo_summary_attachment_id = Column(Integer, nullable=True)
+    # Flutter-generated consolidated Order Summary PDF (primary source). The
+    # ReportLab render_order_summary_pdf() remains only as a fallback when this
+    # is NULL (backend-initiated finalize with no client in the loop).
+    order_summary_pdf_base64 = Column(Text, nullable=True)
+    order_summary_pdf_filename = Column(String(255), nullable=True)
 
     # Data origin: 'odoo' (synced MO) or 'local' (manually created MO).
     source = Column(String(20), nullable=False, default="local")
@@ -502,6 +507,7 @@ class StationProfile(Base):
     mo_field = Column(String(30), nullable=True)         # batch_description | comments | brand
     metadata_map = Column(JSONB, nullable=True)          # {field: csv key}
     column_map = Column(JSONB, nullable=True)            # {field: index or null}
+    custom_fields = Column(JSONB, nullable=True)         # [{label, unit, index}, ...]
     delivery_mode = Column(String(10), nullable=False, default="push")  # push | pull
     watch_path = Column(String(500), nullable=True)      # pull-mode network folder
     station_key_id = Column(Integer, ForeignKey("station_keys.id"), nullable=True)
@@ -579,6 +585,7 @@ class QualitySample(Base):
     rods_declared = Column(Integer, nullable=True)
     file_sha256 = Column(String(64), nullable=True, unique=True)
     file_md5 = Column(String(32), nullable=True)
+    custom_metrics = Column(JSONB, nullable=True)        # {label: {n, mean, sd_samp, sd_pop, min, max, unit}}
 
 
 class QualityMeasurement(Base):
@@ -598,6 +605,7 @@ class QualityMeasurement(Base):
     roundness = Column(Numeric, nullable=True)
     shape = Column(Numeric, nullable=True)
     hardness = Column(Numeric, nullable=True)  # not measured yet
+    length = Column(Numeric, nullable=True)    # station-measured rod length (mm)
 
 
 class MaterialLog(Base):

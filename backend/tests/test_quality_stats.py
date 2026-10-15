@@ -153,7 +153,7 @@ class CertificateTable(unittest.TestCase):
     def test_manual_value_is_used_only_when_nothing_was_measured(self):
         rows = self.rows(manual={"hardness": {"mean": 84.4, "sd": None}, "pd": {"mean": 999, "sd": 1}})
         self.assertEqual((rows["hardness"]["mean"], rows["hardness"]["source"]), (84.4, "manual"))
-        self.assertEqual(rows["pd"]["source"], "measured")  # measurement wins over manual
+        self.assertEqual(rows["pd"]["source"], "auto")  # measurement wins over manual
         self.assertNotEqual(rows["pd"]["mean"], 999)
 
     def test_not_measured_row_without_manual_value(self):
@@ -193,16 +193,75 @@ class ManualMergeTests(unittest.TestCase):
         self.assertAlmostEqual(stats["parameters"]["hardness"]["mean"], 83.5, places=6)
         self.assertEqual(stats["parameters"]["hardness"]["n"], 2)
 
-    def test_manual_overrides_station_weight(self):
-        # Weight is in MANUAL_PRIORITY_PARAMS: a manual operator lab measurement
-        # overrides the station value for the final Mean/SD.
+    def test_discrepancy_manual_weight_out_of_spec_trusts_auto(self):
+        # Manual weight 0.067 g/rod is far below the 0.651..0.681 spec, while the
+        # station mean 0.6641 is in-spec: smart consolidation trusts auto and flags.
         stats = qs.compute_run_stats(STATION_RODS, self.SPECS)
         self.assertAlmostEqual(stats["parameters"]["weight"]["mean"], 0.6641, places=6)
         pseudo = qs.manual_rods([{"sample_weight": 0.670, "sample_rods": 10}])
         qs.merge_manual_parameters(stats["parameters"], pseudo, self.SPECS)
-        self.assertEqual(stats["parameters"]["weight"]["source"], "manual")
-        self.assertAlmostEqual(stats["parameters"]["weight"]["mean"], 0.067, places=6)
-        self.assertEqual(stats["parameters"]["weight"]["n"], 1)
+        p = stats["parameters"]["weight"]
+        self.assertEqual(p["source"], "auto")
+        self.assertTrue(p["flagged"])
+        self.assertAlmostEqual(p["mean"], 0.6641, places=6)
+        self.assertEqual(p["status"], "WARN")
+
+    def test_both_in_spec_uses_auto(self):
+        # Condition A: station + manual both in-spec -> auto, not flagged.
+        stats = qs.compute_run_stats(STATION_RODS, self.SPECS)
+        pseudo = qs.manual_rods([
+            {"sample_weight": 6.6, "sample_rods": 10, "length_mm": 108.2, "hardness": 84.0},
+        ])
+        qs.merge_manual_parameters(stats["parameters"], pseudo, self.SPECS)
+        w = stats["parameters"]["weight"]
+        self.assertEqual(w["source"], "auto")
+        self.assertFalse(w["flagged"])
+        self.assertAlmostEqual(w["mean"], 0.6641, places=6)
+
+    def test_auto_missing_uses_manual(self):
+        # Condition B: no station rods -> manual fills length.
+        stats = qs.compute_run_stats([], self.SPECS)
+        pseudo = qs.manual_rods([
+            {"length_mm": 108.2, "hardness": 84.0},
+            {"length_mm": 107.8, "hardness": 83.0},
+        ])
+        qs.merge_manual_parameters(stats["parameters"], pseudo, self.SPECS)
+        self.assertEqual(stats["parameters"]["length"]["source"], "manual")
+        self.assertAlmostEqual(stats["parameters"]["length"]["mean"], 108.0, places=6)
+
+    def test_manual_missing_uses_auto(self):
+        # Condition C: no manual checks -> auto used, unflagged.
+        stats = qs.compute_run_stats(STATION_RODS, self.SPECS)
+        qs.merge_manual_parameters(stats["parameters"], [], self.SPECS)
+        self.assertEqual(stats["parameters"]["pd"]["source"], "auto")
+        self.assertFalse(stats["parameters"]["pd"]["flagged"])
+
+    def test_discrepancy_auto_out_of_spec_trusts_manual(self):
+        # Condition D (machine drift): auto out-of-spec, manual in-spec -> manual.
+        specs = dict(self.SPECS)
+        specs["length"] = ParamSpec("length", 108.0, 107.5, 108.5, report_unit="mm", decimals=2)
+        stats = qs.compute_run_stats([{"length": 107.0}], specs)
+        pseudo = qs.manual_rods([{"length_mm": 108.2, "hardness": 84.0}])
+        qs.merge_manual_parameters(stats["parameters"], pseudo, specs)
+        p = stats["parameters"]["length"]
+        self.assertEqual(p["source"], "manual")
+        self.assertTrue(p["flagged"])
+        self.assertEqual(p["status"], "WARN")
+
+    def test_grand_mean_is_not_average_of_averages(self):
+        # Two "runs": 3 hardness checks (50, 60, 70) + 1 check (100). The grand mean
+        # must be (50+60+70+100)/4 = 70, NOT the average of per-run means (60, 100 -> 80).
+        specs = dict(self.SPECS)
+        specs["hardness"] = ParamSpec("hardness", 82.0, None, None, report_unit="%", decimals=1)
+        stats = qs.compute_run_stats([], specs)
+        pseudo = qs.manual_rods([
+            {"hardness": 50.0}, {"hardness": 60.0}, {"hardness": 70.0},
+            {"hardness": 100.0},
+        ])
+        qs.merge_manual_parameters(stats["parameters"], pseudo, specs)
+        p = stats["parameters"]["hardness"]
+        self.assertAlmostEqual(p["mean"], 70.0, places=6)
+        self.assertEqual(p["n"], 4)
 
 
 if __name__ == "__main__":

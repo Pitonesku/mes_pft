@@ -102,7 +102,8 @@ def reconcile_all(
                 try:
                     from app.services import order_finalize
                     order_finalize.finalize_order(
-                        session, po, actor="odoo", push_odoo=report.get("was_full", False))
+                        session, po, actor="odoo",
+                        push_odoo=(po.odoo_mo_id is not None))
                     changed.append({"po_id": po.id, "finalized": True, "state": "done"})
                 except Exception as exc:  # noqa: BLE001 - finalize must not break reconcile
                     logger.warning("order finalize failed for %s: %s", po.id, exc)
