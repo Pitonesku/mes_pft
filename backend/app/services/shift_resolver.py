@@ -164,7 +164,7 @@ def _has_machine_run():
     )
 
 
-def pick_run(runs: Sequence, ts: datetime, mo_ref: Optional[str] = None) -> Tuple[Optional[object], str]:
+def pick_run(runs: Sequence, ts: datetime, mo_ref: Optional[str] = None, sample_id: Optional[str] = None) -> Tuple[Optional[object], str]:
     """Pure run-selection rule over a shift's runs (objects with ``id``, ``seq``,
     ``mo_ref``, ``started_at``, ``ended_at``). Returns ``(run, link_status)``.
 
@@ -192,6 +192,14 @@ def pick_run(runs: Sequence, ts: datetime, mo_ref: Optional[str] = None) -> Tupl
         return hit
 
     label = (mo_ref or "").strip()
+    if not label and sample_id:
+        # Guarded fallback: the station "Sample ID" doubles as the MO number only
+        # when it actually names one of the runs in this shift. Free-form labels
+        # (e.g. "I099" while producing J099) keep the time-based fallback instead
+        # of surfacing a spurious MO_MISMATCH.
+        sid = (sample_id or "").strip()
+        if any((r.mo_ref or "").strip() == sid for r in ordered):
+            label = sid
     if not label:
         run = active_at()
         return run, LINK_LINKED
@@ -223,18 +231,20 @@ def resolve_run(
     timestamp: datetime,
     mo_ref: Optional[str] = None,
     machine_id: Optional[int] = None,
+    sample_id: Optional[str] = None,
 ) -> Tuple[Optional[int], str]:
     """Return (run_id, link_status) for a measurement within a shift.
 
     ``machine_id`` restricts the choice to runs recorded on that machine, which
-    matters once a shift has moved between machines."""
+    matters once a shift has moved between machines. ``sample_id`` is a guarded
+    fallback MO label used only when ``mo_ref`` is empty (see ``pick_run``)."""
     ts = _as_utc(timestamp)
     query = session.query(models.ProductionRun).filter(models.ProductionRun.shift_id == shift_id)
     if machine_id is not None:
         query = query.filter(
             (models.ProductionRun.machine_id == machine_id) | (models.ProductionRun.machine_id.is_(None))
         )
-    run, status = pick_run(query.all(), ts, mo_ref)
+    run, status = pick_run(query.all(), ts, mo_ref, sample_id=sample_id)
     return (run.id if run is not None else None), status
 
 

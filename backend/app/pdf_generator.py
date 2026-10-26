@@ -85,6 +85,7 @@ _PARAM_META = [
     ("pd", "Pressure drop", "mm WG"),
     ("hardness", "Hardness", "%"),
     ("weight", "Weight", "mg"),
+    ("triacetin", "Triacetin", "%"),
 ]
 
 
@@ -272,6 +273,7 @@ def render_shift_quality_pdf(data: dict) -> bytes:
     header = data.get("header") or {}
     certificate = data.get("certificate") or []
     manual_checks = data.get("manual_checks") or []
+    triacetin = data.get("triacetin") or []
     remarks = (data.get("remarks") or "").strip()
     cert_by_param = {str(r.get("parameter")): r for r in certificate if isinstance(r, dict)}
 
@@ -385,6 +387,38 @@ def render_shift_quality_pdf(data: dict) -> bytes:
         ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
     ]))
     story.append(mtbl)
+
+    # --- Triacetin ---
+    story.append(Paragraph("Triacetin", section_style))
+    tr_header = ["#", "Time", "Triacetin %", "Regular wt (g)", "Dry wt (g)", "Rods"]
+    tr_rows = [tr_header]
+    if not triacetin:
+        tr_rows.append(["", "No triacetin measurements recorded for this shift", "", "", "", ""])
+    else:
+        for idx, t in enumerate(triacetin, start=1):
+            tr_rows.append([
+                str(idx),
+                str(t.get("time") or "-"),
+                _fmt_num(t.get("triacetin_pct")),
+                _fmt_num(t.get("regular_weight")),
+                _fmt_num(t.get("dry_weight")),
+                str(t.get("n") or ""),
+            ])
+    trtbl = Table(tr_rows, repeatRows=1, colWidths=[8 * mm, 20 * mm, 20 * mm, 24 * mm, 24 * mm, 16 * mm])
+    trtbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#333333")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("FONTNAME", (0, 0), (-1, -1), "DejaVu"),
+        ("FONTNAME", (0, 0), (-1, 0), "DejaVu-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("ALIGN", (2, 1), (-1, -1), "RIGHT"),
+        ("ALIGN", (0, 0), (0, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+    ]))
+    story.append(trtbl)
 
     # --- Trend charts (diameter + pressure drop, spec limits) ---
     series = data.get("series") or {}

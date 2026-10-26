@@ -111,44 +111,16 @@ class _LoginScreenState extends State<LoginScreen> {
         return;
       }
 
-      // 2. Если сервер не доступен, проверяем локальных пользователей
-      final localUser = AppData.users.firstWhere(
-        (u) => u.name == username && u.password == password,
-        orElse: () => User(name: "", password: "", email: "", role: UserRole.operator),
-      );
-
-      if (localUser.name.isEmpty) {
-        if (mounted) {
-          setState(() => _isLoadingData = false);
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text("Invalid Username or Password"), 
-              backgroundColor: Colors.redAccent
-            )
-          );
-        }
-        return;
-      }
-
-      // Успешный локальный вход (fallback)
-      await AppData.loadDataFromServer(forceSync: false);
-
-      if (!mounted) return;
-      setState(() => _isLoadingData = false);
-
+      // 2. Server rejected the credentials (or is unreachable). There is no
+      //    offline/local fallback login: a session can only be established by the
+      //    server, so a forgotten or blanked password can never grant access to a
+      //    cached superadmin or demo account.
       if (mounted) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (c) => ResponsiveLayout(
-              currentUser: localUser,
-              mobileBuilder: (ctx, u) => u.role == UserRole.operator
-                  ? ReportPage(operator: u)
-                  : AdminDashboard(currentUser: u),
-              desktopBuilder: (ctx, u) => u.role == UserRole.operator
-                  ? ReportPage(operator: u)
-                  : WebShell(currentUser: u),
-            ),
+        setState(() => _isLoadingData = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("Invalid Username or Password"),
+            backgroundColor: Colors.redAccent,
           ),
         );
       }

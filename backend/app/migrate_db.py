@@ -121,7 +121,10 @@ def migrate_roles_and_users(conn):
                     cur.execute(f"ALTER TABLE roles ADD COLUMN {col} {definition}")
                     print(f"ok [Migrate] Added roles.{col}")
 
-            # 3. Grant all permissions to any role named 'superadmin', 'admin', or 'manager'
+            # 3. Grant permissions by role. 'superadmin'/'admin' get full access.
+            #    'manager' gets order/report permissions but NOT user management or
+            #    machine setup — those are admin-only (granting them to managers made
+            #    every manager a de-facto full admin).
             cur.execute("""
                 UPDATE roles
                 SET can_create_po        = TRUE,
@@ -130,10 +133,23 @@ def migrate_roles_and_users(conn):
                     can_manage_users     = TRUE,
                     can_setup_machines   = TRUE,
                     can_view_all_reports = TRUE
-                WHERE LOWER(role_name) IN ('superadmin', 'admin', 'manager')
+                WHERE LOWER(role_name) IN ('superadmin', 'admin')
             """)
             if cur.rowcount > 0:
-                print(f"ok [Migrate] All permissions granted to {cur.rowcount} admin role(s).")
+                print(f"ok [Migrate] Full permissions granted to {cur.rowcount} admin role(s).")
+
+            cur.execute("""
+                UPDATE roles
+                SET can_create_po        = TRUE,
+                    can_edit_po          = TRUE,
+                    can_edit_report      = TRUE,
+                    can_manage_users     = FALSE,
+                    can_setup_machines   = FALSE,
+                    can_view_all_reports = TRUE
+                WHERE LOWER(role_name) = 'manager'
+            """)
+            if cur.rowcount > 0:
+                print("ok [Migrate] Manager role normalized (no user/machine management).")
 
         # -- users table ------------------------------------------------------
         if not table_exists(cur, "users"):

@@ -207,6 +207,22 @@ class _DashboardScreenState extends State<DashboardScreen> {
         user: widget.user,
       );
 
+  Widget _buildItem(BuildContext context, DashboardItem item) {
+    final meta = dashboardWidgetRegistry[item.type];
+    if (meta == null) {
+      return Card(
+        margin: EdgeInsets.zero,
+        child: Center(child: Text('Unknown widget: ${item.type}')),
+      );
+    }
+    return meta.builder(context, item.config, _data);
+  }
+
+  String _titleFor(String type) => dashboardWidgetRegistry[type]?.title ?? type;
+
+  bool _configurableFor(String type) =>
+      dashboardWidgetRegistry[type]?.configurable ?? false;
+
   @override
   Widget build(BuildContext context) {
     if (_loadingLayout) {
@@ -234,14 +250,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ? DashboardEditGrid(
                         items: _layout.items,
                         columns: columns,
-                        data: _data,
+                        buildItem: _buildItem,
+                        titleFor: _titleFor,
+                        configurableFor: _configurableFor,
                         onMove: _move,
                         onRemove: _remove,
                         onResize: _resize,
                         onConfigure: _openConfigureDialog,
                       )
                     : DashboardGrid(
-                        items: _layout.items, columns: columns, data: _data),
+                        items: _layout.items,
+                        columns: columns,
+                        buildItem: _buildItem),
               ],
             ),
           ),

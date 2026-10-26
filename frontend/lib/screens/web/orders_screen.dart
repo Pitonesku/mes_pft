@@ -671,6 +671,8 @@ class _PoDetailPanelState extends State<_PoDetailPanel> {
           _row('CU',       '${po.cu}'),
           _row('Weight',   '${po.weight} mg'),
           _row('Box type', '${po.boxType}'),
+          if (po.triacetin > 0)
+            _row('Triacetin', '${po.triacetin}% ± ${po.triacetinTolerance ?? '-'}'),
         ]),
         _sec('Materials', [
           _row('Acetate',   po.acetateType),
@@ -1141,7 +1143,7 @@ class _PoFormDialog extends StatefulWidget {
 }
 class _PoFormDialogState extends State<_PoFormDialog> {
   final _fk = GlobalKey<FormState>();
-  late TextEditingController _poNum,_qty,_box,_dia,_len,_pd,_cu,_weight,_diaTol,_pdTol;
+  late TextEditingController _poNum,_qty,_box,_dia,_len,_pd,_cu,_weight,_diaTol,_pdTol,_triPct,_triTol;
   String? _acetate,_paper,_pva,_hm,_tri;
 
   @override
@@ -1158,12 +1160,14 @@ class _PoFormDialogState extends State<_PoFormDialog> {
     _weight = TextEditingController(text: p?.weight.toString() ?? '');
     _diaTol = TextEditingController(text: p?.diameterTolerance?.toString() ?? '');
     _pdTol  = TextEditingController(text: p?.pdTolerance?.toString() ?? '');
+    _triPct = TextEditingController(text: p != null && p.triacetin > 0 ? p.triacetin.toString() : '');
+    _triTol = TextEditingController(text: p?.triacetinTolerance?.toString() ?? '');
     _acetate = p?.acetateType; _paper = p?.paperType;
     _pva = p?.pvaGlueType; _hm = p?.hmGlueType; _tri = p?.triacetinType;
     if (p == null) _prefillDefaults();
   }
   @override void dispose() {
-    for (final c in [_poNum,_qty,_box,_dia,_len,_pd,_cu,_weight,_diaTol,_pdTol]) {
+    for (final c in [_poNum,_qty,_box,_dia,_len,_pd,_cu,_weight,_diaTol,_pdTol,_triPct,_triTol]) {
       c.dispose();
     }
     super.dispose();
@@ -1196,6 +1200,8 @@ class _PoFormDialogState extends State<_PoFormDialog> {
     setState(() {
       if (_diaTol.text.trim().isEmpty) _diaTol.text = '${s?['diameter_tolerance'] ?? ''}';
       if (_pdTol.text.trim().isEmpty) _pdTol.text = '${s?['pd_tolerance'] ?? ''}';
+      if (_triPct.text.trim().isEmpty) _triPct.text = '${s?['triacetin_target'] ?? ''}';
+      if (_triTol.text.trim().isEmpty) _triTol.text = '${s?['triacetin_tolerance'] ?? ''}';
     });
   }
 
@@ -1255,7 +1261,9 @@ class _PoFormDialogState extends State<_PoFormDialog> {
             const SizedBox(width:16),
             Expanded(child: _fo(_pdTol, 'PD Tol Â± (mm WG)')),
             const SizedBox(width:16),
-            const Expanded(child: SizedBox()),
+            Expanded(child: _fo(_triPct, 'Triacetin %')),
+            const SizedBox(width:16),
+            Expanded(child: _fo(_triTol, 'Triacetin Tol (%)')),
           ]),
           const SizedBox(height:20),
           Text('Materials', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blue[800])),
@@ -1295,6 +1303,8 @@ class _PoFormDialogState extends State<_PoFormDialog> {
                   cu: int.tryParse(_cu.text)??0, boxType: int.tryParse(_box.text)??0,
                   diameterTolerance: _diaTol.text.trim().isEmpty ? null : _pN(_diaTol.text),
                   pdTolerance: _pdTol.text.trim().isEmpty ? null : _pN(_pdTol.text),
+                  triacetin: _pN(_triPct.text),
+                  triacetinTolerance: _triTol.text.trim().isEmpty ? null : _pN(_triTol.text),
                   targetQty: ((_pN(_qty.text))*1000).round(),
                   acetateType: _acetate??'', paperType: _paper??'',
                   pvaGlueType: _pva??'', hmGlueType: _hm??'', triacetinType: _tri??'',

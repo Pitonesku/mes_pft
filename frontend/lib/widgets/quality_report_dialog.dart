@@ -14,8 +14,9 @@ const _paramLabels = <String, String>{
   'pd': 'Pressure drop',
   'hardness': 'Hardness',
   'weight': 'Weight',
+  'triacetin': 'Triacetin',
 };
-const _paramOrder = <String>['length', 'diameter', 'pd', 'hardness', 'weight'];
+const _paramOrder = <String>['length', 'diameter', 'pd', 'hardness', 'weight', 'triacetin'];
 
 class QualityReportDialog extends StatefulWidget {
   final Map<String, dynamic> data;
@@ -51,6 +52,14 @@ class _QualityReportDialogState extends State<QualityReportDialog> {
   List<Map<String, dynamic>> get _manualChecks {
     final out = <Map<String, dynamic>>[];
     for (final c in ((_report?['manual_checks'] as List<dynamic>?) ?? const [])) {
+      if (c is Map) out.add(c.cast<String, dynamic>());
+    }
+    return out;
+  }
+
+  List<Map<String, dynamic>> get _triacetin {
+    final out = <Map<String, dynamic>>[];
+    for (final c in ((_report?['triacetin'] as List<dynamic>?) ?? const [])) {
       if (c is Map) out.add(c.cast<String, dynamic>());
     }
     return out;
@@ -167,6 +176,21 @@ class _QualityReportDialogState extends State<QualityReportDialog> {
       return cells;
     }
 
+    List<List<String>> triacetinCells() {
+      final cells = <List<String>>[
+        ['#', 'Time', 'Triacetin %', 'Regular wt (g)', 'Dry wt (g)', 'Rods']
+      ];
+      var i = 0;
+      for (final t in _triacetin) {
+        i++;
+        cells.add([
+          '$i', _fmtTime(t['time']), _f(t['triacetin_pct']),
+          _f(t['regular_weight']), _f(t['dry_weight']), _s(t['n'], ''),
+        ]);
+      }
+      return cells;
+    }
+
     doc.addPage(pw.MultiPage(
       pageFormat: PdfPageFormat.a4,
       margin: const pw.EdgeInsets.all(28),
@@ -198,6 +222,15 @@ class _QualityReportDialogState extends State<QualityReportDialog> {
             headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 8),
             cellStyle: const pw.TextStyle(fontSize: 8),
             headerDecoration: const pw.BoxDecoration(color: PdfColors.grey300)),
+        if (_triacetin.isNotEmpty) ...[
+          section('Triacetin'),
+          pw.Table.fromTextArray(
+              headers: triacetinCells().first,
+              data: triacetinCells().sublist(1),
+              headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 8),
+              cellStyle: const pw.TextStyle(fontSize: 8),
+              headerDecoration: const pw.BoxDecoration(color: PdfColors.grey300)),
+        ],
         if (_s(r['remarks'], '').trim().isNotEmpty)
           pw.Padding(
               padding: const pw.EdgeInsets.only(top: 8),
@@ -240,6 +273,7 @@ class _QualityReportDialogState extends State<QualityReportDialog> {
   Widget _preview(Map<String, dynamic> r) {
     final autoRows = _autoRows;
     final manual = _manualChecks;
+    final triacetin = _triacetin;
     Widget kv(String l, String v) => Padding(
           padding: const EdgeInsets.symmetric(vertical: 1),
           child: Row(children: [
@@ -294,6 +328,21 @@ class _QualityReportDialogState extends State<QualityReportDialog> {
       ]));
     }
 
+    final triacetinTableRows = <TableRow>[
+      TableRow(children: [
+        for (final c in ['#', 'Time', 'Triacetin %', 'Regular wt (g)', 'Dry wt (g)', 'Rods'])
+          _th(c)
+      ]),
+    ];
+    var k = 0;
+    for (final t in triacetin) {
+      k++;
+      triacetinTableRows.add(TableRow(children: [
+        _td('$k'), _td(_fmtTime(t['time'])), _td(_f(t['triacetin_pct'])),
+        _td(_f(t['regular_weight'])), _td(_f(t['dry_weight'])), _td(_s(t['n'], '')),
+      ]));
+    }
+
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       const Text('Header', style: TextStyle(fontWeight: FontWeight.bold)),
       kv('PO Number', _s(r['po_number'])),
@@ -312,6 +361,12 @@ class _QualityReportDialogState extends State<QualityReportDialog> {
           style: TextStyle(fontWeight: FontWeight.bold)),
       const SizedBox(height: 4),
       Table(border: TableBorder.all(color: Colors.grey.shade300), children: manualTableRows),
+      if (triacetin.isNotEmpty) ...[
+        const SizedBox(height: 12),
+        const Text('Triacetin', style: TextStyle(fontWeight: FontWeight.bold)),
+        const SizedBox(height: 4),
+        Table(border: TableBorder.all(color: Colors.grey.shade300), children: triacetinTableRows),
+      ],
       if (_s(r['remarks'], '').trim().isNotEmpty)
         Padding(
           padding: const EdgeInsets.only(top: 8),

@@ -71,19 +71,31 @@ def parse_report_consumption(report: Any) -> List[Dict[str, Any]]:
 
 
 def aggregate_consumption(reports: List[Any]) -> List[Dict[str, Any]]:
-    """Sum consumption across all (approved) reports, merging equal type+batch."""
-    merged: Dict[Tuple[str, str, str, str], float] = {}
-    order: List[Tuple[str, str, str, str]] = []
+    """Sum consumption across all (approved) reports, merging equal type.
+
+    Multi-batch entries of the same material are summed into a single total so
+    each material is written to Odoo once (the batch label is kept for reference).
+    """
+    merged: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    order: List[Tuple[str, str, str]] = []
     for report in reports:
         for item in parse_report_consumption(report):
-            key = (item["category"], item["type_name"], item["unit"], item["batch"])
+            key = (item["category"], item["type_name"], item["unit"])
             if key not in merged:
                 order.append(key)
-                merged[key] = 0.0
-            merged[key] += item["used"]
+                merged[key] = {"used": 0.0, "batch": item["batch"]}
+            merged[key]["used"] += item["used"]
+            if not merged[key]["batch"] and item["batch"]:
+                merged[key]["batch"] = item["batch"]
     return [
-        {"category": c, "type_name": t, "used": merged[(c, t, u, b)], "unit": u, "batch": b}
-        for (c, t, u, b) in order
+        {
+            "category": c,
+            "type_name": t,
+            "used": merged[(c, t, u)]["used"],
+            "unit": u,
+            "batch": merged[(c, t, u)]["batch"],
+        }
+        for (c, t, u) in order
     ]
 
 

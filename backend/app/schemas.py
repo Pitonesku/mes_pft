@@ -112,6 +112,8 @@ class POBase(BaseModel):
 class POCreate(POBase):
     diameter_tolerance: Optional[float] = None  # ± tolerance override for diameter
     pd_tolerance: Optional[float] = None        # ± tolerance override for pressure drop
+    triacetin: Optional[float] = None           # target triacetin content (%)
+    triacetin_tolerance: Optional[float] = None # ± tolerance (percentage points)
 
 
 class PO(POBase):

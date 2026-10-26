@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Triacetin target/tolerance + dry-batch measurement (2026-10-22, migration 0025)
+- **Triacetin, % as a first-class quality parameter**: added `triacetin` / `triacetin_tolerance` to `quality_settings` (factory defaults `8.0` / `0.5`, used only for locally-created MOs) and to `purchase_orders` (per-item target). `_apply_po_tolerance_specs` and the Odoo inbound `_upsert_po_specs` now upsert a `quality_specs` row `parameter='triacetin'` (unit `%`, 2 decimals); the certificate matrix (`CERTIFICATE_PARAMS`, `_PARAM_META`, Flutter report tables) renders the new row.
+- **Odoo MO flow**: for Odoo-pushed MOs the effective triacetin target/tolerance come from the Odoo product spec (overridable in the Odoo MO "Quality" tab) via `spec.triacetin` / `spec.triacetin_tolerance` — MES Settings are *not* applied to Odoo orders.
+- **Dry-batch detection**: `quality_samples.is_triacetin` marks a station batch as "without triacetin" when `Sample ID` / `Batch Description` / `Comments` contains "Triacetin" (case-insensitive), set at ingest and in the station watcher.
+- **Measurement + pairing** (`quality_stats.triacetin_measurements`, pure): a dry batch is paired with the nearest regular batch with the same rod count within ±5 minutes (before or after, whichever is closer). `triacetin % = (regular − dry) / dry × 100`.
+- **Dry batches excluded from every statistic** (PD/diameter/weight/etc.) in `load_rods`, `compute_order_summary` and the shift summary; the computed triacetin % is injected into the certificate row + `parameters`.
+- **Quality report**: the shift/order quality report gains a "Triacetin" table (`# / Time / Triacetin % / Regular wt / Dry wt / Rods`) in `pdf_generator.py` and the Flutter `quality_report_dialog.dart`.
+- **Web UI**: PO form "Tech Specs" gains `Triacetin %` + `Triacetin Tol ± (%)` (prefilled from Settings); Settings → Quality & Tolerances gains `Triacetin Target (%)` + `Triacetin Tolerance ± (%)`; the PO detail Filter Specs and the quality summary card show the triacetin row.
+
 ### Configurable Odoo dispatch timing (2026-10-11)
 - The previously hardcoded dispatcher timing is now configurable via `PUT /api/v2/odoo/sync-settings` (and the web "Odoo Integration" screen): `odoo_verification_wait_minutes` (default 10), `odoo_error_retry_minutes` (default 5), `odoo_max_attempts` (default 5) and `odoo_poll_seconds` (default 30). Stored in `system_settings`, read by `outbound.py` helpers and the dispatcher loop, with validation (ints, minimums).
 

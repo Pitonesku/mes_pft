@@ -270,6 +270,10 @@ def _apply_po_spec(po, spec: Dict[str, Any]) -> None:
         po.weight = _f(spec.get("weight"))
     if spec.get("box_type") is not None:
         po.box_type = int(spec.get("box_type"))
+    if spec.get("triacetin") is not None:
+        po.triacetin = _f(spec.get("triacetin"))
+    if spec.get("triacetin_tolerance") is not None:
+        po.triacetin_tolerance = _f(spec.get("triacetin_tolerance"))
 
 
 def _apply_material_types(po, bom: List[Dict[str, Any]]) -> None:
@@ -314,7 +318,7 @@ def _default_diameter_tolerance(session: Session) -> float:
 
 def _upsert_po_specs(session: Session, po, spec: Dict[str, Any]) -> None:
     """Upsert per-PO QualitySpec rows for the parameters present in the spec."""
-    for parameter in ("diameter", "pd", "weight", "length", "hardness"):
+    for parameter in ("diameter", "pd", "weight", "length", "hardness", "triacetin"):
         nominal = spec.get(parameter)
         if nominal is None:
             continue
@@ -352,8 +356,15 @@ def _upsert_po_specs(session: Session, po, spec: Dict[str, Any]) -> None:
         row.lower_limit = lower
         row.upper_limit = upper
         if parameter == "weight":
-            row.report_unit = "g/100 rods"
-            row.report_scale = 100
+            # Odoo reports filter-rod weight in mg/rod (e.g. 666 mg). Store it in
+            # report units with scale 1000 so build_param_specs divides back to
+            # g/rod (0.666) and the rejection bounds match the measurement.
+            row.report_unit = "mg"
+            row.report_scale = 1000
+        elif parameter == "triacetin":
+            row.report_unit = "%"
+            row.report_scale = 1
+            row.decimals = 2
 
 
 _FILLER_TOKENS = ("tow", "kg", "glue", "cold glue", "acetate", "filter", "rod", "hot melt", "hotmelt")
@@ -539,6 +550,39 @@ MO_LINK_FIELDS = [
 ]
 
 
+def _box_type_from_odoo(client: OdooClient, product_id: Any) -> Optional[int]:
+    """Compute rods-per-box from the finished product's Base Packaging.
+
+    Mirrors mes_integration's ``_box_type_from_base_packaging``: the product UoM is
+    ``1000pcs`` (factor 0.001), so ``qty / factor`` yields rods per box
+    (e.g. 4.7 / 0.001 = 4700). Returns None when it cannot be resolved.
+    """
+    if not product_id:
+        return None
+    pid = int(product_id)
+    try:
+        pkgs = client.search_read(
+            "product.packaging",
+            [["product_id", "=", pid], ["is_base_packaging", "=", True]],
+            ["qty", "product_uom_id"],
+            limit=1,
+        )
+        if not pkgs:
+            return None
+        qty = float(pkgs[0].get("qty") or 0)
+        uom = pkgs[0].get("product_uom_id")  # XML-RPC Many2one -> [id, name]
+        uom_id = int(uom[0]) if isinstance(uom, (list, tuple)) and uom else None
+        if not uom_id:
+            return None
+        uoms = client.search_read("uom.uom", [["id", "=", uom_id]], ["factor"], limit=1)
+        factor = float(uoms[0].get("factor") or 0) if uoms else 0.0
+        if not qty or not factor:
+            return None
+        return int(round(qty / factor))
+    except Exception:
+        return None
+
+
 def link_order(
     session: Session,
     client: OdooClient,
@@ -560,6 +604,7 @@ def link_order(
     if not mo:
         raise ValueError(f"Odoo MO {odoo_mo_id} not found")
     mo = mo[0]
+    box_type = _box_type_from_odoo(client, mo.get("product_id"))
     name = str(mo.get("name") or "").strip()
     origin = str(mo.get("origin") or "").strip()
 
@@ -620,6 +665,8 @@ def link_order(
     po.odoo_state = state
     po.source = "odoo"
     po.odoo_linked_at = datetime.now(timezone.utc)
+    if box_type:
+        po.box_type = box_type
     # Linking never enables posting: sync_mode keeps its value (default link_only)
     # and is promoted explicitly via PUT /orders/{id}/sync-mode.
     session.commit()

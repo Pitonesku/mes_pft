@@ -169,11 +169,22 @@ class _QualitySummaryCardState extends State<QualitySummaryCard> {
   }
 
   Widget _table(Map<String, dynamic> params) {
-    const order = ['diameter', 'pd', 'weight'];
+    const order = ['diameter', 'pd', 'weight', 'hardness', 'length', 'triacetin'];
     const labels = {
       'diameter': 'Diameter',
       'pd': 'Pressure Drop (PD)',
       'weight': 'Weight',
+      'hardness': 'Hardness',
+      'length': 'Length',
+      'triacetin': 'Triacetin',
+    };
+    const decimals = {
+      'diameter': 2,
+      'pd': 0,
+      'weight': 3,
+      'hardness': 1,
+      'length': 0,
+      'triacetin': 2,
     };
     String f(dynamic v, [int d = 3]) =>
         v == null ? '-' : (v is num ? v.toStringAsFixed(d) : '$v');
@@ -215,11 +226,11 @@ class _QualitySummaryCardState extends State<QualitySummaryCard> {
                   child: Text(labels[k]!, style: const TextStyle(fontSize: 11))),
               Padding(
                   padding: const EdgeInsets.all(4),
-                  child: Text(f((params[k] as Map)['mean']),
+                  child: Text(f((params[k] as Map)['mean'], decimals[k] ?? 3),
                       style: const TextStyle(fontSize: 11))),
               Padding(
                   padding: const EdgeInsets.all(4),
-                  child: Text(f((params[k] as Map)['sd_samp']),
+                  child: Text(f((params[k] as Map)['sd_samp'], decimals[k] ?? 3),
                       style: const TextStyle(fontSize: 11))),
               Padding(
                   padding: const EdgeInsets.all(4),

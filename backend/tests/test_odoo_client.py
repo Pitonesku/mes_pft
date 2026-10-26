@@ -124,6 +124,48 @@ class WriteMoQualityTests(unittest.TestCase):
             "glue seam checked | hardness spot check",
         )
 
+    def test_writes_triacetin_overall(self):
+        c = FakeClient()
+        run = {
+            "status": "PASS",
+            "rods_total": 20,
+            "rods_rejected": 0,
+            "triacetin_overall": 8.2,
+            "parameters": {"pd": {"n": 10, "mean": 325.0, "sd_samp": 8.1}},
+        }
+        c.write_mo_quality(5, run)
+        values = c.written[0][2]
+        self.assertEqual(values[odoo_client.QC_FIELD_MEAN_TRIACETIN], 8.2)
+
+    def test_triacetin_only_is_written(self):
+        c = FakeClient()
+        run = {
+            "status": "PASS",
+            "rods_total": 0,
+            "rods_rejected": 0,
+            "triacetin_overall": 7.9,
+            "parameters": {},
+        }
+        result = c.write_mo_quality(5, run)
+        self.assertFalse(result.get("skipped"))
+        values = c.written[0][2]
+        self.assertEqual(values[odoo_client.QC_FIELD_MEAN_TRIACETIN], 7.9)
+
+
+class WriteFinalQualityTests(unittest.TestCase):
+    def test_writes_final_triacetin(self):
+        c = FakeClient()
+        summary = {
+            "status": "PASS",
+            "rods_total": 100,
+            "rods_rejected": 2,
+            "triacetin_overall": 8.0,
+            "parameters": {"pd": {"n": 100, "mean": 325.0, "sd_samp": 8.1}},
+        }
+        c.write_final_quality(1, summary)
+        values = c.written[0][2]
+        self.assertEqual(values[odoo_client.QC_FINAL_MEAN_TRIACETIN], 8.0)
+
 
 if __name__ == "__main__":
     unittest.main()

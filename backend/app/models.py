@@ -126,7 +126,9 @@ class PurchaseOrder(Base):
     cu = Column(Integer)
     weight = Column(Numeric(6, 2))
     box_type = Column(Integer)
-    
+    triacetin = Column(Numeric(6, 3), nullable=True)           # target triacetin content (%)
+    triacetin_tolerance = Column(Numeric(6, 3), nullable=True)  # +/- tolerance (percentage points)
+
     # Состав материалов
     acetate_type = Column(String(100))
     paper_type = Column(String(100))
@@ -555,6 +557,8 @@ class QualitySettings(Base):
     id = Column(Integer, primary_key=True, index=True)
     diameter_tolerance = Column(Numeric, nullable=False, default=0.03)
     pd_tolerance = Column(Numeric, nullable=False, default=20)
+    triacetin_target = Column(Numeric, nullable=False, default=8.0)
+    triacetin_tolerance = Column(Numeric, nullable=False, default=0.5)
     pd_sd_warn = Column(Numeric, nullable=False, default=12)
     pd_sd_fail = Column(Numeric, nullable=False, default=15)
     dia_sd_warn = Column(Numeric, nullable=False, default=0.013)
@@ -586,6 +590,7 @@ class QualitySample(Base):
     file_sha256 = Column(String(64), nullable=True, unique=True)
     file_md5 = Column(String(32), nullable=True)
     custom_metrics = Column(JSONB, nullable=True)        # {label: {n, mean, sd_samp, sd_pop, min, max, unit}}
+    is_triacetin = Column(Boolean, nullable=False, default=False)  # "dry" batch (rods without triacetin)
 
 
 class QualityMeasurement(Base):

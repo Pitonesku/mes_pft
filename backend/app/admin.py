@@ -8,6 +8,9 @@ AllUniqueStringValuesFilter, StaticValuesFilter) -- raw model attributes
 or plain strings are NOT valid column_filters in sqladmin >= 0.14.
 """
 import os
+import threading
+import time
+
 import bcrypt
 from sqladmin import Admin, ModelView
 from sqladmin.authentication import AuthenticationBackend
@@ -28,10 +31,12 @@ if __package__:
     models = importlib.import_module(f"{__package__}.models")
     database_mod = importlib.import_module(f"{__package__}.database")
     security_config = importlib.import_module(f"{__package__}.security_config")
+    password_utils = importlib.import_module(f"{__package__}.password_utils")
     SessionLocal = database_mod.SessionLocal
 else:
     import models
     import security_config
+    import password_utils
     from database import SessionLocal, engine as _engine
     class _DB:
         engine = _engine
@@ -40,13 +45,39 @@ else:
 
 def _verify_sqladmin_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a password against a bcrypt hash for SQLAdmin login.
-    Falls back to direct comparison for legacy plain-text hashes."""
-    try:
-        return bcrypt.checkpw(
-            plain_password.encode('utf-8'), hashed_password.encode('utf-8')
-        )
-    except (ValueError, TypeError):
-        return plain_password == hashed_password
+
+    Delegates to password_utils.verify_password (bcrypt-only): legacy plain-text
+    and empty stored values are never accepted as valid credentials."""
+    return password_utils.verify_password(plain_password, hashed_password)
+
+
+# --- Brute-force throttle for the /admin login (in-memory, per-process) ------
+# Mirrors the API-login throttle in main.py. Keyed by username.
+_ADMIN_FAILURES: dict = {}
+_ADMIN_FAILURES_LOCK = threading.Lock()
+_ADMIN_MAX_FAILURES = 5
+_ADMIN_FAILURE_WINDOW_SECONDS = 300
+
+
+def _admin_throttled(username: str) -> bool:
+    now = time.time()
+    with _ADMIN_FAILURES_LOCK:
+        attempts = [t for t in _ADMIN_FAILURES.get(username, []) if now - t < _ADMIN_FAILURE_WINDOW_SECONDS]
+        _ADMIN_FAILURES[username] = attempts
+        return len(attempts) >= _ADMIN_MAX_FAILURES
+
+
+def _admin_record_failure(username: str) -> None:
+    now = time.time()
+    with _ADMIN_FAILURES_LOCK:
+        attempts = [t for t in _ADMIN_FAILURES.get(username, []) if now - t < _ADMIN_FAILURE_WINDOW_SECONDS]
+        attempts.append(now)
+        _ADMIN_FAILURES[username] = attempts
+
+
+def _admin_clear_failures(username: str) -> None:
+    with _ADMIN_FAILURES_LOCK:
+        _ADMIN_FAILURES.pop(username, None)
 
 
 class AdminAuthentication(AuthenticationBackend):
@@ -62,6 +93,11 @@ class AdminAuthentication(AuthenticationBackend):
         form = await request.form()
         username = form.get("username")
         password = form.get("password")
+        if not username:
+            return False
+        if _admin_throttled(username):
+            return False
+
         db = SessionLocal()
         try:
             user = db.query(models.User).filter(
@@ -70,12 +106,14 @@ class AdminAuthentication(AuthenticationBackend):
             ).first()
             if user and _verify_sqladmin_password(password, user.password_hash) and user.role:
                 if user.role.can_manage_users or user.role.role_name.lower() in ("admin", "superadmin"):
+                    _admin_clear_failures(username)
                     request.session["user"] = {
                         "user_id": user.id,
                         "username": user.username,
                         "role_id": user.role_id,
                     }
                     return True
+            _admin_record_failure(username)
             return False
         finally:
             db.close()

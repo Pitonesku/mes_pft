@@ -18,6 +18,8 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   final _diaTol = TextEditingController();
   final _pdTol = TextEditingController();
+  final _triTarget = TextEditingController();
+  final _triTol = TextEditingController();
   final _pdWarn = TextEditingController();
   final _pdFail = TextEditingController();
   final _diaWarn = TextEditingController();
@@ -33,7 +35,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   void dispose() {
-    for (final c in [_diaTol, _pdTol, _pdWarn, _pdFail, _diaWarn, _diaFail]) {
+    for (final c in [_diaTol, _pdTol, _triTarget, _triTol, _pdWarn, _pdFail, _diaWarn, _diaFail]) {
       c.dispose();
     }
     super.dispose();
@@ -46,6 +48,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() {
       _diaTol.text = '${s?['diameter_tolerance'] ?? ''}';
       _pdTol.text = '${s?['pd_tolerance'] ?? ''}';
+      _triTarget.text = '${s?['triacetin_target'] ?? ''}';
+      _triTol.text = '${s?['triacetin_tolerance'] ?? ''}';
       _pdWarn.text = '${s?['pd_sd_warn'] ?? ''}';
       _pdFail.text = '${s?['pd_sd_fail'] ?? ''}';
       _diaWarn.text = '${s?['dia_sd_warn'] ?? ''}';
@@ -61,6 +65,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final r = await ApiService.updateQualitySettings({
       'diameter_tolerance': _p(_diaTol),
       'pd_tolerance': _p(_pdTol),
+      'triacetin_target': _p(_triTarget),
+      'triacetin_tolerance': _p(_triTol),
       'pd_sd_warn': _p(_pdWarn),
       'pd_sd_fail': _p(_pdFail),
       'dia_sd_warn': _p(_diaWarn),
@@ -180,6 +186,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 Expanded(child: _f(_diaTol, 'Diameter Tolerance ± (mm)')),
                 const SizedBox(width: 16),
                 Expanded(child: _f(_pdTol, 'PD Tolerance ± (mm WG)')),
+              ]),
+              const SizedBox(height: 12),
+              Row(children: [
+                Expanded(child: _f(_triTarget, 'Triacetin Target (%)')),
+                const SizedBox(width: 16),
+                Expanded(child: _f(_triTol, 'Triacetin Tolerance ± (%)')),
               ]),
             ]),
             _card('Standard Deviation Thresholds (Yellow / Red)', [

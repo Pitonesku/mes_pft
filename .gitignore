@@ -64,3 +64,7 @@ data_bridge.log
 # Logs (any)
 *.log
 
+
+# Flutter analyzer/build logs
+frontend/analyze_*.txt
+frontend/build_*.txt

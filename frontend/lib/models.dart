@@ -90,6 +90,8 @@ class PurchaseOrder {
   final int boxType;
   final double? diameterTolerance; // ± tolerance override for diameter
   final double? pdTolerance;       // ± tolerance override for pressure drop
+  final double triacetin;          // target triacetin content (%)
+  final double? triacetinTolerance; // ± tolerance (percentage points)
   final String source;              // 'odoo' | 'local'
   final Map<String, dynamic>? allowedMaterials; // category -> [{material_id, product_name}]
   final int? odooMoId;              // root mrp.production id
@@ -118,6 +120,7 @@ class PurchaseOrder {
     required this.targetQty, this.producedQty = 0, this.isHidden = false,
     this.isArchived = false,
     this.diameterTolerance, this.pdTolerance,
+    this.triacetin = 0, this.triacetinTolerance,
     this.source = 'local', this.allowedMaterials,
     this.odooMoId, this.odooMoName,
   });
@@ -142,6 +145,8 @@ class PurchaseOrder {
       boxType: json['box_type'] ?? 0,
       diameterTolerance: (json['diameter_tolerance'] as num?)?.toDouble(),
       pdTolerance: (json['pd_tolerance'] as num?)?.toDouble(),
+      triacetin: (json['triacetin'] ?? 0).toDouble(),
+      triacetinTolerance: (json['triacetin_tolerance'] as num?)?.toDouble(),
       acetateType: json['acetate_type'] ?? '',
       paperType: json['paper_type'] ?? '',
       pvaGlueType: json['pva_glue_type'] ?? '',
@@ -175,6 +180,8 @@ class PurchaseOrder {
     'box_type': boxType,
     if (diameterTolerance != null) 'diameter_tolerance': diameterTolerance,
     if (pdTolerance != null) 'pd_tolerance': pdTolerance,
+    if (triacetin != 0) 'triacetin': triacetin,
+    if (triacetinTolerance != null) 'triacetin_tolerance': triacetinTolerance,
     'acetate_type': acetateType,
     'paper_type': paperType,
     'pva_glue_type': pvaGlueType,

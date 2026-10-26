@@ -40,6 +40,7 @@ from app.quality_stats import (
     _num,
     compute_run_stats,
     certificate_rows,
+    is_triacetin_marker,
     manual_rods,
     merge_manual_parameters,
 )
@@ -74,7 +75,11 @@ def _role_name(user: models.User) -> str:
 
 
 def _is_admin(user: models.User) -> bool:
-    return _role_name(user) in ("admin", "superadmin") or user.username == "superadmin"
+    role = getattr(user, "role", None)
+    return (
+        _role_name(user) in ("admin", "superadmin")
+        or (role is not None and bool(getattr(role, "can_manage_users", False)))
+    )
 
 
 def _is_supervisor(user: models.User) -> bool:
@@ -151,6 +156,9 @@ def _bud_x_ms(dt: datetime) -> int:
     return int(bud.replace(tzinfo=timezone.utc).timestamp() * 1000)
 
 
+_SERIES_PARAM_KEYS = ("pd", "diameter", "weight", "hardness", "length")
+
+
 def _series_payload(specs: Dict, rods, max_points: int = 3000) -> Dict[str, Any]:
     pts = rods[-max_points:] if len(rods) > max_points else rods
     points = []
@@ -165,10 +173,12 @@ def _series_payload(specs: Dict, rods, max_points: int = 3000) -> Dict[str, Any]
             "pd": _num(r.pd),
             "diameter": _num(r.diameter),
             "weight": _num(r.weight),
+            "hardness": _num(r.hardness),
+            "length": _num(r.length),
             "rejected": _is_rejected({k: getattr(r, k) for k in _MEASURE_PARAM_KEYS}, specs) if specs else False,
         })
     params = {}
-    for key in ("pd", "diameter", "weight"):
+    for key in _SERIES_PARAM_KEYS:
         spec = specs.get(key)
         params[key] = {
             "target": _num(spec.nominal) if spec else None,
@@ -855,9 +865,14 @@ def _shift_quality_report_data(db: Session, shift) -> Dict[str, Any]:
     ]
 
     # Rod-level series for the trend charts (diameter / PD over the shift).
+    # Dry (triacetin) batches are excluded from the production trend lines.
     rods = (
         db.query(models.QualityMeasurement)
-        .filter(models.QualityMeasurement.shift_id == shift.id)
+        .join(models.QualitySample, models.QualityMeasurement.sample_id == models.QualitySample.id)
+        .filter(
+            models.QualityMeasurement.shift_id == shift.id,
+            models.QualitySample.is_triacetin.is_(False),
+        )
         .order_by(models.QualityMeasurement.measured_at, models.QualityMeasurement.id)
         .all()
     )
@@ -865,6 +880,17 @@ def _shift_quality_report_data(db: Session, shift) -> Dict[str, Any]:
         "diameter": [v for v in (_num(r.diameter) for r in rods) if v is not None],
         "pd": [v for v in (_num(r.pd) for r in rods) if v is not None],
     }
+
+    triacetin = [
+        {
+            "time": _bud(m["time"]).strftime("%H:%M") if m.get("time") else None,
+            "triacetin_pct": m.get("triacetin_pct"),
+            "regular_weight": m.get("regular_weight"),
+            "dry_weight": m.get("dry_weight"),
+            "n": m.get("n"),
+        }
+        for m in (summary.get("triacetin") or [])
+    ]
 
     header = {
         "po_number": po.po_number if po else None,
@@ -879,6 +905,8 @@ def _shift_quality_report_data(db: Session, shift) -> Dict[str, Any]:
         "header": header,
         "certificate": summary.get("certificate", []),
         "manual_checks": manual_checks,
+        "triacetin": triacetin,
+        "triacetin_overall": summary.get("triacetin_overall"),
         "series": series,
         "remarks": summary.get("remarks"),
     }
@@ -893,7 +921,11 @@ def _shift_quality_summary(db: Session, shift_id: int, run_id: Optional[int] = N
     specs = _load_shift_specs(db, shift_id)
     rods = (
         db.query(models.QualityMeasurement)
-        .filter(models.QualityMeasurement.shift_id == shift_id)
+        .join(models.QualitySample, models.QualityMeasurement.sample_id == models.QualitySample.id)
+        .filter(
+            models.QualityMeasurement.shift_id == shift_id,
+            models.QualitySample.is_triacetin.is_(False),
+        )
         .all()
     )
     rod_dicts = [
@@ -918,6 +950,15 @@ def _shift_quality_summary(db: Session, shift_id: int, run_id: Optional[int] = N
     checks = checks_query.order_by(models.ManualQualityCheck.id).all()
     check_dicts = aggregation.manual_check_dicts(checks)
     merge_manual_parameters(stats["parameters"], manual_rods(check_dicts), specs)
+
+    tri = (
+        aggregation.compute_triacetin(db, run_id=run_id)
+        if run_id is not None
+        else aggregation.compute_triacetin(db, shift_id=shift_id)
+    )
+    cert_rows = certificate_rows(stats, specs)
+    aggregation.inject_triacetin_certificate(cert_rows, specs, tri["overall_pct"])
+    aggregation.inject_triacetin_parameters(stats["parameters"], specs, tri["overall_pct"])
     return {
         "status": stats["status"],
         "rods_total": stats["rods_total"],
@@ -925,10 +966,12 @@ def _shift_quality_summary(db: Session, shift_id: int, run_id: Optional[int] = N
         "rods_used": stats["rods_used"],
         "parameters": stats["parameters"],
         "automatic": auto_rows,
-        "certificate": certificate_rows(stats, specs),
+        "certificate": cert_rows,
         "remarks": aggregation.manual_remarks(check_dicts),
         "manual_measurements": aggregation.manual_measurements(stats["parameters"], check_dicts),
         "manual_checks": aggregation.manual_table_rows(check_dicts),
+        "triacetin": tri["measurements"],
+        "triacetin_overall": tri["overall_pct"],
     }
 
 
@@ -1083,7 +1126,8 @@ async def ingest_quality(
     run_id: Optional[int] = None
     if shift_id is not None:
         run_id, run_status = shift_resolver.resolve_run(
-            db, shift_id, produced_at, sample.mo_ref, machine_id=machine_id
+            db, shift_id, produced_at, sample.mo_ref, machine_id=machine_id,
+            sample_id=sample.sample_id,
         )
         if run_status == shift_resolver.LINK_MO_MISMATCH:
             link_status = shift_resolver.LINK_MO_MISMATCH
@@ -1101,6 +1145,7 @@ async def ingest_quality(
         batch_ended_at=local_to_utc(sample.batch_end),
         rods_declared=sample.rods_count,
         file_sha256=sha256,
+        is_triacetin=is_triacetin_marker(sample.sample_id, sample.reserve_2, sample.reserve_1),
         custom_metrics=profiles.compute_custom_metrics(sample, profile),
     )
     db.add(db_sample)
@@ -1140,7 +1185,8 @@ def relink_unlinked(
             s.shift_id = shift_id
             s.link_status = link_status
             run_id, run_status = shift_resolver.resolve_run(
-                db, shift_id, s.produced_at, s.mo_ref, machine_id=s.machine_id
+                db, shift_id, s.produced_at, s.mo_ref, machine_id=s.machine_id,
+                sample_id=s.sample_id,
             )
             if run_status == shift_resolver.LINK_MO_MISMATCH:
                 s.link_status = shift_resolver.LINK_MO_MISMATCH
@@ -1525,7 +1571,7 @@ def dispatch_odoo_now(
 
 
 def _require_superadmin(user: models.User) -> None:
-    if user.username != "superadmin":
+    if not _is_admin(user):
         raise HTTPException(status_code=403, detail="Admin only")
 
 
@@ -2234,6 +2280,46 @@ def _resolve_machine(db: Session, alias: str) -> Optional[models.Machine]:
     return None
 
 
+def _resolve_since(db: Session, machine_id: int, value: Optional[str]) -> Optional[datetime]:
+    if value == "shift_start":
+        shift = (
+            db.query(models.ShiftSession)
+            .filter(models.ShiftSession.machine_id == machine_id)
+            .order_by(models.ShiftSession.started_at.desc())
+            .first()
+        )
+        return shift.started_at if shift is not None else None
+    return _parse_iso_dt(value)
+
+
+def _parse_iso_dt(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=BUDAPEST)
+        return dt
+    except ValueError:
+        return None
+
+
+def _range_rods(db: Session, machine_id: int, since_dt: Optional[datetime], until_dt: datetime):
+    base = db.query(models.QualityMeasurement).filter(
+        models.QualityMeasurement.machine_id == machine_id
+    )
+    if since_dt is not None:
+        base = base.filter(models.QualityMeasurement.measured_at >= since_dt)
+    base = base.filter(models.QualityMeasurement.measured_at <= until_dt)
+    return (
+        base.order_by(
+            models.QualityMeasurement.measured_at,
+            models.QualityMeasurement.sample_id,
+            models.QualityMeasurement.rod_no,
+        ).all()
+    )
+
+
 def _windowed_rods(db: Session, machine_id: int, window_type: str, window_value: int, anchor_dt=None):
     base = db.query(models.QualityMeasurement).filter(models.QualityMeasurement.machine_id == machine_id)
     if anchor_dt is not None:
@@ -2309,6 +2395,8 @@ def machine_live_quality(
     window_type: str = Query(default="rods"),
     window_value: int = Query(default=50),
     anchor: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     machine = _resolve_machine(db, machine_alias)
@@ -2319,26 +2407,16 @@ def machine_live_quality(
     if window_value <= 0:
         window_value = 50
 
-    anchor_dt = None
-    if anchor == "shift_start":
-        shift = (
-            db.query(models.ShiftSession)
-            .filter(models.ShiftSession.machine_id == machine.id)
-            .order_by(models.ShiftSession.started_at.desc())
-            .first()
-        )
-        if shift is not None:
-            anchor_dt = shift.started_at
-    elif anchor:
-        try:
-            anchor_dt = datetime.fromisoformat(anchor)
-            if anchor_dt.tzinfo is None:
-                anchor_dt = anchor_dt.replace(tzinfo=BUDAPEST)
-        except ValueError:
-            anchor_dt = None
+    # `anchor` is retained for backward compatibility; `since` is canonical.
+    since_dt = _resolve_since(db, machine.id, since if since is not None else anchor)
+    until_dt = _parse_iso_dt(until)
 
     specs = _load_machine_specs(db, machine.id)
-    rods = _windowed_rods(db, machine.id, window_type, window_value, anchor_dt)
+    if until_dt is not None:
+        # Exact historical window: every rod in [since, until], chronological.
+        rods = _range_rods(db, machine.id, since_dt, until_dt)
+    else:
+        rods = _windowed_rods(db, machine.id, window_type, window_value, since_dt)
     rod_dicts = [{k: getattr(r, k) for k in _MEASURE_PARAM_KEYS} for r in rods]
     stats = compute_run_stats(rod_dicts, specs)
     params = stats.get("parameters", {})
@@ -2370,6 +2448,7 @@ def machine_live_quality(
         "sd_dia_mm": sd_dia,
         "sd_dia_percent": sd_dia_percent,
         "status_dia": _sd_status(sd_dia, dia_warn, dia_fail),
+        "parameters": params,
         "series": _series_payload(specs, rods),
     }
 
@@ -2646,12 +2725,26 @@ def _specs_for_context(db: Session, machine_id: Optional[int], po_id: Optional[i
         specs = _load_machine_specs(db, machine_id)
         if specs:
             return specs, False
+    # No context selected (the "All" view): use the most recent order spec so
+    # rejection is still evaluated consistently instead of silently showing "OK".
+    recent = (
+        db.query(models.ProductionRun)
+        .filter(models.ProductionRun.po_id.isnot(None))
+        .order_by(models.ProductionRun.started_at.desc())
+        .first()
+    )
+    if recent is not None:
+        rows = db.query(models.QualitySpec).filter(models.QualitySpec.po_id == recent.po_id).all()
+        if rows:
+            return aggregation.build_param_specs(rows), False
     return {}, True
 
 
 class QualitySettingsPayload(BaseModel):
     diameter_tolerance: Optional[float] = None
     pd_tolerance: Optional[float] = None
+    triacetin_target: Optional[float] = None
+    triacetin_tolerance: Optional[float] = None
     pd_sd_warn: Optional[float] = None
     pd_sd_fail: Optional[float] = None
     dia_sd_warn: Optional[float] = None
@@ -2662,6 +2755,8 @@ def _settings_payload(s: models.QualitySettings) -> Dict[str, Any]:
     return {
         "diameter_tolerance": _num(s.diameter_tolerance) or 0.03,
         "pd_tolerance": _num(s.pd_tolerance) or 20.0,
+        "triacetin_target": _num(s.triacetin_target) or 8.0,
+        "triacetin_tolerance": _num(s.triacetin_tolerance) or 0.5,
         "pd_sd_warn": _num(s.pd_sd_warn) or 12.0,
         "pd_sd_fail": _num(s.pd_sd_fail) or 15.0,
         "dia_sd_warn": _num(s.dia_sd_warn) or 0.013,
@@ -2681,7 +2776,8 @@ def update_quality_settings(
     current_user: models.User = Depends(get_current_user),
 ):
     s = _load_quality_settings(db)
-    for field in ("diameter_tolerance", "pd_tolerance", "pd_sd_warn", "pd_sd_fail", "dia_sd_warn", "dia_sd_fail"):
+    for field in ("diameter_tolerance", "pd_tolerance", "triacetin_target", "triacetin_tolerance",
+                  "pd_sd_warn", "pd_sd_fail", "dia_sd_warn", "dia_sd_fail"):
         v = getattr(payload, field)
         if v is not None:
             setattr(s, field, v)
@@ -2819,6 +2915,19 @@ def _quality_report_payload(
     MO scope (``po_id``) is the average across every shift of the order;
     shift scope is a single shift's station + manual data.
     """
+
+    def _triacetin_payload(measurements) -> List[Dict[str, Any]]:
+        return [
+            {
+                "time": m.get("time").isoformat() if m.get("time") else None,
+                "triacetin_pct": m.get("triacetin_pct"),
+                "regular_weight": m.get("regular_weight"),
+                "dry_weight": m.get("dry_weight"),
+                "n": m.get("n"),
+            }
+            for m in (measurements or [])
+        ]
+
     base = {
         "po_number": header.get("po_number"),
         "spec_string": header.get("spec"),
@@ -2836,6 +2945,8 @@ def _quality_report_payload(
             "automatic": s.get("automatic", []),
             "manual_measurements": s.get("manual_measurements"),
             "manual_checks": s.get("manual_checks", []),
+            "triacetin": _triacetin_payload(s.get("triacetin")),
+            "triacetin_overall": s.get("triacetin_overall"),
             "remarks": s.get("remarks"),
         }
     if shift is not None:
@@ -2847,6 +2958,8 @@ def _quality_report_payload(
             "automatic": s.get("automatic", []),
             "manual_measurements": s.get("manual_measurements"),
             "manual_checks": s.get("manual_checks", []),
+            "triacetin": _triacetin_payload(s.get("triacetin")),
+            "triacetin_overall": s.get("triacetin_overall"),
             "remarks": s.get("remarks"),
         }
     return None
@@ -3484,8 +3597,25 @@ def submit_manual_check(
         cut_quality_ok=payload.cut_quality_ok,
         visual_appearance_ok=payload.visual_appearance_ok,
     )
+
+    # Reject an ambiguous weight entry (e.g. "33.8" while 10 rods is selected)
+    # before persisting; the verdict carries a human-readable reason.
+    weight_verdict = verdicts.get("weight")
+    if weight_verdict and weight_verdict.get("error"):
+        raise HTTPException(status_code=422, detail=weight_verdict["error"])
+
     if not verdicts and not (payload.notes or "").strip():
         raise HTTPException(status_code=422, detail="Nothing to record: enter a value, a toggle or a note")
+
+    # Store the weight canonically as grams for the entered rod count, whatever
+    # unit the operator typed (g total, mg/rod, g/rod, mg total). Keeps the
+    # existing storage invariant so every downstream "÷ rods" stays correct.
+    canonical_weight = weight_verdict.get("value") if weight_verdict else None
+    canonical_rods = (
+        int(weight_verdict.get("sample_rods"))
+        if weight_verdict and weight_verdict.get("sample_rods")
+        else (payload.sample_rods if payload.sample_rods > 0 else manual_check_rules.DEFAULT_SAMPLE_RODS)
+    )
 
     check = models.ManualQualityCheck(
         shift_id=shift.id,
@@ -3494,8 +3624,8 @@ def submit_manual_check(
         po_id=run.po_id,
         mo_ref=run.mo_ref,
         operator_id=current_user.id,
-        sample_weight=payload.sample_weight,
-        sample_rods=payload.sample_rods if payload.sample_rods > 0 else manual_check_rules.DEFAULT_SAMPLE_RODS,
+        sample_weight=canonical_weight,
+        sample_rods=canonical_rods,
         length_mm=payload.length_mm,
         hardness=payload.hardness,
         glue_seam_ok=payload.glue_seam_ok,

@@ -83,6 +83,34 @@ class _ManualQualityChecksScreenState extends State<ManualQualityChecksScreen> {
     return 'Machine #$id';
   }
 
+  /// Live hint mirroring the server's weight auto-detection: shows the per-rod
+  /// interpretation (and the unit) so an operator can catch a mis-typed rod
+  /// count. The server remains the authoritative normaliser.
+  String? _weightHint() {
+    final raw = _weightCtrl.text.trim();
+    if (raw.isEmpty) return null;
+    final v = double.tryParse(raw.replaceAll(',', '.'));
+    if (v == null) return 'Not a number';
+    final rods = int.tryParse(_rodsCtrl.text.trim());
+    if (rods == null || rods <= 0) return null;
+    const lo = 0.2, hi = 1.0; // g/rod detection band (200-1000 mg)
+    final options = <String, double>{
+      'total g': v / rods,
+      'mg/rod': v / 1000,
+      'g/rod': v,
+      'total mg': v / (1000 * rods),
+    };
+    final plausible =
+        options.entries.where((e) => e.value >= lo && e.value <= hi).toList();
+    if (plausible.isEmpty) {
+      final loG = (lo * rods).toStringAsFixed(1);
+      final hiG = (hi * rods).toStringAsFixed(1);
+      return 'Doesn\'t fit $rods rods (expect ~$loG-$hiG g total, or 300-700 mg/rod)';
+    }
+    final pick = plausible.first;
+    return '→ ${(pick.value * 1000).round()} mg/rod (${pick.key})';
+  }
+
   Future<void> _submit() async {
     final c = _ctx;
     if (c == null || _submitting) return;
@@ -226,20 +254,35 @@ class _ManualQualityChecksScreenState extends State<ManualQualityChecksScreen> {
                 style: const TextStyle(color: Colors.orange)),
           ),
         const SizedBox(height: 16),
-        Row(children: [
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Expanded(
               flex: 3,
-              child: TextField(
-                  controller: _weightCtrl,
-                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                  decoration: const InputDecoration(
-                      labelText: 'Weight (g)', border: OutlineInputBorder()))),
+              child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    TextField(
+                        controller: _weightCtrl,
+                        keyboardType:
+                            const TextInputType.numberWithOptions(decimal: true),
+                        onChanged: (_) => setState(() {}),
+                        decoration: const InputDecoration(
+                            labelText: 'Weight (g total / mg per rod)',
+                            border: OutlineInputBorder())),
+                    if (_weightHint() != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2, left: 2),
+                        child: Text(_weightHint()!,
+                            style: const TextStyle(
+                                fontSize: 12, color: Colors.blueGrey)),
+                      ),
+                  ])),
           const SizedBox(width: 12),
           Expanded(
               flex: 2,
               child: TextField(
                   controller: _rodsCtrl,
                   keyboardType: TextInputType.number,
+                  onChanged: (_) => setState(() {}),
                   decoration: const InputDecoration(
                       labelText: 'per N rods', border: OutlineInputBorder()))),
           const SizedBox(width: 12),
@@ -317,6 +360,8 @@ class _ManualQualityChecksScreenState extends State<ManualQualityChecksScreen> {
     String flag(dynamic v) => v == null ? '-' : (v == true ? 'OK' : 'FAIL');
     final status = c['overall_status'] as String?;
     final w = c['sample_weight'];
+    final verdicts = c['verdicts'] as Map?;
+    final weightRejected = (verdicts?['weight'] as Map?)?['rejected'] == true;
     final when = (c['measured_at'] ?? c['created_at'] ?? '')
         .toString()
         .replaceFirst('T', ' ')
@@ -334,6 +379,7 @@ class _ManualQualityChecksScreenState extends State<ManualQualityChecksScreen> {
               : (status == 'PASS' ? Colors.green : Colors.grey)),
       title: Text('$when'
           '${w != null ? ' — ${w}g/${c['sample_rods'] ?? 10}' : ''}'
+          '${weightRejected ? '  ⚠ dropped (3×tol)' : ''}'
           '${c['length_mm'] != null ? '  L:${c['length_mm']}' : ''}'
           '${c['hardness'] != null ? '  H:${c['hardness']}%' : ''}'),
       subtitle: Text('glue:${flag(c['glue_seam_ok'])} cut:${flag(c['cut_quality_ok'])} '

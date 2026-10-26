@@ -13,7 +13,7 @@ class ApiService {
   static const String _baseUrlPrefKey = 'server_base_url';
 
   /// Default fallback URL used when no URL has been saved yet.
-  static const String _defaultBaseUrl = "http://10.10.0.202:8001/api";
+  static const String _defaultBaseUrl = "http://10.10.0.202:8000/api";
 
   /// Android/desktop: absolute URL to the backend server.
   /// This is mutable so it can be updated at runtime via [reinitialize].
@@ -924,11 +924,13 @@ class ApiService {
     String machine, {
     String windowType = 'rods',
     int windowValue = 50,
-    String? anchor,
+    String? since,
+    String? until,
   }) async {
     try {
       final qp = <String, String>{'window_type': windowType, 'window_value': '$windowValue'};
-      if (anchor != null) qp['anchor'] = anchor;
+      if (since != null) qp['since'] = since;
+      if (until != null) qp['until'] = until;
       final uri = Uri.parse('$effectiveBaseUrl/v2/machines/${Uri.encodeComponent(machine)}/live-quality')
           .replace(queryParameters: qp);
       final response = await _httpClient.get(uri).timeout(const Duration(seconds: 15));

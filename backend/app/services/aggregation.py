@@ -16,15 +16,20 @@ import hashlib
 import json
 from typing import Any, Dict, Iterable, List, Optional
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app import models
 from app.quality_stats import (
+    STATUS_NOT_MEASURED,
+    STATUS_PASS,
     ParamSpec,
     certificate_rows,
     compute_run_stats,
     manual_rods,
     merge_manual_parameters,
+    triacetin_measurements,
+    triacetin_status,
 )
 
 
@@ -38,7 +43,7 @@ def build_param_specs(specs: Iterable[models.QualitySpec]) -> Dict[str, ParamSpe
         report_scale = _f(s.report_scale) or 1.0
         report_unit = s.report_unit or ""
         if s.parameter == "weight":
-            # Weight specs are stored in report units (g/100 rods) when the nominal
+            # Weight specs are stored in report units (mg/rod) when the nominal
             # is implausibly large for a single rod. Normalize to g/rod so rejection
             # bounds compare like-for-like against the per-rod measurement, and
             # report weight in mg/rod (g/rod x 1000).
@@ -86,10 +91,18 @@ def load_run_specs(session: Session, run: models.ProductionRun) -> Dict[str, Par
 
 
 def load_rods(session: Session, run_id: int) -> List[Dict[str, Optional[float]]]:
-    """Return the run's rods as the dict shape quality_stats expects, in order."""
+    """Return the run's PRODUCTION rods as the dict shape quality_stats expects.
+
+    Dry (``is_triacetin``) batches are excluded from every statistic; they are
+    only used to compute the triacetin percentage (see ``compute_triacetin``).
+    """
     rods = (
         session.query(models.QualityMeasurement)
-        .filter(models.QualityMeasurement.run_id == run_id)
+        .join(models.QualitySample, models.QualityMeasurement.sample_id == models.QualitySample.id)
+        .filter(
+            models.QualityMeasurement.run_id == run_id,
+            models.QualitySample.is_triacetin.is_(False),
+        )
         .order_by(
             models.QualityMeasurement.measured_at,
             models.QualityMeasurement.sample_id,
@@ -109,6 +122,114 @@ def load_rods(session: Session, run_id: int) -> List[Dict[str, Optional[float]]]
         }
         for r in rods
     ]
+
+
+def load_triacetin_samples(
+    session: Session,
+    run_id: Optional[int] = None,
+    run_ids: Optional[List[int]] = None,
+    shift_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Chronological batch summaries (regular + dry) for triacetin pairing.
+
+    Each entry carries ``time`` (produced_at), ``is_triacetin``, ``rod_count``
+    (actual measured rods, falling back to ``rods_declared``) and ``weight``
+    (mean weight per rod for that batch).
+    """
+    q = session.query(models.QualitySample)
+    if run_ids:
+        q = q.filter(models.QualitySample.run_id.in_(run_ids))
+    elif run_id is not None:
+        q = q.filter(models.QualitySample.run_id == run_id)
+    elif shift_id is not None:
+        q = q.filter(models.QualitySample.shift_id == shift_id)
+    else:
+        return []
+
+    samples = q.order_by(models.QualitySample.produced_at, models.QualitySample.id).all()
+    result: List[Dict[str, Any]] = []
+    for s in samples:
+        rod_count = (
+            session.query(func.count(models.QualityMeasurement.id))
+            .filter(models.QualityMeasurement.sample_id == s.id)
+            .scalar()
+        ) or (s.rods_declared or 0)
+        mean_w = (
+            session.query(func.avg(models.QualityMeasurement.weight))
+            .filter(
+                models.QualityMeasurement.sample_id == s.id,
+                models.QualityMeasurement.weight.isnot(None),
+            )
+            .scalar()
+        )
+        result.append({
+            "time": s.produced_at,
+            "is_triacetin": bool(s.is_triacetin),
+            "rod_count": int(rod_count or 0),
+            "weight": _f(mean_w),
+        })
+    return result
+
+
+def compute_triacetin(
+    session: Session,
+    run_id: Optional[int] = None,
+    run_ids: Optional[List[int]] = None,
+    shift_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Compute paired triacetin percentages for a run / set of runs / shift."""
+    return triacetin_measurements(
+        load_triacetin_samples(session, run_id=run_id, run_ids=run_ids, shift_id=shift_id)
+    )
+
+
+def inject_triacetin_certificate(
+    rows: List[Dict[str, Any]],
+    specs: Dict[str, ParamSpec],
+    overall_pct: Optional[float],
+) -> List[Dict[str, Any]]:
+    """Fill the certificate's Triacetin row with the computed percentage."""
+    spec = specs.get("triacetin")
+    for row in rows:
+        if row.get("parameter") == "triacetin":
+            row["mean"] = overall_pct
+            row["sd"] = None
+            row["n"] = None
+            row["source"] = "triacetin" if overall_pct is not None else "not_measured"
+            row["status"] = (
+                triacetin_status(overall_pct, spec)
+                if spec is not None
+                else (STATUS_NOT_MEASURED if overall_pct is None else STATUS_PASS)
+            )
+    return rows
+
+
+def inject_triacetin_parameters(
+    parameters: Dict[str, Any],
+    specs: Dict[str, ParamSpec],
+    overall_pct: Optional[float],
+) -> None:
+    """Mirror the computed triacetin % into the ``parameters`` roll-up (for cards)."""
+    spec = specs.get("triacetin")
+    entry = parameters.get("triacetin")
+    if entry is None:
+        if spec is None:
+            return
+        entry = {
+            "nominal": spec.nominal, "lower": spec.lower, "upper": spec.upper,
+            "report_unit": spec.report_unit, "report_scale": spec.report_scale,
+            "decimals": spec.decimals, "n": 0,
+        }
+        parameters["triacetin"] = entry
+    entry["mean"] = overall_pct
+    entry["sd_samp"] = None
+    entry["sd_pop"] = None
+    entry["source"] = "triacetin" if overall_pct is not None else "not_measured"
+    entry["status"] = (
+        triacetin_status(overall_pct, spec)
+        if spec is not None
+        else (STATUS_NOT_MEASURED if overall_pct is None else STATUS_PASS)
+    )
 
 
 def load_manual_checks(session: Session, run_id: int) -> List[models.ManualQualityCheck]:
@@ -216,7 +337,10 @@ def compute_run_summary(
     check_dicts = manual_check_dicts(load_manual_checks(session, run.id))
     merge_manual_parameters(stats["parameters"], manual_rods(check_dicts), specs)
 
+    tri = compute_triacetin(session, run_id=run.id)
     rows = certificate_rows(stats, specs, manual=manual, sd_kind=sd_kind)
+    inject_triacetin_certificate(rows, specs, tri["overall_pct"])
+    inject_triacetin_parameters(stats["parameters"], specs, tri["overall_pct"])
     return {
         "run_id": run.id,
         "mo_ref": run.mo_ref,
@@ -234,6 +358,8 @@ def compute_run_summary(
         "remarks": manual_remarks(check_dicts),
         "manual_measurements": manual_measurements(stats["parameters"], check_dicts),
         "manual_checks": manual_table_rows(check_dicts),
+        "triacetin": tri["measurements"],
+        "triacetin_overall": tri["overall_pct"],
     }
 
 
@@ -260,7 +386,11 @@ def compute_order_summary(session: Session, po_id: int) -> Dict:
     if run_ids:
         rods = (
             session.query(models.QualityMeasurement)
-            .filter(models.QualityMeasurement.run_id.in_(run_ids))
+            .join(models.QualitySample, models.QualityMeasurement.sample_id == models.QualitySample.id)
+            .filter(
+                models.QualityMeasurement.run_id.in_(run_ids),
+                models.QualitySample.is_triacetin.is_(False),
+            )
             .order_by(
                 models.QualityMeasurement.measured_at,
                 models.QualityMeasurement.sample_id,
@@ -288,6 +418,11 @@ def compute_order_summary(session: Session, po_id: int) -> Dict:
     order_check_dicts = manual_check_dicts(order_checks)
     merge_manual_parameters(stats["parameters"], manual_rods(order_check_dicts), specs)
 
+    tri = compute_triacetin(session, run_ids=run_ids) if run_ids else {"measurements": [], "overall_pct": None}
+    cert_rows = certificate_rows(stats, specs)
+    inject_triacetin_certificate(cert_rows, specs, tri["overall_pct"])
+    inject_triacetin_parameters(stats["parameters"], specs, tri["overall_pct"])
+
     per_run = []
     for run in runs:
         s = compute_run_summary(session, run)
@@ -310,13 +445,15 @@ def compute_order_summary(session: Session, po_id: int) -> Dict:
         "rods_used": stats["rods_used"],
         "parameters": stats["parameters"],
         "automatic": auto_rows,
-        "certificate": certificate_rows(stats, specs),
+        "certificate": cert_rows,
         "runs": per_run,
         "first_measured_at": first,
         "last_measured_at": last,
         "remarks": manual_remarks(order_check_dicts),
         "manual_measurements": manual_measurements(stats["parameters"], order_check_dicts),
         "manual_checks": manual_table_rows(order_check_dicts),
+        "triacetin": tri["measurements"],
+        "triacetin_overall": tri["overall_pct"],
     }
 
 

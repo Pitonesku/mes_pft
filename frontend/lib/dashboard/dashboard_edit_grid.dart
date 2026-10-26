@@ -4,16 +4,16 @@
 // auto-packing; empty cells remain blank.
 import 'package:flutter/material.dart';
 
-import 'dashboard_data.dart';
 import 'dashboard_grid.dart';
 import 'dashboard_layout.dart';
-import 'widget_registry.dart';
 
 class DashboardEditGrid extends StatefulWidget {
   final List<DashboardItem> items;
   final int columns;
-  final DashboardData data;
   final double gap;
+  final Widget Function(BuildContext context, DashboardItem item) buildItem;
+  final String Function(String type) titleFor;
+  final bool Function(String type) configurableFor;
   final void Function(String id, int x, int y) onMove;
   final void Function(String id) onRemove;
   final void Function(String id, int w, int h) onResize;
@@ -23,8 +23,10 @@ class DashboardEditGrid extends StatefulWidget {
     super.key,
     required this.items,
     required this.columns,
-    required this.data,
     this.gap = 16,
+    required this.buildItem,
+    required this.titleFor,
+    required this.configurableFor,
     required this.onMove,
     required this.onRemove,
     required this.onResize,
@@ -74,7 +76,9 @@ class _DashboardEditGridState extends State<DashboardEditGrid> {
       child: _EditCell(
         key: ValueKey(item.id),
         item: item,
-        data: widget.data,
+        buildItem: widget.buildItem,
+        title: widget.titleFor(item.type),
+        configurable: widget.configurableFor(item.type),
         columns: widget.columns,
         cellW: cellW,
         cellH: cellH,
@@ -137,7 +141,9 @@ class _HoverCell {
 
 class _EditCell extends StatefulWidget {
   final DashboardItem item;
-  final DashboardData data;
+  final Widget Function(BuildContext context, DashboardItem item) buildItem;
+  final String title;
+  final bool configurable;
   final int columns;
   final double cellW;
   final double cellH;
@@ -149,7 +155,9 @@ class _EditCell extends StatefulWidget {
   const _EditCell({
     super.key,
     required this.item,
-    required this.data,
+    required this.buildItem,
+    required this.title,
+    required this.configurable,
     required this.columns,
     required this.cellW,
     required this.cellH,
@@ -171,7 +179,6 @@ class _EditCellState extends State<_EditCell> {
 
   @override
   Widget build(BuildContext context) {
-    final meta = dashboardWidgetRegistry[widget.item.type];
     return Container(
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
@@ -180,24 +187,20 @@ class _EditCellState extends State<_EditCell> {
       ),
       child: Stack(children: [
         Positioned.fill(child: _content(context)),
-        _header(context, meta),
+        _header(),
         _resizeHandle(),
       ]),
     );
   }
 
   Widget _content(BuildContext context) {
-    final meta = dashboardWidgetRegistry[widget.item.type];
-    if (meta == null) {
-      return const Center(child: Text('Unknown widget'));
-    }
     return Padding(
       padding: const EdgeInsets.only(top: 28),
-      child: meta.builder(context, widget.item.config, widget.data),
+      child: widget.buildItem(context, widget.item),
     );
   }
 
-  Widget _header(BuildContext context, DashboardWidgetMeta? meta) => Positioned(
+  Widget _header() => Positioned(
         top: 0,
         left: 0,
         right: 0,
@@ -212,29 +215,29 @@ class _EditCellState extends State<_EditCell> {
             Expanded(
               child: Draggable<DashboardItem>(
                 data: widget.item,
-                feedback: _feedback(meta),
+                feedback: _feedback(),
                 childWhenDragging:
-                    Opacity(opacity: 0.35, child: _headerGrip(meta)),
+                    Opacity(opacity: 0.35, child: _headerGrip()),
                 child: MouseRegion(
                   cursor: SystemMouseCursors.grab,
-                  child: _headerGrip(meta),
+                  child: _headerGrip(),
                 ),
               ),
             ),
-            if (meta?.configurable == true)
+            if (widget.configurable)
               _control(Icons.tune, 'Configure', widget.onConfigure),
             _control(Icons.close, 'Remove', widget.onRemove),
           ]),
         ),
       );
 
-  Widget _headerGrip(DashboardWidgetMeta? meta) => Padding(
+  Widget _headerGrip() => Padding(
         padding: const EdgeInsets.symmetric(horizontal: 10),
         child: Row(children: [
           const Icon(Icons.drag_indicator, size: 14, color: Colors.deepPurple),
           const SizedBox(width: 6),
           Expanded(
-            child: Text(meta?.title ?? widget.item.type,
+            child: Text(widget.title,
                 style: const TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w600,
@@ -291,7 +294,7 @@ class _EditCellState extends State<_EditCell> {
         ),
       );
 
-  Widget _feedback(DashboardWidgetMeta? meta) => Material(
+  Widget _feedback() => Material(
         elevation: 8,
         color: Colors.transparent,
         child: Container(
@@ -301,7 +304,7 @@ class _EditCellState extends State<_EditCell> {
               color: Colors.deepPurple,
               borderRadius: BorderRadius.circular(8)),
           child: Center(
-            child: Text(meta?.title ?? widget.item.type,
+            child: Text(widget.title,
                 style: const TextStyle(
                     color: Colors.white,
                     fontWeight: FontWeight.bold,

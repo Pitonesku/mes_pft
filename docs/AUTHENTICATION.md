@@ -124,6 +124,32 @@ Flutter client treats report submission failures as "offline" and keeps the
 report in the local pending queue. The operator must log in again online to
 obtain a fresh token before pending reports can sync.
 
+## Password policy & hardening
+
+- **bcrypt-only verification.** `app/password_utils.py` is the single source of
+  truth for hashing/verifying passwords. Legacy plain-text or empty
+  `password_hash` values are *never* accepted — there is no plain-text
+  comparison fallback. This closes the old hole where an account with an empty
+  `password_hash` could log in with an empty password.
+- **Empty passwords are rejected** on login and on user create/update.
+- **Login throttling.** `/api/auth/login` limits failed attempts in-memory
+  (5 failures per username within 5 minutes → HTTP 429).
+- **No offline/demo login fallback.** The Flutter client no longer falls back to
+  a hardcoded local user list (which included a passwordless `superadmin`); a
+  session can only be established by the server.
+- **`POST /api/users/create-with-auth` was removed.** User creation must use the
+  authenticated `POST /api/users` endpoint (admin-only).
+- **Superadmin gating is role-based**, not a username-string check.
+
+If any users were stored with plain-text or empty `password_hash` values, run:
+
+```bash
+cd backend
+.venv\Scripts\python.exe -m app.scripts.fix_plaintext_passwords
+```
+
+to re-hash (or lock) those accounts.
+
 ## Deployment notes
 
 1. Set a strong `SECRET_KEY` in `.env`.

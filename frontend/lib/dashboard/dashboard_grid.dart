@@ -1,9 +1,7 @@
 // lib/dashboard/dashboard_grid.dart
 import 'package:flutter/material.dart';
 
-import 'dashboard_data.dart';
 import 'dashboard_layout.dart';
-import 'widget_registry.dart';
 
 /// Fixed height of a single grid row (px). The cell *width* is fluid (derived
 /// from the 24-column container width), so rows stay 120px while columns flex.
@@ -24,15 +22,15 @@ double gridHeight(List<DashboardItem> items, double gap) {
 class DashboardGrid extends StatelessWidget {
   final List<DashboardItem> items;
   final int columns;
-  final DashboardData data;
   final double gap;
+  final Widget Function(BuildContext context, DashboardItem item) buildItem;
 
   const DashboardGrid({
     super.key,
     required this.items,
     required this.columns,
-    required this.data,
     this.gap = 16,
+    required this.buildItem,
   });
 
   @override
@@ -51,7 +49,7 @@ class DashboardGrid extends StatelessWidget {
           top: item.y * (cellH + gap),
           width: w * cellW + (w - 1) * gap,
           height: item.h * cellH + (item.h - 1) * gap,
-          child: _build(context, item),
+          child: buildItem(context, item),
         ));
       }
 
@@ -63,14 +61,4 @@ class DashboardGrid extends StatelessWidget {
     });
   }
 
-  Widget _build(BuildContext context, DashboardItem item) {
-    final meta = dashboardWidgetRegistry[item.type];
-    if (meta == null) {
-      return Card(
-        margin: EdgeInsets.zero,
-        child: Center(child: Text('Unknown widget: ${item.type}')),
-      );
-    }
-    return meta.builder(context, item.config, data);
-  }
 }

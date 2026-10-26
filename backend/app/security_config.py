@@ -16,6 +16,7 @@ Rules
 """
 
 import os
+import secrets
 
 # Values that must never be used to sign anything outside a developer machine.
 _PLACEHOLDER_SECRETS = {
@@ -32,7 +33,7 @@ _PLACEHOLDER_ADMIN_PASSWORDS = {
     "change_me_before_production",
 }
 
-_DEV_FALLBACK_SECRET = "insecure-dev-secret-change-me"
+_DEV_FALLBACK_SECRET = None
 _warned = False
 
 
@@ -43,10 +44,10 @@ def is_production() -> bool:
 
 def get_secret_key() -> str:
     """Return the signing secret, enforcing the rules described in the module docstring."""
-    global _warned
+    global _warned, _DEV_FALLBACK_SECRET
     secret = (os.getenv("SECRET_KEY") or os.getenv("Secret_Key") or "").strip()
 
-    if secret not in _PLACEHOLDER_SECRETS:
+    if secret and secret not in _PLACEHOLDER_SECRETS:
         return secret
 
     if is_production():
@@ -56,10 +57,15 @@ def get_secret_key() -> str:
             "and set it in the environment / .env file."
         )
 
+    # Development only: generate a random per-process secret instead of reusing a
+    # fixed, source-committed string, so tokens cannot be forged by anyone who can
+    # read the code. Tokens/sessions do not survive a restart in dev (acceptable).
+    if _DEV_FALLBACK_SECRET is None:
+        _DEV_FALLBACK_SECRET = secrets.token_urlsafe(32)
     if not _warned:
         print(
-            "!! [Security] SECRET_KEY is not set (or is a placeholder) -- using an INSECURE "
-            "development key. Set SECRET_KEY in .env before deploying."
+            "!! [Security] SECRET_KEY is not set (or is a placeholder) -- using a random "
+            "per-process development key. Set SECRET_KEY in .env before deploying."
         )
         _warned = True
     return _DEV_FALLBACK_SECRET

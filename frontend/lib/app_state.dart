@@ -10,8 +10,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 class AppData {
   // --- LOCAL / TEST DATA (Fallback) ---
   
+  // NOTE: no hardcoded superadmin here. Demo users are for offline *data* only;
+  // authentication is always performed by the server (see auth_screen.dart), so
+  // these rows can never establish a session.
   static List<User> users = [
-    User(name: "superadmin", password: "", email: "admin@factory.com", role: UserRole.superAdmin, canModifyPO: true),
     User(name: "Maximus", password: "123", email: "max@factory.com", role: UserRole.manager, canModifyPO: true),
     User(name: "Operator J.", password: "456", email: "worker@factory.com", role: UserRole.operator),
   ];
@@ -202,18 +204,6 @@ class AppData {
           AppLog.d("⚠️ Server returned empty user list; keeping local admins.");
         } else {
           users = usersJson.map((u) => User.fromJson(u)).toList();
-          
-          // Ensure a superadmin exists locally if server didn't provide one
-          bool hasAdmin = users.any((u) => u.role == UserRole.superAdmin);
-          if (!hasAdmin) {
-            users.add(User(
-              name: "superadmin", 
-              password: "", // No password
-              email: "admin@factory.com", 
-              role: UserRole.superAdmin, 
-              canModifyPO: true
-            ));
-          }
           prefs.setString('cache_users', jsonEncode(usersJson));
         }
       }

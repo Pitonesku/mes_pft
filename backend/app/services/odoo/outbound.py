@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.services import aggregation
-from app.services.odoo.client import OdooClient, OdooConfig
+from app.services.odoo.client import OdooClient, OdooConfig, OdooError
 
 logger = logging.getLogger(__name__)
 
@@ -176,18 +176,25 @@ def dispatch_pending(
     dispatched = 0
     client: Optional[OdooClient] = None
     try:
-        items = (
-            session.query(models.OdooOutbox)
-            .filter(
-                models.OdooOutbox.status == "pending",
-                (models.OdooOutbox.next_attempt_at.is_(None))
-                | (models.OdooOutbox.next_attempt_at <= datetime.now(timezone.utc)),
+        # Claim rows one at a time with FOR UPDATE SKIP LOCKED so a concurrent
+        # manual POST /api/v2/odoo/dispatch and the background worker can never
+        # pick up and double-process the same outbox row. Claiming the next row
+        # only after the previous one committed keeps the lock window honest.
+        for _ in range(limit):
+            item = (
+                session.query(models.OdooOutbox)
+                .filter(
+                    models.OdooOutbox.status == "pending",
+                    (models.OdooOutbox.next_attempt_at.is_(None))
+                    | (models.OdooOutbox.next_attempt_at <= datetime.now(timezone.utc)),
+                )
+                .order_by(models.OdooOutbox.id)
+                .with_for_update(skip_locked=True)
+                .limit(1)
+                .first()
             )
-            .order_by(models.OdooOutbox.id)
-            .limit(limit)
-            .all()
-        )
-        for item in items:
+            if item is None:
+                break
             try:
                 if client is None:
                     client = OdooClient(config)
@@ -290,10 +297,35 @@ def verified_produced_rods(session: Session, db_run) -> int:
     return sum(int(r.produced_rods or 0) for r in _verified_reports(session, db_run))
 
 
+def _resolve_consumption_products(session: Session, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Attach ``material_id``/``odoo_product_id`` to each consumption item.
+
+    Odoo matching is strictly by ID via the material dictionary; the name is
+    never the primary key. Items without a material-dictionary match are left
+    as-is (the client falls back to name matching only as a last resort).
+    """
+    names = {(item.get("type_name") or "").strip() for item in items}
+    names.discard("")
+    if not names:
+        return items
+    mats = (
+        session.query(models.MaterialDictionary)
+        .filter(models.MaterialDictionary.type_name.in_(names))
+        .all()
+    )
+    by_name = {m.type_name.strip(): m for m in mats}
+    for item in items:
+        mat = by_name.get((item.get("type_name") or "").strip())
+        if mat is not None:
+            item["material_id"] = mat.id
+            item["odoo_product_id"] = mat.odoo_product_id
+    return items
+
+
 def verified_consumption(session: Session, db_run) -> List[Dict[str, Any]]:
     """Aggregated per-material consumption of the approved report(s) for this run."""
     from app.services.odoo.consumption import aggregate_consumption
-    return aggregate_consumption(_verified_reports(session, db_run))
+    return _resolve_consumption_products(session, aggregate_consumption(_verified_reports(session, db_run)))
 
 
 def _shadow_item(session: Session, real_client: OdooClient, item: models.OdooOutbox) -> None:
@@ -358,6 +390,18 @@ def _dispatch_item(
         link_only = (po is not None and (po.sync_mode or "link_only") != "full") or _before_cutover(
             session, db_run
         )
+        if po is not None and not link_only:
+            # Serialize full dispatch per order. Two runs of the SAME order (two
+            # machines producing one Odoo MO) share one open-MO pointer; without
+            # this lock a concurrent dispatcher could resolve the same MO and one
+            # run's quantity would be silently skipped as "already done". The lock
+            # makes resolve -> complete -> advance-pointer atomic per order.
+            po = (
+                session.query(models.PurchaseOrder)
+                .filter(models.PurchaseOrder.id == po.id)
+                .with_for_update()
+                .first()
+            )
         try:
             _dispatch_run(session, client, db_run, run, int(start_mo), link_only=link_only)
             if sink is not None:
@@ -428,7 +472,7 @@ def _dispatch_run(
     reports = _verified_reports(session, db_run)
     qty_rods = sum(int(r.produced_rods or 0) for r in reports)
     from app.services.odoo.consumption import aggregate_consumption
-    consumption = aggregate_consumption(reports)
+    consumption = _resolve_consumption_products(session, aggregate_consumption(reports))
 
     # Follow the backorder chain: earlier shifts may have closed the MO we hold.
     mo_id = client.resolve_open_mo(start_mo_id)
@@ -495,7 +539,18 @@ def _dispatch_run(
     # 4. Finished quantity: partial completion -> Odoo creates the backorder.
     if qty_rods:
         result = client.post_completion(mo_id, qty_rods, consumption=consumption)
-        if not result.get("skipped"):
+        if result.get("skipped"):
+            # post_completion skips an MO that is already done/cancelled. In live
+            # mode that means the MO we resolved was closed out from under us (a
+            # concurrent dispatch or an external Odoo action); marking the run
+            # 'synced' would silently DROP its quantity. Fail instead so the
+            # outbox retries and resolve_open_mo re-advances to the open MO.
+            if not getattr(client, "is_shadow", False):
+                raise OdooError(
+                    f"MO {mo_id} completion skipped ({result.get('reason')}): "
+                    f"{qty_rods} rods NOT posted to Odoo"
+                )
+        else:
             db_run.odoo_done_qty = result.get("qty")
             if result.get("backorder_id"):
                 db_run.odoo_backorder_id = int(result["backorder_id"])

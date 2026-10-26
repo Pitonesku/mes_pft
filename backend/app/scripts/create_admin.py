@@ -111,7 +111,11 @@ try:
     password = os.getenv("ADMIN_PASSWORD", "admin")
     email = os.getenv("ADMIN_EMAIL", "admin@factory.local")
 
-    if username == "admin" and password == "admin":
+    if password in ("", "admin"):
+        if os.getenv("ENV", "development").lower() == "production":
+            print("ERROR: refusing to create an admin with a default/empty password in production.")
+            print("Set a strong ADMIN_PASSWORD in .env and re-run.")
+            sys.exit(1)
         print(
             "!! WARNING: using DEFAULT credentials (admin / admin). "
             "Set ADMIN_USERNAME and ADMIN_PASSWORD in .env for production!"
@@ -165,7 +169,7 @@ try:
     print("=" * 60)
     print("  Admin user is ready!")
     print(f"  Username : {username}")
-    print(f"  Password : {password}")
+    print("  Password : (set via ADMIN_PASSWORD in .env — not printed)")
     print(f"  Login at : http://localhost:8000/admin")
     print("=" * 60)
 

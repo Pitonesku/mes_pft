@@ -6,8 +6,9 @@ from app.quality_stats import ParamSpec
 from app.services import manual_check_rules as rules
 
 
-def _weight_spec(nominal, lower, upper, scale=1.0):
-    return ParamSpec(parameter="weight", nominal=nominal, lower=lower, upper=upper, report_scale=scale)
+def _weight_spec(nominal, lower, upper, scale=1.0, reject_multiplier=3.0):
+    return ParamSpec(parameter="weight", nominal=nominal, lower=lower, upper=upper,
+                     report_scale=scale, reject_multiplier=reject_multiplier)
 
 
 def _eval(specs, **kw):
@@ -52,6 +53,84 @@ class WeightUnitTests(unittest.TestCase):
         specs = {"weight": _weight_spec(0.66, 0.64, 0.68)}
         verdicts, _ = _eval(specs, sample_weight=6.6, sample_rods=0)
         self.assertEqual(verdicts["weight"]["sample_rods"], 10)
+
+
+class WeightNormalizationTests(unittest.TestCase):
+    def _norm(self, raw, rods=10, spec=None):
+        return rules.normalize_manual_weight(raw, rods, spec)
+
+    def test_comma_total_grams(self):
+        n = self._norm("6,67", 10)
+        self.assertTrue(n.ok)
+        self.assertAlmostEqual(n.per_rod_g, 0.667, places=5)
+        self.assertEqual(n.unit, "g_total")
+
+    def test_mg_per_rod(self):
+        n = self._norm("667", 10)
+        self.assertTrue(n.ok)
+        self.assertAlmostEqual(n.per_rod_g, 0.667, places=5)
+        self.assertEqual(n.unit, "mg_per_rod")
+
+    def test_large_sample_total_grams(self):
+        n = self._norm("33,8", 50)
+        self.assertTrue(n.ok)
+        self.assertAlmostEqual(n.per_rod_g, 0.676, places=5)
+        self.assertEqual(n.unit, "g_total")
+
+    def test_mg_total(self):
+        n = self._norm("6670", 10)
+        self.assertTrue(n.ok)
+        self.assertAlmostEqual(n.per_rod_g, 0.667, places=5)
+        self.assertEqual(n.unit, "mg_total")
+
+    def test_grams_per_rod(self):
+        n = self._norm("0.667", 10)
+        self.assertTrue(n.ok)
+        self.assertAlmostEqual(n.per_rod_g, 0.667, places=5)
+        self.assertEqual(n.unit, "g_per_rod")
+
+    def test_ambiguous_rod_count_is_rejected(self):
+        n = self._norm("33,8", 10)
+        self.assertFalse(n.ok)
+        self.assertIn("10 rods", n.error)
+
+    def test_garbage_is_not_ok(self):
+        self.assertFalse(self._norm("abc", 10).ok)
+        self.assertFalse(self._norm("", 10).ok)
+        self.assertFalse(self._norm(None, 10).ok)
+
+    def test_total_g_consistent_with_per_rod(self):
+        n = self._norm("6,67", 10)
+        self.assertAlmostEqual(n.total_g, n.per_rod_g * 10, places=5)
+
+
+class WeightRejectionTests(unittest.TestCase):
+    def test_within_3x_tolerance_is_kept(self):
+        specs = {"weight": _weight_spec(0.666, 0.646, 0.686)}
+        verdicts, _ = _eval(specs, sample_weight=6.67)  # 0.667 g/rod
+        self.assertFalse(verdicts["weight"]["rejected"])
+        self.assertEqual(verdicts["weight"]["status"], "PASS")
+
+    def test_out_of_spec_but_within_3x_tolerance_is_fail_not_rejected(self):
+        specs = {"weight": _weight_spec(0.666, 0.646, 0.686)}
+        # 0.62 g/rod is below lower 0.646 -> FAIL, but inside the 3x band (0.606..0.726).
+        verdicts, _ = _eval(specs, sample_weight=6.2)
+        self.assertEqual(verdicts["weight"]["status"], "FAIL")
+        self.assertFalse(verdicts["weight"]["rejected"])
+
+    def test_beyond_3x_tolerance_is_rejected(self):
+        specs = {"weight": _weight_spec(0.666, 0.646, 0.686)}
+        # 900 mg/rod -> 9.0 g for 10 rods, far outside the 3x band.
+        verdicts, _ = _eval(specs, sample_weight=9.0)
+        self.assertTrue(verdicts["weight"]["rejected"])
+        self.assertEqual(verdicts["weight"]["status"], "FAIL")
+
+    def test_mg_per_rod_input_is_normalized_then_evaluated(self):
+        specs = {"weight": _weight_spec(0.666, 0.646, 0.686)}
+        verdicts, _ = _eval(specs, sample_weight=667)  # operator typed mg/rod
+        self.assertAlmostEqual(verdicts["weight"]["per_rod"], 0.667, places=5)
+        self.assertEqual(verdicts["weight"]["status"], "PASS")
+        self.assertEqual(verdicts["weight"]["unit"], "mg_per_rod")
 
 
 class OverallStatusTests(unittest.TestCase):

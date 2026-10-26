@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.config import local_to_utc
+from app.quality_stats import is_triacetin_marker
 from app.services import shift_resolver
 from app.services.parsers import profiles
 
@@ -167,7 +168,8 @@ class StationWatcher:
         run_id: Optional[int] = None
         if shift_id is not None:
             run_id, run_status = shift_resolver.resolve_run(
-                session, shift_id, produced_at, sample.mo_ref, machine_id=machine_id
+                session, shift_id, produced_at, sample.mo_ref, machine_id=machine_id,
+                sample_id=sample.sample_id,
             )
             if run_status == shift_resolver.LINK_MO_MISMATCH:
                 # Keep the rods (shift is known) but surface the label problem for review
@@ -199,6 +201,7 @@ class StationWatcher:
             rods_declared=sample.rods_count,
             file_sha256=sha256,
             file_md5=md5,
+            is_triacetin=is_triacetin_marker(sample.sample_id, sample.reserve_2, sample.reserve_1),
             custom_metrics=profiles.compute_custom_metrics(sample, profile),
         )
         session.add(db_sample)

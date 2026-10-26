@@ -13,6 +13,10 @@ class QualityControlChart extends StatelessWidget {
   final TransformationController? transformationController;
   final double height;
   final bool showOutliers;
+  final double valueScale;
+  final String? unitLabel;
+  final double? yMin;
+  final double? yMax;
 
   const QualityControlChart({
     super.key,
@@ -24,6 +28,10 @@ class QualityControlChart extends StatelessWidget {
     this.transformationController,
     this.height = 190,
     this.showOutliers = false,
+    this.valueScale = 1.0,
+    this.unitLabel,
+    this.yMin,
+    this.yMax,
   });
 
   @override
@@ -33,15 +41,15 @@ class QualityControlChart extends StatelessWidget {
       points = points.where((p) => !p.rejected).toList();
     }
     if (points.isEmpty) {
-      return _frame(null, Center(child: Text(showOutliers ? 'No data' : 'No data (outliers hidden)',
-          style: const TextStyle(color: Colors.grey, fontSize: 12))));
+      return _frame(null, const Center(child: Text('No data available',
+          style: TextStyle(color: Colors.grey, fontSize: 12))));
     }
 
     final params = (series?['params'] as Map<String, dynamic>?) ?? const {};
     final p = (params[parameter] as Map<String, dynamic>?) ?? const {};
-    final target = _num(p['target']);
-    final usl = _num(p['usl']);
-    final lsl = _num(p['lsl']);
+    final target = _scaled(_num(p['target']));
+    final usl = _scaled(_num(p['usl']));
+    final lsl = _scaled(_num(p['lsl']));
 
     final all = <FlSpot>[];
     final byX = <double, _Point>{};
@@ -53,22 +61,29 @@ class QualityControlChart extends StatelessWidget {
     // Y-axis: prefer the spec band (LSL - 1.5*tol .. USL + 1.5*tol) so a single
     // gross outlier can't flatten the valid production band. Fall back to the
     // data range when limits are missing.
-    double minY;
-    double maxY;
+    double autoMinY;
+    double autoMaxY;
     if (usl != null && lsl != null && usl > lsl) {
       final tol = (usl - lsl) / 2;
-      minY = lsl - 1.5 * tol;
-      maxY = usl + 1.5 * tol;
+      autoMinY = lsl - 1.5 * tol;
+      autoMaxY = usl + 1.5 * tol;
     } else {
       final ys = <double>[for (final pt in points) pt.y];
       if (target != null) ys.add(target);
       if (usl != null) ys.add(usl);
       if (lsl != null) ys.add(lsl);
-      minY = ys.reduce((a, b) => a < b ? a : b);
-      maxY = ys.reduce((a, b) => a > b ? a : b);
-      if (minY == maxY) { minY -= 1; maxY += 1; }
-      final pad = (maxY - minY) * 0.15;
-      minY -= pad; maxY += pad;
+      autoMinY = ys.reduce((a, b) => a < b ? a : b);
+      autoMaxY = ys.reduce((a, b) => a > b ? a : b);
+      if (autoMinY == autoMaxY) { autoMinY -= 1; autoMaxY += 1; }
+      final pad = (autoMaxY - autoMinY) * 0.15;
+      autoMinY -= pad; autoMaxY += pad;
+    }
+
+    var minY = yMin ?? autoMinY;
+    var maxY = yMax ?? autoMaxY;
+    if (minY >= maxY) {
+      minY = autoMinY;
+      maxY = autoMaxY;
     }
 
     final minX = points.first.x;
@@ -186,24 +201,21 @@ class QualityControlChart extends StatelessWidget {
   }
 
   List<LineTooltipItem?> _tooltipItems(List<LineBarSpot> spots, Map<double, _Point> byX, Map<String, dynamic> params) {
-    final pdTarget = _num((params['pd'] as Map<String, dynamic>?)?['target']);
-    final diaTarget = _num((params['diameter'] as Map<String, dynamic>?)?['target']);
+    final p = (params[parameter] as Map<String, dynamic>?) ?? const {};
+    final rawTarget = _num(p['target']);
+    final target = rawTarget == null ? null : rawTarget * valueScale;
+    final unit = unitLabel ?? p['unit']?.toString() ?? '';
     return spots.map((s) {
       final pt = byX[s.x];
       if (pt == null) return null;
       final ts = pt.timestamp ?? '-';
-      final dia = pt.diameter?.toStringAsFixed(3) ?? '-';
-      final pd = pt.pd?.toStringAsFixed(1) ?? '-';
-      final dDia = (pt.diameter != null && diaTarget != null) ? pt.diameter! - diaTarget : null;
-      final dPd = (pt.pd != null && pdTarget != null) ? pt.pd! - pdTarget : null;
-      final diaDiff = dDia == null ? '' : ' (Δ ${(dDia >= 0 ? '+' : '') + dDia.toStringAsFixed(3)} mm)';
-      final pdDiff = dPd == null ? '' : ' (Δ ${(dPd >= 0 ? '+' : '') + dPd.toStringAsFixed(1)})';
+      final val = s.y;
+      final diff = target != null ? ' (Δ ${(val >= target ? '+' : '') + formatValue(val - target)})' : '';
       final statusColor = pt.rejected ? Colors.redAccent : Colors.greenAccent;
       return LineTooltipItem('', const TextStyle(), children: [
         TextSpan(text: '$ts\n', style: const TextStyle(color: Colors.white70, fontSize: 11)),
         TextSpan(text: 'Rod #${pt.rodNo ?? '-'}\n', style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
-        TextSpan(text: 'Diameter: $dia mm$diaDiff\n', style: const TextStyle(color: Colors.white, fontSize: 12)),
-        TextSpan(text: 'Pressure Drop: $pd mm WG$pdDiff\n', style: const TextStyle(color: Colors.white, fontSize: 12)),
+        TextSpan(text: '$title: ${formatValue(val)}${unit.isNotEmpty ? ' $unit' : ''}$diff\n', style: const TextStyle(color: Colors.white, fontSize: 12)),
         TextSpan(text: pt.rejected ? 'REJECTED (Outlier)' : 'OK', style: TextStyle(color: statusColor, fontSize: 12, fontWeight: FontWeight.bold)),
       ]);
     }).toList();
@@ -212,12 +224,17 @@ class QualityControlChart extends StatelessWidget {
   Widget _frame(String? dateText, Widget child) => Container(
     padding: const EdgeInsets.all(8),
     decoration: BoxDecoration(color: Colors.white, border: Border.all(color: Colors.black12), borderRadius: BorderRadius.circular(8)),
-    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text(dateText == null ? title : '$title · $dateText',
-          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-      const SizedBox(height: 4),
-      SizedBox(height: height, width: double.infinity, child: child),
-    ]),
+    child: LayoutBuilder(builder: (ctx, constraints) {
+      final Widget chart = constraints.hasBoundedHeight
+          ? Expanded(child: child)
+          : SizedBox(height: height, width: double.infinity, child: child);
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(dateText == null ? title : '$title · $dateText',
+            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 4),
+        chart,
+      ]);
+    }),
   );
 
   List<double> _midnights(double minX, double maxX) {
@@ -246,7 +263,8 @@ class QualityControlChart extends StatelessWidget {
     for (final r in raw) {
       final m = r as Map<String, dynamic>;
       final x = (m['x'] as num?)?.toDouble();
-      final y = (m[parameter] as num?)?.toDouble();
+      final rawY = (m[parameter] as num?)?.toDouble();
+      final y = rawY == null ? null : rawY * valueScale;
       if (x == null || y == null) continue;
       out.add(_Point(
         x: x,
@@ -254,8 +272,6 @@ class QualityControlChart extends StatelessWidget {
         rejected: m['rejected'] == true,
         rodNo: (m['rod_no'] as num?)?.toInt(),
         timestamp: m['synthetic_timestamp']?.toString(),
-        pd: (m['pd'] as num?)?.toDouble(),
-        diameter: (m['diameter'] as num?)?.toDouble(),
       ));
     }
     out.sort((a, b) => a.x.compareTo(b.x));
@@ -263,6 +279,8 @@ class QualityControlChart extends StatelessWidget {
   }
 
   double? _num(dynamic v) => v == null ? null : (v is num ? v.toDouble() : double.tryParse('$v'));
+
+  double? _scaled(double? v) => v == null ? null : v * valueScale;
 }
 
 class _Point {
@@ -271,7 +289,11 @@ class _Point {
   final bool rejected;
   final int? rodNo;
   final String? timestamp;
-  final double? pd;
-  final double? diameter;
-  _Point({required this.x, required this.y, required this.rejected, this.rodNo, this.timestamp, this.pd, this.diameter});
+  _Point({
+    required this.x,
+    required this.y,
+    required this.rejected,
+    this.rodNo,
+    this.timestamp,
+  });
 }

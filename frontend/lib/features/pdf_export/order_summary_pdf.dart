@@ -22,9 +22,10 @@ const _paramLabels = <String, String>{
   'pd': 'Pressure drop',
   'hardness': 'Hardness',
   'weight': 'Weight',
+  'triacetin': 'Triacetin',
 };
 
-const _paramOrder = <String>['length', 'diameter', 'pd', 'hardness', 'weight'];
+const _paramOrder = <String>['length', 'diameter', 'pd', 'hardness', 'weight', 'triacetin'];
 
 class OrderSummaryPdfService {
   /// Build the consolidated Order Summary PDF bytes.

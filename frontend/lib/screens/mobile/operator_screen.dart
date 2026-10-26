@@ -811,7 +811,9 @@ class _ReportPageState extends State<ReportPage> {
       _startTimeCtrl.text = d['start_time'] ?? "08:00";
       _endTimeCtrl.text = d['end_time'] ?? "20:00";
       _lotController.text = d['lot_number'] ?? "";
-      _boxTypeController.text = d['box_type'] ?? "";
+      _boxTypeController.text = (d['box_type'] != null && d['box_type'].toString().isNotEmpty)
+          ? d['box_type'].toString()
+          : (_selectedPO?.boxType.toString() ?? "");
       _diameterController.text = d['diameter'] ?? "";
       _lengthController.text = d['length'] ?? "";
       _pdController.text = d['pd'] ?? "";

@@ -41,6 +41,7 @@ QC_FIELD_MEAN_WEIGHT = "mean_weight"
 QC_FIELD_SD_WEIGHT = "sd_weight"
 QC_FIELD_MEAN_HARDNESS = "mean_hardness"
 QC_FIELD_SD_HARDNESS = "sd_hardness"
+QC_FIELD_MEAN_TRIACETIN = "mean_triacetin"
 QC_FIELD_QUALITY_STATUS = "quality_status"
 QC_FIELD_TESTED_RODS = "tested_rods_count"
 QC_FIELD_REJECTED_RODS = "rejected_rods_count"
@@ -58,6 +59,7 @@ QC_FINAL_MEAN_WEIGHT = "x_final_mean_weight"
 QC_FINAL_SD_WEIGHT = "x_final_sd_weight"
 QC_FINAL_MEAN_HARDNESS = "x_final_mean_hardness"
 QC_FINAL_SD_HARDNESS = "x_final_sd_hardness"
+QC_FINAL_MEAN_TRIACETIN = "x_final_mean_triacetin"
 QC_FINAL_QUALITY_STATUS = "x_final_quality_status"
 QC_FINAL_TESTED_RODS = "x_final_tested_rods"
 QC_FINAL_REJECTED_RODS = "x_final_rejected_rods"
@@ -427,12 +429,22 @@ class OdooClient:
             if not name or qty < 0:
                 continue
 
-            target = normalize_product_name(name)
-            move = next(
-                (m for m in moves
-                 if m["id"] not in used_moves and _name_matches(m, target)),
-                None,
-            )
+            move = None
+            odoo_product_id = item.get("odoo_product_id")
+            if odoo_product_id:
+                move = next(
+                    (m for m in moves
+                     if m["id"] not in used_moves
+                     and _id_ref(m.get("product_id")) == int(odoo_product_id)),
+                    None,
+                )
+            if move is None:
+                target = normalize_product_name(name)
+                move = next(
+                    (m for m in moves
+                     if m["id"] not in used_moves and _name_matches(m, target)),
+                    None,
+                )
             if move is None:
                 skipped.append({"type_name": name, "reason": "no matching Odoo component/move"})
                 continue
@@ -457,19 +469,9 @@ class OdooClient:
                 used_moves.add(move["id"])
                 continue
 
-            # Never exceed the move's demand (avoid negative stock writes). Use
-            # ``product_uom_qty`` directly: Odoo pre-populates ``quantity`` to the
-            # full demand on reserved raw moves, so ``quantity`` is not a reliable
-            # "already consumed" signal here.
-            remaining = _num(move.get("product_uom_qty")) or 0.0
-            if final_qty > remaining + 1e-9:
-                skipped.append({
-                    "type_name": name,
-                    "reason": f"over-consumption {final_qty} > remaining {remaining}",
-                })
-                used_moves.add(move["id"])
-                continue
-
+            # Write the true reported amount verbatim, even when it exceeds the
+            # move BOM demand: the operator production log is authoritative and must
+            # not be silently capped to the BOM quantity.
             actions.append({
                 "move_id": int(move["id"]),
                 "product_id": pid,
@@ -730,11 +732,12 @@ class OdooClient:
         length = params.get("length") or {}
         weight = params.get("weight") or {}
         hardness = params.get("hardness") or {}
+        tri = run.get("triacetin_overall")
 
         def has(p: Dict[str, Any]) -> bool:
             return bool(p.get("n"))
 
-        if not any(has(p) for p in (pd, dia, length, weight, hardness)):
+        if not any(has(p) for p in (pd, dia, length, weight, hardness)) and tri is None:
             return None
 
         values: Dict[str, Any] = {}
@@ -756,6 +759,8 @@ class OdooClient:
             scale = float(weight.get("report_scale") or 1.0)
             values[QC_FIELD_MEAN_WEIGHT] = _scaled_num(weight.get("mean"), scale)
             values[QC_FIELD_SD_WEIGHT] = _scaled_num(weight.get("sd_samp"), scale)
+        if tri is not None:
+            values[QC_FIELD_MEAN_TRIACETIN] = _num(tri)
         values[QC_FIELD_TESTED_RODS] = int(run.get("rods_total") or 0)
         values[QC_FIELD_REJECTED_RODS] = int(run.get("rods_rejected") or 0)
 
@@ -787,11 +792,12 @@ class OdooClient:
         length = params.get("length") or {}
         weight = params.get("weight") or {}
         hardness = params.get("hardness") or {}
+        tri = summary.get("triacetin_overall")
 
         def has(p: Dict[str, Any]) -> bool:
             return bool(p.get("n"))
 
-        if not any(has(p) for p in (pd, dia, length, weight, hardness)):
+        if not any(has(p) for p in (pd, dia, length, weight, hardness)) and tri is None:
             return None
 
         values: Dict[str, Any] = {}
@@ -811,6 +817,8 @@ class OdooClient:
             scale = float(weight.get("report_scale") or 1.0)
             values[QC_FINAL_MEAN_WEIGHT] = _scaled_num(weight.get("mean"), scale)
             values[QC_FINAL_SD_WEIGHT] = _scaled_num(weight.get("sd_samp"), scale)
+        if tri is not None:
+            values[QC_FINAL_MEAN_TRIACETIN] = _num(tri)
         values[QC_FINAL_TESTED_RODS] = int(summary.get("rods_total") or 0)
         values[QC_FINAL_REJECTED_RODS] = int(summary.get("rods_rejected") or 0)
         status = _STATUS_MAP.get(str(summary.get("status")))

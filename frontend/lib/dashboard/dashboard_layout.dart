@@ -162,6 +162,53 @@ class DashboardLayout {
             w: 24,
             h: 3),
       ]);
+
+  /// Compact default for the Quality Monitor: six small KPI cards (mean + SD
+  /// for the two core parameters, plus weight and hardness) and two charts.
+  /// All KPI cards use h=1 so they stay roughly half the height of the old
+  /// static cards; the operator can add length, resize or rearrange freely.
+  static DashboardLayout defaultQualityLayout() => DashboardLayout(items: [
+        DashboardItem(
+            id: 'kpi_pd_mean',
+            type: 'quality_kpi',
+            config: const {'parameter': 'pd', 'metric': 'mean'},
+            x: 0, y: 0, w: 4, h: 1),
+        DashboardItem(
+            id: 'kpi_pd_sd',
+            type: 'quality_kpi',
+            config: const {'parameter': 'pd', 'metric': 'sd'},
+            x: 4, y: 0, w: 4, h: 1),
+        DashboardItem(
+            id: 'kpi_dia_mean',
+            type: 'quality_kpi',
+            config: const {'parameter': 'diameter', 'metric': 'mean'},
+            x: 8, y: 0, w: 4, h: 1),
+        DashboardItem(
+            id: 'kpi_dia_sd',
+            type: 'quality_kpi',
+            config: const {'parameter': 'diameter', 'metric': 'sd'},
+            x: 12, y: 0, w: 4, h: 1),
+        DashboardItem(
+            id: 'kpi_weight_mean',
+            type: 'quality_kpi',
+            config: const {'parameter': 'weight', 'metric': 'mean'},
+            x: 16, y: 0, w: 4, h: 1),
+        DashboardItem(
+            id: 'kpi_hardness_mean',
+            type: 'quality_kpi',
+            config: const {'parameter': 'hardness', 'metric': 'mean'},
+            x: 20, y: 0, w: 4, h: 1),
+        DashboardItem(
+            id: 'chart_pd',
+            type: 'quality_chart',
+            config: const {'parameter': 'pd'},
+            x: 0, y: 1, w: 12, h: 4),
+        DashboardItem(
+            id: 'chart_dia',
+            type: 'quality_chart',
+            config: const {'parameter': 'diameter'},
+            x: 12, y: 1, w: 12, h: 4),
+      ]);
 }
 
 /// Persists a user's dashboard layout to [SharedPreferences] (localStorage on
@@ -194,4 +241,35 @@ class DashboardLayoutStore {
   }
 
   static String _safe(String s) => s.trim().isEmpty ? 'default' : s;
+}
+
+/// Per-machine Quality Monitor layout store. The kiosk has no logged-in user,
+/// so layouts are keyed by machine alias (each TV remembers its own board) and
+/// fall back to [DashboardLayout.defaultQualityLayout] when nothing is saved.
+class QualityLayoutStore {
+  static const String _keyPrefix = 'dashboard_layout_quality';
+
+  static Future<DashboardLayout> load(String machineAlias) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('$_keyPrefix/${_safe(machineAlias)}');
+      if (raw != null && raw.isNotEmpty) {
+        return DashboardLayout.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+      }
+    } catch (_) {}
+    return DashboardLayout.defaultQualityLayout();
+  }
+
+  static Future<void> save(String machineAlias, DashboardLayout layout) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+        '$_keyPrefix/${_safe(machineAlias)}', jsonEncode(layout.toJson()));
+  }
+
+  static Future<void> reset(String machineAlias) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('$_keyPrefix/${_safe(machineAlias)}');
+  }
+
+  static String _safe(String s) => s.trim().isEmpty ? 'kiosk' : s.trim();
 }

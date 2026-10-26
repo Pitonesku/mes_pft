@@ -264,5 +264,79 @@ class ManualMergeTests(unittest.TestCase):
         self.assertEqual(p["n"], 4)
 
 
+class TriacetinTests(unittest.TestCase):
+    def _samples(self):
+        return [
+            {"time": 1000.0, "is_triacetin": False, "rod_count": 10, "weight": 0.72},
+            {"time": 1060.0, "is_triacetin": True, "rod_count": 10, "weight": 0.66},
+        ]
+
+    def test_marker_detection(self):
+        self.assertTrue(qs.is_triacetin_marker("D046-Triacetin"))
+        self.assertTrue(qs.is_triacetin_marker(None, "dry Triacetin batch"))
+        self.assertTrue(qs.is_triacetin_marker(None, None, "TRIACETIN"))
+        self.assertFalse(qs.is_triacetin_marker("D046", "batch 1", "note"))
+        self.assertFalse(qs.is_triacetin_marker(None, None, None))
+
+    def test_pairs_same_rod_count_within_window(self):
+        out = qs.triacetin_measurements(self._samples())
+        self.assertEqual(len(out["measurements"]), 1)
+        m = out["measurements"][0]
+        self.assertAlmostEqual(m["triacetin_pct"], 9.09, places=2)
+        self.assertAlmostEqual(m["regular_weight"], 0.72)
+        self.assertAlmostEqual(m["dry_weight"], 0.66)
+        self.assertEqual(m["n"], 10)
+        self.assertAlmostEqual(out["overall_pct"], 9.09, places=2)
+
+    def test_different_rod_count_is_not_paired(self):
+        samples = self._samples()
+        samples[0]["rod_count"] = 9
+        self.assertEqual(qs.triacetin_measurements(samples)["measurements"], [])
+
+    def test_gap_longer_than_five_minutes_is_not_paired(self):
+        samples = [
+            {"time": 0.0, "is_triacetin": False, "rod_count": 10, "weight": 0.72},
+            {"time": 301.0, "is_triacetin": True, "rod_count": 10, "weight": 0.66},
+        ]
+        self.assertEqual(qs.triacetin_measurements(samples)["measurements"], [])
+
+    def test_picks_nearest_regular_before_or_after(self):
+        samples = [
+            {"time": 90.0, "is_triacetin": False, "rod_count": 10, "weight": 0.72},
+            {"time": 100.0, "is_triacetin": True, "rod_count": 10, "weight": 0.66},
+            {"time": 115.0, "is_triacetin": False, "rod_count": 10, "weight": 0.80},
+        ]
+        m = qs.triacetin_measurements(samples)["measurements"][0]
+        self.assertAlmostEqual(m["regular_weight"], 0.72)
+
+    def test_tie_prefers_earlier_regular(self):
+        samples = [
+            {"time": 95.0, "is_triacetin": False, "rod_count": 10, "weight": 0.72},
+            {"time": 100.0, "is_triacetin": True, "rod_count": 10, "weight": 0.66},
+            {"time": 105.0, "is_triacetin": False, "rod_count": 10, "weight": 0.80},
+        ]
+        m = qs.triacetin_measurements(samples)["measurements"][0]
+        self.assertAlmostEqual(m["regular_weight"], 0.72)
+
+    def test_overall_is_mean_of_measurements(self):
+        samples = [
+            {"time": 0.0, "is_triacetin": False, "rod_count": 10, "weight": 0.72},
+            {"time": 10.0, "is_triacetin": True, "rod_count": 10, "weight": 0.66},
+            {"time": 20.0, "is_triacetin": False, "rod_count": 10, "weight": 0.78},
+            {"time": 30.0, "is_triacetin": True, "rod_count": 10, "weight": 0.70},
+        ]
+        out = qs.triacetin_measurements(samples)
+        self.assertAlmostEqual(out["measurements"][0]["triacetin_pct"], 9.09, places=2)
+        self.assertAlmostEqual(out["measurements"][1]["triacetin_pct"], 11.43, places=2)
+        self.assertAlmostEqual(out["overall_pct"], 10.26, places=2)
+
+    def test_status(self):
+        spec = ParamSpec("triacetin", 8.0, 7.5, 8.5, report_unit="%", decimals=2)
+        self.assertEqual(qs.triacetin_status(8.0, spec), qs.STATUS_PASS)
+        self.assertEqual(qs.triacetin_status(7.0, spec), qs.STATUS_FAIL)
+        self.assertEqual(qs.triacetin_status(9.0, spec), qs.STATUS_FAIL)
+        self.assertEqual(qs.triacetin_status(None, spec), qs.STATUS_NOT_MEASURED)
+
+
 if __name__ == "__main__":
     unittest.main()

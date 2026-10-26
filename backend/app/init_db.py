@@ -1,7 +1,21 @@
+"""
+LEGACY / FROZEN — do not extend.
+
+This module predates the Alembic migrations and the current ``roles`` schema
+(it still uses a ``name`` column instead of ``role_name``), so it is NOT run
+automatically and is only kept for historical reference. New schema goes through
+Alembic (000N migrations); do not add runtime DDL here.
+
+The superadmin seed below now bcrypt-hashes its password (previously it stored
+the plain-text ``123``). Password verification is bcrypt-only (see
+``app/password_utils.py``).
+"""
+
 import os
 import pathlib
 import importlib
 import psycopg2
+import bcrypt
 
 # ---------------------------------------------------------------------------
 # Load .env via the shared helper (searches repo root, backend/, then app/).
@@ -32,7 +46,12 @@ def get_conn():
 
 
 def init_db():
-    """Legacy: first-time database schema initialization."""
+    """FROZEN — refused to run. Schema is managed by Alembic migrations only."""
+    raise RuntimeError(
+        "init_db.py is FROZEN and refuses to run: schema is managed by Alembic "
+        "migrations only. Use `alembic upgrade head` instead."
+    )
+    # --- legacy code below is unreachable and kept only for historical reference ---
     try:
         conn = get_conn()
         cursor = conn.cursor()
@@ -69,10 +88,11 @@ def init_db():
         # 3. ДОБАВЛЯЕМ СУПЕРАДМИНА
         cursor.execute("SELECT id FROM users WHERE username = %s", ("superadmin",))
         if not cursor.fetchone():
+            superadmin_hash = bcrypt.hashpw(b"123", bcrypt.gensalt()).decode("utf-8")
             cursor.execute('''
                 INSERT INTO users (username, password_hash, email, role_id)
                 VALUES (%s, %s, %s, %s)
-            ''', ("superadmin", "123", "admin@factory.com", 1))
+            ''', ("superadmin", superadmin_hash, "admin@factory.com", 1))
             print("✅ Юзер 'superadmin' успешно добавлен.")
         else:
             print("ℹ️ 'superadmin' уже существует.")

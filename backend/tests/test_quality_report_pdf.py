@@ -47,6 +47,17 @@ class ShiftQualityReportPdfTests(unittest.TestCase):
         ))
         self.assertTrue(pdf.startswith(b"%PDF"))
 
+    def test_triacetin_table(self):
+        pdf = render_shift_quality_pdf(_data(triacetin=[
+            {"time": "15:57", "triacetin_pct": 8.2, "regular_weight": 0.72,
+             "dry_weight": 0.66, "n": 10},
+        ]))
+        self.assertTrue(pdf.startswith(b"%PDF"))
+
+    def test_empty_triacetin_table(self):
+        pdf = render_shift_quality_pdf(_data(triacetin=[]))
+        self.assertTrue(pdf.startswith(b"%PDF"))
+
 
 if __name__ == "__main__":
     unittest.main()

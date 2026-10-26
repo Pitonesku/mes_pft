@@ -67,5 +67,27 @@ class LabelTests(unittest.TestCase):
         self.assertEqual(sr.pick_run(runs, at(5), "  A ")[0].id, 1)
 
 
+class SampleIdFallbackTests(unittest.TestCase):
+    def test_sample_id_used_when_mo_ref_empty_and_matches(self):
+        runs = [run(1, 1, "A", 0, 120), run(2, 2, "B", 120)]
+        run_, status = sr.pick_run(runs, at(130), "", sample_id="B")
+        self.assertEqual((run_.id, status), (2, sr.LINK_LINKED))
+
+    def test_sample_id_ignored_when_no_run_matches(self):
+        runs = [run(1, 1, "A", 0, 120), run(2, 2, "B", 120)]
+        run_, status = sr.pick_run(runs, at(130), "", sample_id="I099")
+        self.assertEqual((run_.id, status), (2, sr.LINK_LINKED))
+
+    def test_mo_ref_takes_precedence_over_sample_id(self):
+        runs = [run(1, 1, "A", 0, 120), run(2, 2, "B", 120)]
+        run_, status = sr.pick_run(runs, at(130), "A", sample_id="B")
+        self.assertEqual((run_.id, status), (1, sr.LINK_LINKED))
+
+    def test_sample_id_whitespace_is_ignored(self):
+        runs = [run(1, 1, "A", 0, 120), run(2, 2, "B", 120)]
+        run_, status = sr.pick_run(runs, at(130), "", sample_id="  B ")
+        self.assertEqual((run_.id, status), (2, sr.LINK_LINKED))
+
+
 if __name__ == "__main__":
     unittest.main()

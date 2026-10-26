@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 STATUS_PASS = "PASS"
@@ -43,6 +44,7 @@ CERTIFICATE_PARAMS = [
     ("pd", "PD", "mm WG"),
     ("hardness", "Hardness", "%"),
     ("weight", "Weight", "mg"),
+    ("triacetin", "Triacetin", "%"),
 ]
 
 # Fallback report units per parameter. quality_specs rows may leave report_unit
@@ -53,6 +55,7 @@ _UNIT_FALLBACK = {
     "pd": "mm WG",
     "hardness": "%",
     "weight": "mg",
+    "triacetin": "%",
 }
 
 
@@ -377,3 +380,113 @@ def _param_status(mean: float, out_of_spec: int, spec: ParamSpec) -> str:
     if (spec.lower is not None and mean < spec.lower) or (spec.upper is not None and mean > spec.upper):
         return STATUS_FAIL
     return STATUS_WARN if out_of_spec > 0 else STATUS_PASS
+
+
+# --------------------------------------------------------------------------- #
+# Triacetin measurement
+# --------------------------------------------------------------------------- #
+#
+# Triacetin is applied to filter rods and can only be measured indirectly: the
+# operator measures a regular batch of rods, then a second batch of the SAME rod
+# count measured WITHOUT triacetin (marked "Triacetin" in the station Sample ID /
+# Batch Description / Comments). The difference is the triacetin weight, reported
+# as a percentage of the dry (no-triacetin) rod weight.
+#
+# Dry batches are excluded from every normal statistic and are only used here.
+
+TRIACETIN_MARKER = "triacetin"
+
+
+def is_triacetin_marker(*values: Optional[str]) -> bool:
+    """True when any metadata string marks a dry (no-triacetin) batch."""
+    marker = TRIACETIN_MARKER
+    for value in values:
+        if value is not None and marker in str(value).lower():
+            return True
+    return False
+
+
+def _as_epoch(t: Any) -> Optional[float]:
+    """Normalize a datetime or numeric timestamp to epoch seconds (for gap math)."""
+    if t is None:
+        return None
+    if isinstance(t, datetime):
+        return t.timestamp()
+    try:
+        return float(t)
+    except (TypeError, ValueError):
+        return None
+
+
+def triacetin_measurements(
+    samples: Sequence[Mapping[str, Any]],
+    max_gap_seconds: float = 300.0,
+) -> Dict[str, Any]:
+    """Pair dry (no-triacetin) batches with regular batches and compute triacetin %.
+
+    ``samples`` must be chronological dicts::
+
+        {"time": datetime|epoch, "is_triacetin": bool,
+         "rod_count": int, "weight": mean weight per rod}
+
+    A dry sample is paired with the nearest regular sample that has the SAME
+    ``rod_count`` and whose |time| gap is within ``max_gap_seconds`` (before or
+    after the dry sample, whichever is closer; a tie prefers the earlier one).
+
+    ``triacetin_pct = (regular_weight - dry_weight) / dry_weight * 100``.
+
+    Returns ``{"measurements": [...], "overall_pct": ...}``. Each measurement
+    carries ``time`` (the dry batch's timestamp), ``triacetin_pct``,
+    ``regular_weight``, ``dry_weight`` and ``n`` (rod count). ``overall_pct`` is
+    the mean of the paired percentages, or None when nothing could be paired.
+    """
+    regular = [s for s in samples if not s.get("is_triacetin")]
+    dry = [s for s in samples if s.get("is_triacetin")]
+
+    measurements: List[Dict[str, Any]] = []
+    for d in dry:
+        d_time = _as_epoch(d.get("time"))
+        d_count = int(d.get("rod_count") or 0)
+        d_w = _num(d.get("weight"))
+        if d_time is None or d_w is None or d_count <= 0:
+            continue
+        best: Optional[tuple] = None
+        best_gap: Optional[float] = None
+        for r in regular:
+            if int(r.get("rod_count") or 0) != d_count:
+                continue
+            r_time = _as_epoch(r.get("time"))
+            r_w = _num(r.get("weight"))
+            if r_time is None or r_w is None:
+                continue
+            gap = abs(r_time - d_time)
+            if gap > max_gap_seconds:
+                continue
+            if best_gap is None or gap < best_gap:
+                best_gap = gap
+                best = (r_time, r_w)
+            elif gap == best_gap and best is not None and r_time < best[0]:
+                best = (r_time, r_w)  # deterministic tie-break -> earlier regular batch
+        if best is None:
+            continue
+        pct = (best[1] - d_w) / d_w * 100.0
+        measurements.append({
+            "time": d.get("time"),
+            "triacetin_pct": round(pct, 2),
+            "regular_weight": best[1],
+            "dry_weight": d_w,
+            "n": d_count,
+        })
+
+    pcts = [m["triacetin_pct"] for m in measurements]
+    overall = round(sum(pcts) / len(pcts), 2) if pcts else None
+    return {"measurements": measurements, "overall_pct": overall}
+
+
+def triacetin_status(pct: Optional[float], spec: ParamSpec) -> str:
+    """PASS/FAIL for a computed triacetin percentage against its spec limits."""
+    if pct is None:
+        return STATUS_NOT_MEASURED
+    if (spec.lower is not None and pct < spec.lower) or (spec.upper is not None and pct > spec.upper):
+        return STATUS_FAIL
+    return STATUS_PASS

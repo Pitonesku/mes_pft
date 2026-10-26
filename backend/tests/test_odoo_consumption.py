@@ -50,6 +50,14 @@ class ParseConsumptionTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["used"], 15.0)
 
+    def test_aggregate_sums_multiple_batches(self):
+        r = report_with(
+            '{"acetate_list": [{"type": "Cerdia", "batch": "B1", "used": 78.0}, {"type": "Cerdia", "batch": "B2", "used": 482.0}]}'
+        )
+        items = consumption.aggregate_consumption([r])
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["used"], 560.0)
+
 
 class BobbinLengthTests(unittest.TestCase):
     def test_parses_metres(self):
@@ -104,6 +112,15 @@ class PlanConsumptionTests(unittest.TestCase):
         self.assertEqual(plan["actions"][0]["qty"], 172.0)
         self.assertEqual(plan["skipped"], [])
 
+    def test_matches_by_odoo_product_id_not_name(self):
+        c = self._client([self._move(941, "Cerdia Acetate Tow 3,0Y30000HK (560kg)")])
+        items = [{"category": "acetate", "type_name": "Cerdia 3.0Y30000", "used": 560.0, "unit": "kg", "odoo_product_id": 941}]
+        plan = c.plan_consumption(1, items)
+        self.assertEqual(len(plan["actions"]), 1)
+        self.assertEqual(plan["actions"][0]["product_id"], 941)
+        self.assertEqual(plan["actions"][0]["qty"], 560.0)
+        self.assertEqual(plan["skipped"], [])
+
     def test_zero_item_writes_zero_qty(self):
         c = self._client([self._move(5, "Tobacoll Q 2237")])
         items = [{"category": "hotMelt", "type_name": "Tobacoll Q 2237", "used": 0.0, "unit": "kg"}]
@@ -127,12 +144,13 @@ class PlanConsumptionTests(unittest.TestCase):
         self.assertEqual(plan["actions"], [])
         self.assertIn("unit mismatch", plan["skipped"][0]["reason"])
 
-    def test_overconsumption_is_skipped(self):
+    def test_overconsumption_writes_true_amount(self):
         c = self._client([self._move(5, "Cerdia 3.0Y30000", qty=100.0)])
         items = [{"category": "acetate", "type_name": "Cerdia 3.0Y30000", "used": 172.0, "unit": "kg"}]
         plan = c.plan_consumption(1, items)
-        self.assertEqual(plan["actions"], [])
-        self.assertIn("over-consumption", plan["skipped"][0]["reason"])
+        self.assertEqual(len(plan["actions"]), 1)
+        self.assertEqual(plan["actions"][0]["qty"], 172.0)
+        self.assertEqual(plan["skipped"], [])
 
     def test_paper_bobbin_converts_to_metres(self):
         c = self._client([self._move(6, "Delfort 27mm/6000m", qty=50000.0, uom="m")], uom_cat="Length")

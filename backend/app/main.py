@@ -53,6 +53,12 @@ else:
     import schemas
     from database import engine, get_db, SessionLocal
 
+# Password hashing/verification (pure, bcrypt-only — see password_utils.py).
+if __package__:
+    password_utils = importlib.import_module(f"{__package__}.password_utils")
+else:
+    import password_utils
+
 # Admin Panel (SQLAdmin)
 if __package__:
     admin_module = importlib.import_module(f"{__package__}.admin")
@@ -144,19 +150,11 @@ IS_PRODUCTION = ENV == "production"
 # Password hashing: native bcrypt (no passlib — incompatible with Python 3.12 + bcrypt 4.x)
 # PBKDF2-SHA256 for offline mobile app verification.
 
-def hash_password(plain_password: str) -> str:
-    """Hash a plain-text password using bcrypt for server storage."""
-    return bcrypt.hashpw(plain_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a plain-text password against a bcrypt hash.
-    Falls back to direct comparison for legacy plain-text hashes."""
-    try:
-        return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
-    except (ValueError, TypeError):
-        # If the stored hash is not a valid bcrypt hash (e.g., plain text from old seed),
-        # fall back to direct comparison for backward compatibility.
-        return plain_password == hashed_password
+# Password hashing/verification lives in password_utils.py so it stays pure and
+# unit-testable. bcrypt-only — no legacy plain-text fallback (that fallback let
+# accounts with an empty/plain-text password_hash log in with an empty password).
+hash_password = password_utils.hash_password
+verify_password = password_utils.verify_password
 
 def generate_offline_pin(plain_password: str) -> str:
     """
@@ -175,6 +173,48 @@ def generate_offline_pin(plain_password: str) -> str:
 
 # get_current_user is now imported from auth.py (bearer-token based) and
 # replaces the previous spoofable X-User-Id header check.
+
+
+def _is_admin_user(user) -> bool:
+    """True when the user's role is admin/superadmin or grants user management."""
+    role = getattr(user, "role", None)
+    if role is None:
+        return False
+    return (
+        ((role.role_name or "").strip().lower() in ("admin", "superadmin"))
+        or bool(getattr(role, "can_manage_users", False))
+    )
+
+
+# --- Login brute-force throttle (in-memory, per-process) --------------------
+# Keyed by username. Single-process deployments only; use a shared store (e.g.
+# Redis) if running multiple uvicorn workers.
+_login_failures: dict = {}
+_login_failures_lock = threading.Lock()
+_MAX_LOGIN_FAILURES = 5
+_LOGIN_FAILURE_WINDOW_SECONDS = 300
+
+
+def _check_login_throttle(username: str) -> None:
+    now = time.time()
+    with _login_failures_lock:
+        attempts = [t for t in _login_failures.get(username, []) if now - t < _LOGIN_FAILURE_WINDOW_SECONDS]
+        _login_failures[username] = attempts
+        if len(attempts) >= _MAX_LOGIN_FAILURES:
+            raise HTTPException(status_code=429, detail="Too many failed login attempts. Try again later.")
+
+
+def _record_login_failure(username: str) -> None:
+    now = time.time()
+    with _login_failures_lock:
+        attempts = [t for t in _login_failures.get(username, []) if now - t < _LOGIN_FAILURE_WINDOW_SECONDS]
+        attempts.append(now)
+        _login_failures[username] = attempts
+
+
+def _clear_login_failures(username: str) -> None:
+    with _login_failures_lock:
+        _login_failures.pop(username, None)
 
 
 # === Cross-platform path resolution ===
@@ -232,6 +272,25 @@ print(
     f"📁 LOCAL_PDF_ARCHIVE_PATH → {os.environ['LOCAL_PDF_ARCHIVE_PATH']}"
 )
 print(f"📁 APK_RELEASES_DIR      → {os.environ['APK_RELEASES_DIR']}")
+
+# Resolve Google Drive credential/token FILE paths relative to the repo root
+# (where .env and Gdrive_secret.json live) so they work regardless of the CWD.
+def _resolve_repo_file(env_var: str) -> str:
+    raw = (os.getenv(env_var) or "").strip()
+    if not raw:
+        return raw
+    p = pathlib.Path(raw)
+    if not p.is_absolute():
+        p = (BASE_DIR.parent.parent / raw).resolve()
+    return str(p)
+
+
+_GOOGLE_CREDS = _resolve_repo_file("GOOGLE_CREDENTIALS_PATH")
+if _GOOGLE_CREDS:
+    os.environ["GOOGLE_CREDENTIALS_PATH"] = _GOOGLE_CREDS
+_GOOGLE_TOKEN = _resolve_repo_file("GOOGLE_TOKEN_PATH")
+if _GOOGLE_TOKEN:
+    os.environ["GOOGLE_TOKEN_PATH"] = _GOOGLE_TOKEN
 
 # Автоматическое создание таблиц
 models.Base.metadata.create_all(bind=engine)
@@ -720,12 +779,30 @@ app = FastAPI(
     openapi_url=None if IS_PRODUCTION else "/openapi.json",
 )
 
+def _cors_origins() -> list:
+    """Origins allowed for browser CORS.
+
+    The web console is served same-origin by this server and the tablet app is
+    native (unaffected by CORS). Override with a comma-separated
+    ``CORS_ALLOWED_ORIGINS`` if an external origin (e.g. a reverse-proxy domain)
+    needs to call the API from a browser.
+    """
+    raw = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
+    if raw:
+        return [o.strip() for o in raw.split(",") if o.strip()]
+    origins = ["http://localhost:8000", "http://127.0.0.1:8000"]
+    public = os.getenv("MES_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if public:
+        origins.append(public)
+    return origins
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_cors_origins(),
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    allow_headers=["Authorization", "Content-Type", "X-Station-Key"],
 )
 
 # NOTE: SessionMiddleware is registered automatically by sqladmin AuthenticationBackend
@@ -775,6 +852,12 @@ def create_user(
     print(f"--- SERVER: Creating user ---")
     print(f"Username: {user.username}, Email: {user.email}, Role: {user.role_id}")
 
+    if not _is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Only administrators can create users")
+
+    if not user.password:
+        raise HTTPException(status_code=400, detail="Password must not be empty")
+
     # Проверяем, что пользователь с таким username не существует
     existing = db.query(models.User).filter(models.User.username == user.username).first()
     if existing:
@@ -816,6 +899,9 @@ def update_user(
     parsed = user_data.model_dump(exclude_none=True)
     password = parsed.pop("password", None)
 
+    if password == "":
+        raise HTTPException(status_code=400, detail="Password must not be empty")
+
     for key, value in parsed.items():
         if is_superadmin:
             if key == "is_inactive" and value is True:
@@ -842,19 +928,28 @@ def login(credentials: dict, db: Session = Depends(get_db)):
     Uses bcrypt verification. No passwordless superadmin bypass.
     """
     username = credentials.get("username")
-    password = credentials.get("password", "")
+    password = credentials.get("password", "") or ""
+
+    if not username:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    _check_login_throttle(username)
 
     user = db.query(models.User).filter(models.User.username == username).first()
 
     if not user:
+        _record_login_failure(username)
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
     if user.is_inactive:
         raise HTTPException(status_code=403, detail="User account is inactive")
 
-    # Verify password using bcrypt (with plain-text backward compat)
+    # Verify password using bcrypt (no plain-text fallback — password_utils).
     if not verify_password(password, user.password_hash):
+        _record_login_failure(username)
         raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    _clear_login_failures(username)
 
     return {
         "status": "success",
@@ -888,8 +983,12 @@ def get_offline_auth_users(
     Returns a minimal list of users for offline authentication caching.
     Protected endpoint — requires a bearer token from an authenticated user.
     
-    Returns: id, username, role_id, email, password_pin (PBKDF2 hash for offline verification)
+    Admin only — this payload includes PBKDF2 password pins (password-equivalent
+    hashes) and must not be exposed to regular operators.
     """
+    if not _is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Admin only")
+
     users = db.query(models.User).filter(models.User.is_inactive == False).all()
     return {
         "users": [
@@ -1070,53 +1169,18 @@ def get_report_by_id(report_id: int, db: Session = Depends(get_db)):
     )
     return report_item
 
-@app.post("/api/users/create-with-auth", response_model=schemas.User)
-def create_user_with_auth(payload: dict, db: Session = Depends(get_db)):
-    """
-    Создает нового пользователя (только superadmin).
-    Payload должен содержать: admin_username, admin_password, и данные нового пользователя.
-    """
-    admin_username = payload.get("admin_username")
-    admin_password = payload.get("admin_password", "")
-
-    # Проверяем, что это superadmin
-    admin_user = db.query(models.User).filter(models.User.username == admin_username).first()
-    if not admin_user or admin_username != "superadmin":
-        raise HTTPException(status_code=403, detail="Only superadmin can create users")
-
-    # Для superadmin - вход без пароля
-    if admin_username != "superadmin" or (admin_username == "superadmin" and admin_password != ""):
-        raise HTTPException(status_code=403, detail="Invalid admin credentials")
-
-    # Получаем данные нового пользователя
-    new_user_data = payload.get("user_data", {})
-
-    # Проверяем, что пользователь с таким username не существует
-    existing = db.query(models.User).filter(models.User.username == new_user_data.get("username")).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="User already exists")
-
-    # Создаем нового пользователя
-    new_user = models.User(
-        username=new_user_data.get("username"),
-        email=new_user_data.get("email", ""),
-        password_hash=new_user_data.get("password", ""),
-        role_id=new_user_data.get("role_id", 3),  # 3 = operator по умолчанию
-        is_inactive=False
-    )
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-
-    return new_user
+# NOTE: the legacy passwordless ``/api/users/create-with-auth`` endpoint has been
+# removed. User creation must go through the authenticated ``POST /api/users``
+# endpoint (admin-only, bcrypt-hashed password).
 
 # --- 2. УПРАВЛЕНИЕ ЗАКАЗАМИ (PURCHASE ORDERS) ---
 
 def _apply_po_tolerance_specs(db, db_po, diameter_tol, pd_tol):
     """Upsert per-PO quality_specs rows from ± tolerance overrides.
 
-    Creates/updates ``quality_specs`` rows (scope='po') for diameter and pressure
-    drop so the quality overview and charts pick up PO-specific limits.
+    Creates/updates ``quality_specs`` rows (scope='po') for diameter, pressure
+    drop and triacetin so the quality overview and charts pick up PO-specific
+    limits.
     """
     def _upsert(parameter, nominal, tol, unit, decimals):
         if nominal is None or tol is None:
@@ -1148,8 +1212,12 @@ def _apply_po_tolerance_specs(db, db_po, diameter_tol, pd_tol):
             row.nominal = nominal_f
             row.lower_limit = lower
             row.upper_limit = upper
+            row.report_unit = unit
+            row.report_scale = 1
+            row.decimals = decimals
     _upsert("diameter", db_po.diameter, diameter_tol, "mm", 3)
     _upsert("pd", db_po.pd, pd_tol, "mm WG", 1)
+    _upsert("triacetin", db_po.triacetin, db_po.triacetin_tolerance, "%", 2)
 
 
 @app.get("/api/purchase-orders", response_model=list[schemas.PO])

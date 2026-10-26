@@ -139,5 +139,42 @@ class ConfigTests(unittest.TestCase):
             self.assertFalse(odoo_client.OdooConfig.from_env().shadow)
 
 
+class LiveDispatchSkipTests(unittest.TestCase):
+    """A live (non-shadow) completion that is skipped must fail, never 'synced'."""
+
+    class SkippingClient:
+        is_shadow = False
+
+        def resolve_open_mo(self, mo_id):
+            return mo_id
+
+        def write_mo_quality(self, mo_id, run):
+            return {"skipped": False}
+
+        def attach_pdf(self, *args, **kwargs):
+            return 1
+
+        def attach_file(self, *args, **kwargs):
+            return 1
+
+        def post_completion(self, mo_id, qty_rods, consumption=None):
+            return {"skipped": True, "reason": "already done"}
+
+    def test_skip_raises_and_does_not_mark_synced(self):
+        run = dict(RUN_SUMMARY, certificate=[])
+        report = SimpleNamespace(produced_rods=4, materials_json="{}")
+        db_run = SimpleNamespace(
+            id=5, shift_id=1, po_id=None, mo_ref="MO-1", odoo_mo_id=None,
+            odoo_sync_status="pending", odoo_done_qty=None, odoo_backorder_id=None,
+            report_id=None, started_at=None,
+        )
+        client = self.SkippingClient()
+        with mock.patch.object(outbound, "_verified_reports", return_value=[report]), \
+                mock.patch.object(outbound, "_resolve_material_lots"):
+            with self.assertRaises(odoo_client.OdooError):
+                outbound._dispatch_run(None, client, db_run, run, 1)
+        self.assertEqual(db_run.odoo_sync_status, "pending")
+
+
 if __name__ == "__main__":
     unittest.main()
