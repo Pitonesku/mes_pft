@@ -51,6 +51,12 @@ class AppData {
   static Set<String> submittedReports = {}; 
   static const String _pendingSetupKey = 'pending_setup_changes';
 
+  /// True when the app is showing the built-in fallback/demo data because the
+  /// server is unreachable and no cached data exists. Drives the
+  /// "Offline - limited data" banner.
+  static bool usingFallbackData = true;
+
+
   static Future<void> saveMachinesCache() async {
     final prefs = await SharedPreferences.getInstance();
     prefs.setString('cache_machines', jsonEncode(machines.map((m) => m.toJson()).toList()));
@@ -163,6 +169,14 @@ class AppData {
       
       AppLog.d("📦 Local cache loaded.");
       await syncPendingSetupChanges();
+
+      if (cachedMachines != null ||
+          cachedPOs != null ||
+          cachedUsers != null ||
+          cachedMaterials != null ||
+          cachedShifts != null) {
+        usingFallbackData = false;
+      }
     }
 
     // 2. CHECK SERVER VERSION
@@ -222,6 +236,7 @@ class AppData {
       }
 
       prefs.setString('data_version', serverVersion);
+      usingFallbackData = false;
       AppLog.i("🎉 Cache successfully updated to version $serverVersion!");
 
       // Cleanup local DB: remove synced/cached reports older than 5 days

@@ -74,6 +74,66 @@ class ManualCheckApiTests(DbTestCase):
                               db=self.db, current_user=mgr)
         self.assertEqual(out["run"]["po_id"], self.po_b.id)
 
+    def test_triacetin_fallback_is_computed_and_stored(self):
+        c = self._check(triacetin_wet_mg=720.0, triacetin_dry_mg=660.0, triacetin_rods=10)
+        self.assertAlmostEqual(c["triacetin_pct"], 9.09, places=2)
+        self.assertIn("triacetin", c["verdicts"])
+        self.assertAlmostEqual(c["verdicts"]["triacetin"]["value"], 9.09, places=2)
+
+    def test_triacetin_needs_positive_dry_weight(self):
+        with self.assertRaises(HTTPException) as ctx:
+            self._check(triacetin_wet_mg=720.0, triacetin_dry_mg=0.0)
+        self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_machine_manual_test_config_roundtrip(self):
+        cfg = v2.get_machine_manual_test_config(self.m1.id, db=self.db, current_user=self.user)
+        self.assertEqual(
+            [p["key"] for p in cfg["parameters"]],
+            ["weight", "length", "hardness", "glue_seam", "cut_quality",
+             "visual_cleanness", "triacetin"],
+        )
+        v2.update_machine_manual_test_config(
+            self.m1.id,
+            v2.ManualTestConfigPayload(
+                config={"weight": {"is_visible": False, "is_required": True}},
+                reminder_interval_minutes=15,
+            ),
+            db=self.db, current_user=self.user)
+        cfg2 = v2.get_machine_manual_test_config(self.m1.id, db=self.db, current_user=self.user)
+        weight = next(p for p in cfg2["parameters"] if p["key"] == "weight")
+        self.assertFalse(weight["is_visible"])
+        self.assertTrue(weight["is_required"])
+        self.assertEqual(cfg2["reminder_interval_minutes"], 15)
+
+    def test_machine_manual_test_config_unknown_machine_404(self):
+        with self.assertRaises(HTTPException) as ctx:
+            v2.get_machine_manual_test_config(999999, db=self.db, current_user=self.user)
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_machine_manual_tests_endpoint(self):
+        self._check(length_mm=108.0, hardness=84.0,
+                    triacetin_wet_mg=720.0, triacetin_dry_mg=660.0, triacetin_rods=10)
+        out = v2.machine_manual_tests(self.m1.id, db=self.db)
+        self.assertEqual(out["run_id"], self.opened["run"]["id"])
+        self.assertEqual(out["mo_ref"], self.po_a.po_number)
+        self.assertEqual(len(out["config"]["parameters"]), 7)
+        self.assertEqual(len(out["checks"]), 1)
+        row = out["checks"][0]
+        self.assertIsNone(row["weight_mg"])
+        self.assertAlmostEqual(row["length_mm"], 108.0, places=2)
+        self.assertAlmostEqual(row["triacetin_pct"], 9.09, places=2)
+
+    def test_machine_manual_tests_unknown_machine_404(self):
+        with self.assertRaises(HTTPException) as ctx:
+            v2.machine_manual_tests(999999, db=self.db)
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_dashboard_summary_includes_last_manual_test_at(self):
+        self._check(glue_seam_ok=True)
+        summary = v2.dashboard_summary(db=self.db)
+        machine = next(m for m in summary["machines"] if m["machine_id"] == self.m1.id)
+        self.assertIsNotNone(machine["last_manual_test_at"])
+
 
 if __name__ == "__main__":
     unittest.main()

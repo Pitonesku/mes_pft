@@ -76,6 +76,14 @@ class Machine(Base):
     remarks = Column(Text)
     is_inactive = Column(Boolean, default=False)
 
+    # Per-machine manual QC test config: visibility / required flags per
+    # parameter. NULL = factory default (every parameter visible, none required).
+    manual_test_config = Column(JSONB, nullable=True)
+
+    # Minutes between manual QC tests before the operator app raises an in-app
+    # "dead man's switch" reminder. NULL or 0 = disabled.
+    reminder_interval_minutes = Column(Integer, nullable=True)
+
     
 
 class Shift(Base):
@@ -436,6 +444,11 @@ class ManualQualityCheck(Base):
     sample_weight = Column(Numeric, nullable=True)   # grams per ``sample_rods`` rods
     length_mm = Column(Numeric, nullable=True)        # millimetres
     hardness = Column(Numeric, nullable=True)         # percent (manual, not station)
+    # Manual triacetin fallback: operator weighs a wet and a dry batch of N rods.
+    triacetin_wet_mg = Column(Numeric, nullable=True)  # wet (with triacetin) total, mg
+    triacetin_dry_mg = Column(Numeric, nullable=True)  # dry (no triacetin) total, mg
+    triacetin_rods = Column(Integer, nullable=True)    # rods per batch
+    triacetin_pct = Column(Numeric, nullable=True)     # server-computed (wet-dry)/dry*100
     # Tri-state: True = OK, False = FAIL, NULL = not checked.
     glue_seam_ok = Column(Boolean, nullable=True)
     cut_quality_ok = Column(Boolean, nullable=True)

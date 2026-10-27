@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../dashboard_data.dart';
+import 'manual_tests_dialog.dart';
 
 class MachineWidget extends StatelessWidget {
   final Map<String, dynamic> config;
@@ -43,6 +44,7 @@ class MachineWidget extends StatelessWidget {
     final statusDia = machine['status_dia']?.toString();
     final shiftStartedAt = machine['shift_started_at']?.toString();
     final lastMeasuredAt = machine['last_measured_at']?.toString();
+    final lastManualTestAt = machine['last_manual_test_at']?.toString();
 
     final stateColor = switch (state) {
       'running' => Colors.green,
@@ -77,6 +79,10 @@ class MachineWidget extends StatelessWidget {
               _row('Active PO', activePo),
               _row('Active shift', _time(shiftStartedAt)),
               _row('Last sample', _relative(lastMeasuredAt)),
+              _row('Last manual test',
+                  (lastManualTestAt == null || lastManualTestAt.isEmpty)
+                      ? 'No data'
+                      : _relative(lastManualTestAt)),
               const SizedBox(height: 10),
               Row(children: [
                 Expanded(
@@ -91,6 +97,18 @@ class MachineWidget extends StatelessWidget {
                 const SizedBox(width: 4),
                 Text('Open live quality',
                     style: TextStyle(fontSize: 10, color: Colors.grey[600])),
+                const Spacer(),
+                InkWell(
+                  onTap: () => _openManualTests(context, machine!),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(Icons.fact_check_outlined,
+                        size: 12, color: Colors.deepPurple),
+                    const SizedBox(width: 4),
+                    Text('Open manual tests',
+                        style: TextStyle(
+                            fontSize: 10, color: Colors.deepPurple)),
+                  ]),
+                ),
               ]),
             ],
           ),
@@ -145,6 +163,18 @@ class MachineWidget extends StatelessWidget {
     await launchUrl(
       Uri.base.resolve('/#/kiosk/quality?machine=${Uri.encodeComponent(a)}'),
       webOnlyWindowName: '_blank',
+    );
+  }
+
+  void _openManualTests(BuildContext context, Map<String, dynamic> machine) {
+    final id = (machine['machine_id'] as num?)?.toInt();
+    if (id == null) return;
+    showDialog(
+      context: context,
+      builder: (_) => ManualTestsDialog(
+        machineId: id,
+        machineName: machine['alias']?.toString(),
+      ),
     );
   }
 

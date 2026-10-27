@@ -490,3 +490,69 @@ def triacetin_status(pct: Optional[float], spec: ParamSpec) -> str:
     if (spec.lower is not None and pct < spec.lower) or (spec.upper is not None and pct > spec.upper):
         return STATUS_FAIL
     return STATUS_PASS
+
+
+def manual_triacetin_pct(wet_mg: Any, dry_mg: Any) -> Optional[float]:
+    """Manual triacetin fallback percentage from wet/dry batch weights (mg).
+
+    Uses the same formula as :func:`triacetin_measurements`:
+    ``(wet - dry) / dry * 100``. ``wet`` is the batch weighed with triacetin,
+    ``dry`` the same rod count weighed without it.
+    """
+    wet = _num(wet_mg)
+    dry = _num(dry_mg)
+    if wet is None or dry is None or dry <= 0:
+        return None
+    return round((wet - dry) / dry * 100.0, 2)
+
+
+def manual_triacetin_measurements(
+    checks: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Convert manual QC checks carrying triacetin data into measurement dicts.
+
+    The output matches :func:`triacetin_measurements` so station-paired and
+    manual results can be merged into one Triacetin table. ``regular_weight`` /
+    ``dry_weight`` are reported per rod in grams (the operator enters total mg
+    for ``triacetin_rods`` rods). Each dict is flagged ``"source": "manual"``.
+    """
+    out: List[Dict[str, Any]] = []
+    for c in checks:
+        wet = _num(c.get("triacetin_wet_mg"))
+        dry = _num(c.get("triacetin_dry_mg"))
+        rods = c.get("triacetin_rods")
+        try:
+            n = int(rods) if rods is not None else 0
+        except (TypeError, ValueError):
+            n = 0
+        pct = manual_triacetin_pct(wet, dry)
+        if pct is None:
+            continue
+        divisor = n if n > 0 else 1
+        out.append({
+            "time": c.get("measured_at"),
+            "triacetin_pct": pct,
+            "regular_weight": round(wet / 1000.0 / divisor, 5),
+            "dry_weight": round(dry / 1000.0 / divisor, 5),
+            "n": n,
+            "source": "manual",
+        })
+    return out
+
+
+def merge_triacetin(
+    station_result: Optional[Mapping[str, Any]],
+    manual_measurements: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Merge station-paired and manual triacetin measurements.
+
+    ``station_result`` is the output of :func:`triacetin_measurements`. Manual
+    measurements are appended and the overall percentage is recomputed as the
+    mean of every individual percentage.
+    """
+    measurements = list((station_result or {}).get("measurements", []))
+    measurements.extend(manual_measurements)
+    pcts = [_num(m.get("triacetin_pct")) for m in measurements]
+    pcts = [p for p in pcts if p is not None]
+    overall = round(sum(pcts) / len(pcts), 2) if pcts else None
+    return {"measurements": measurements, "overall_pct": overall}

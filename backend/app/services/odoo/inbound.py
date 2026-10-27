@@ -11,7 +11,8 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from app import models
-from app.services.odoo.client import OdooClient, OdooError, _id_ref
+from app.services import aggregation
+from app.services.odoo.client import OdooClient, OdooError, QC_SPEC_PARAMS, _id_ref
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,9 @@ def _qty_pieces(qty: float, uom_name: str) -> float:
     return float(qty)
 
 
-def handle_mo_event(session: Session, event: Dict[str, Any]) -> Dict[str, Any]:
+def handle_mo_event(
+    session: Session, event: Dict[str, Any], client: Optional[OdooClient] = None
+) -> Dict[str, Any]:
     """Create/update the MES side of a Manufacturing Order pushed from Odoo.
 
     Idempotent by ``mo_id``: re-pushing the same MO updates the order + filtered
@@ -183,6 +186,7 @@ def handle_mo_event(session: Session, event: Dict[str, Any]) -> Dict[str, Any]:
     if target_pcs:
         po.target_qty = int(round(target_pcs))
 
+    spec = _resolve_spec(session, client, mo_id, event.get("product_id"), spec, po)
     _apply_po_spec(po, spec)
     # Top-level box_type (rods per box from the Base Packaging) is authoritative;
     # spec['box_type'] remains the fallback handled inside _apply_po_spec.
@@ -256,6 +260,83 @@ def _handle_state_event(
     return {"mo_id": mo_id, "po_id": po.id, "state": state, "odoo_state": po.odoo_state}
 
 
+def _resolve_spec(
+    session: Session,
+    client: Optional[OdooClient],
+    mo_id: int,
+    product_id: Any,
+    webhook_spec: Optional[Dict[str, Any]],
+    po,
+) -> Dict[str, Any]:
+    """Resolve QC target params/tolerances with a 3-level fallback.
+
+    1. Webhook spec / current MO fields (Level 1).
+    2. Odoo product template defaults (Level 2).
+    3. MES global defaults (Level 3: PO nominal columns + factory tolerances).
+    """
+    spec: Dict[str, Any] = dict(webhook_spec or {})
+
+    # Level 1 + Level 2: authoritative Odoo MO / product target fields.
+    if client is not None and mo_id:
+        try:
+            odoo_spec, sources = client.resolve_mo_product_spec(mo_id, product_id)
+            logger.info("Odoo spec sources for MO %s: %s", mo_id, sources)
+        except OdooError as exc:
+            logger.warning("Odoo spec fallback read failed for MO %s: %s", mo_id, exc)
+            odoo_spec = {}
+        for param in QC_SPEC_PARAMS:
+            if _f(spec.get(param)) not in (None, 0.0):
+                continue
+            nominal = _f(odoo_spec.get(param))
+            if nominal not in (None, 0.0):
+                spec[param] = nominal
+                tol = _f(odoo_spec.get(f"{param}_tolerance"))
+                if tol not in (None, 0.0):
+                    spec[f"{param}_tolerance"] = tol
+
+    # Self-heal the backorder MO in Odoo so its UI no longer shows zeros.
+    if client is not None and mo_id and product_id is not None:
+        try:
+            client.fill_mo_spec_from_product(mo_id, product_id)
+        except OdooError as exc:
+            logger.warning("Odoo backorder spec self-heal failed for MO %s: %s", mo_id, exc)
+
+    return _fill_global_fallback(session, spec, po)
+
+
+def _fill_global_fallback(session: Session, spec: Dict[str, Any], po) -> Dict[str, Any]:
+    """Level 3: fill remaining gaps from PO nominal columns + MES global defaults."""
+    glob = aggregation.global_spec_defaults(session)
+    po_nominals = {
+        "diameter": getattr(po, "diameter", None),
+        "pd": getattr(po, "pd", None),
+        "weight": getattr(po, "weight", None),
+        "length": getattr(po, "length", None),
+        "hardness": None,
+    }
+    for param in QC_SPEC_PARAMS:
+        nominal = _f(spec.get(param))
+        if nominal in (None, 0.0):
+            nominal = _f(po_nominals.get(param))
+        if nominal in (None, 0.0):
+            nominal = _f((glob.get(param) or {}).get("nominal"))
+        if nominal not in (None, 0.0):
+            spec[param] = nominal
+        tol = _f(spec.get(f"{param}_tolerance"))
+        if tol in (None, 0.0):
+            tol = _f((glob.get(param) or {}).get("tolerance"))
+        if tol is not None:
+            spec[f"{param}_tolerance"] = tol
+    # Normalize: a zero nominal/tolerance means "missing" (Odoo returns 0.0 for
+    # unset fields), so never leave 0.0 in the resolved spec.
+    for param in QC_SPEC_PARAMS:
+        if _f(spec.get(param)) in (None, 0.0):
+            spec[param] = None
+        if _f(spec.get(f"{param}_tolerance")) in (None, 0.0):
+            spec[f"{param}_tolerance"] = None
+    return spec
+
+
 def _apply_po_spec(po, spec: Dict[str, Any]) -> None:
     """Map the Odoo spec payload onto the PurchaseOrder spec columns (best-effort)."""
     if spec.get("diameter") is not None:
@@ -323,9 +404,11 @@ def _upsert_po_specs(session: Session, po, spec: Dict[str, Any]) -> None:
         if nominal is None:
             continue
         nominal = _f(nominal)
-        if nominal is None:
+        if nominal in (None, 0.0):
             continue
         tol = _f(spec.get(f"{parameter}_tolerance"))
+        if tol == 0.0:
+            tol = None
         # Guard against a 10x data-entry error in Odoo's free-form
         # ``x_qc_diameter_tolerance`` (0.3 instead of 0.03): anything above
         # 0.1 mm is implausible for a filter rod and falls back to the factory

@@ -419,6 +419,43 @@ def _dispatch_item(
             logger.warning("Run %s Odoo sync failed: %s", run_id, exc)
             raise
 
+    # Shift-level aggregation: attach ONE quality certificate per shift instead
+    # of one run-level PDF per MO.
+    if item.aggregate_type == "shift":
+        _attach_shift_certificate(session, client, payload)
+
+
+def _attach_shift_certificate(session: Session, client: OdooClient, payload: Dict[str, Any]) -> None:
+    """Attach the aggregated shift Quality Certificate to the order's root MO."""
+    pdf_bytes = render_shift_certificate_pdf(payload)
+    if not pdf_bytes:
+        return
+    shift = payload.get("shift") or {}
+    machine_name = str(shift.get("machine_name") or "Machine").strip()
+    shift_name = str(shift.get("shift_name") or "").strip()
+    date = ""
+    for key in ("started_at", "ended_at"):
+        raw = shift.get(key)
+        if raw:
+            date = str(raw)[:10]
+            break
+    filename = " ".join(x for x in [date, machine_name, shift_name, "Quality Report.pdf"] if x).strip()
+
+    target_mo = None
+    for run in payload.get("runs", []):
+        db_run = session.get(models.ProductionRun, run.get("run_id"))
+        if db_run is None:
+            continue
+        po = session.get(models.PurchaseOrder, db_run.po_id) if db_run.po_id else None
+        target_mo = (po.odoo_mo_id if po else None) or db_run.odoo_mo_id
+        if target_mo:
+            break
+    if not target_mo:
+        logger.info("Shift: no Odoo MO to attach shift certificate")
+        return
+    client.attach_file(filename, "mrp.production", int(target_mo), pdf_bytes, "application/pdf")
+    logger.info("Attached shift certificate %r to MO %s", filename, target_mo)
+
 
 def _before_cutover(session: Session, db_run) -> bool:
     """True when the run started before the ``odoo_sync_from_date`` setting.
@@ -453,17 +490,11 @@ def _dispatch_run(
     start_mo_id: int,
     link_only: bool = False,
 ) -> None:
-    # link_only: attach quality data + PDF only. Never complete/consume - the MO
+    # link_only: write structured QC fields only. Never complete/consume - the MO
     # may already be done in Odoo and posting again would double-count stock.
     if link_only:
         mo_id = start_mo_id
         client.write_mo_quality(mo_id, run)
-        pdf_bytes = render_certificate_pdf(run)
-        if pdf_bytes:
-            client.attach_pdf(
-                f"Quality_Report_{run.get('mo_ref') or mo_id}_run{db_run.id}.pdf",
-                "mrp.production", mo_id, pdf_bytes,
-            )
         db_run.odoo_mo_id = mo_id
         db_run.odoo_sync_status = "synced"
         return
@@ -491,13 +522,6 @@ def _dispatch_run(
 
     # 2. Resolve raw-material lot ids (stock.lot) for later move-line creation.
     _resolve_material_lots(session, client, db_run)
-
-    # 3. Attach the per-run quality certificate PDF to the MO (final report).
-    #    Attached before completion so it stays on the MO that was measured.
-    pdf_bytes = render_certificate_pdf(run)
-    if pdf_bytes:
-        name = f"Quality_Report_{run.get('mo_ref') or mo_id}_run{db_run.id}.pdf"
-        client.attach_pdf(name, "mrp.production", mo_id, pdf_bytes)
 
     # 3b. Attach the operator's Production Report PDF(s) to the same MO (best effort).
     #     Prefer the Flutter-generated PDF (the MES design) uploaded with the report.
@@ -588,8 +612,98 @@ def _produced_rods(run: Dict[str, Any]) -> float:
     return 0.0
 
 
+def _certificate_date(run: Dict[str, Any]) -> str:
+    """Extract a YYYY-MM-DD date from the run's start/end timestamps."""
+    for key in ("started_at", "ended_at"):
+        raw = run.get(key)
+        if raw:
+            try:
+                return str(raw)[:10]
+            except Exception:
+                continue
+    return ""
+
+
+def _certificate_table(rows) -> object:
+    """Build the bordered parameter-matrix table for one run (fits A4)."""
+    from reportlab.lib import colors
+    from reportlab.lib.units import inch
+    from reportlab.platypus import Table, TableStyle
+    from app.quality_stats import CERTIFICATE_PARAMS
+    by_param = {str(r.get("parameter")): r for r in rows}
+    header = ["Parameter", "Unit", "Nominal", "Lower", "Upper", "Mean", "SD", "N"]
+    data = [header]
+    for param, label, unit in CERTIFICATE_PARAMS:
+        r = by_param.get(param) or {}
+        data.append([label, unit, r.get("nominal"), r.get("lower"), r.get("upper"),
+                     r.get("mean"), r.get("sd"), r.get("n")])
+    table = Table(data, repeatRows=1, colWidths=[
+        1.1 * inch, 0.55 * inch, 0.8 * inch, 0.8 * inch, 0.8 * inch,
+        0.9 * inch, 0.7 * inch, 0.5 * inch,
+    ])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f4f6f7")]),
+    ]))
+    return table
+
+
+def _manual_measurements_table(manual_rows, styles) -> object:
+    """Build the bordered manual-measurements table, wrapped so it fits A4."""
+    from reportlab.lib import colors
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.platypus import Table, TableStyle, Paragraph
+    small = ParagraphStyle("cert-cell", parent=styles["Normal"],
+                           fontName="Helvetica", fontSize=7, leading=8)
+    small_bold = ParagraphStyle("cert-cell-b", parent=small, fontName="Helvetica-Bold")
+
+    def _flag(v):
+        return "-" if v is None else ("OK" if v else "FAIL")
+
+    mh = [Paragraph(h, small_bold) for h in
+          ["Run #", "Weight (mg)", "Length (mm)", "Hardness (%)",
+           "Glue Seam (Glucim)", "Cut Quality", "Visual Cleanness", "Notes"]]
+    mrows = [mh]
+    if not manual_rows:
+        mrows.append([Paragraph("", small),
+                      Paragraph("No manual measurements recorded for this run", small),
+                      Paragraph("", small), Paragraph("", small), Paragraph("", small),
+                      Paragraph("", small), Paragraph("", small), Paragraph("", small)])
+    else:
+        for c in manual_rows:
+            mrows.append([
+                Paragraph(str(c.get("seq") or ""), small),
+                Paragraph(str(c.get("weight_mg") or ""), small),
+                Paragraph(str(c.get("length_mm") or ""), small),
+                Paragraph(str(c.get("hardness") or ""), small),
+                Paragraph(_flag(c.get("glue_seam_ok")), small),
+                Paragraph(_flag(c.get("cut_quality_ok")), small),
+                Paragraph(_flag(c.get("visual_appearance_ok")), small),
+                Paragraph(str(c.get("notes") or ""), small),
+            ])
+    mtable = Table(mrows, repeatRows=1, colWidths=[
+        0.45 * inch, 0.75 * inch, 0.75 * inch, 0.75 * inch, 0.9 * inch,
+        0.75 * inch, 0.85 * inch, 1.0 * inch,
+    ])
+    mtable.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f4f6f7")]),
+    ]))
+    return mtable
+
+
 def render_certificate_pdf(run: Dict[str, Any]) -> Optional[bytes]:
-    """Render a simple quality certificate PDF for one production run.
+    """Render a quality certificate PDF for one production run.
 
     Pure-helper (no DB): consumes the already-computed run summary from the
     outbox payload and returns the PDF bytes, or ``None`` when there is no
@@ -602,9 +716,8 @@ def render_certificate_pdf(run: Dict[str, Any]) -> Optional[bytes]:
 
     try:
         from reportlab.lib.pagesizes import A4
-        from reportlab.lib import colors
         from reportlab.lib.styles import getSampleStyleSheet
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
     except ImportError as exc:  # pragma: no cover - reportlab is a runtime dep
         logger.warning("reportlab unavailable, skipping certificate PDF: %s", exc)
         return None
@@ -612,10 +725,14 @@ def render_certificate_pdf(run: Dict[str, Any]) -> Optional[bytes]:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, title="Quality Certificate")
     styles = getSampleStyleSheet()
-    title = Paragraph(
-        f"Quality Certificate — {run.get('mo_ref') or 'Production run'}",
-        styles["Title"],
-    )
+    date = _certificate_date(run)
+    shift_label = str(run.get("shift_name") or "").strip()
+    title_text = f"Quality Certificate — {run.get('mo_ref') or 'Production run'}"
+    if date:
+        title_text += f" — {date}"
+    if shift_label:
+        title_text += f" {shift_label}"
+    title = Paragraph(title_text, styles["Title"])
     subtitle = Paragraph(
         "Automatic tests done for PD, length, weight "
         "(parameters taken from auto measurement station) · "
@@ -623,76 +740,76 @@ def render_certificate_pdf(run: Dict[str, Any]) -> Optional[bytes]:
         styles["Normal"],
     )
 
-    from app.quality_stats import CERTIFICATE_PARAMS
-    by_param = {str(r.get("parameter")): r for r in rows}
-    header = ["Parameter", "Unit", "Nominal", "Lower", "Upper", "Mean", "SD", "N"]
-    data = [header]
-    for param, label, unit in CERTIFICATE_PARAMS:
-        r = by_param.get(param) or {}
-        data.append([
-            label,
-            unit,
-            r.get("nominal"),
-            r.get("lower"),
-            r.get("upper"),
-            r.get("mean"),
-            r.get("sd"),
-            r.get("n"),
-        ])
-
-    table = Table(data, repeatRows=1)
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f4f6f7")]),
-    ]))
-
     story = [title, Spacer(1, 6), subtitle]
     remarks = (run.get("remarks") or "").strip()
     if remarks:
         story.append(Paragraph(f"Notes: {remarks}", styles["Normal"]))
         story.append(Spacer(1, 6))
     story.append(Spacer(1, 12))
-    story.append(table)
+    story.append(_certificate_table(rows))
 
-    manual_rows = run.get("manual_checks") or []
-
-    def _flag(v):
-        return "-" if v is None else ("OK" if v else "FAIL")
+    manual_rows = run.get("manual_check_rows") or run.get("manual_checks") or []
+    if isinstance(manual_rows, dict):
+        manual_rows = manual_rows.get("items") or []
 
     story.append(Spacer(1, 12))
     story.append(Paragraph("Manual measurements", styles["Heading2"]))
-    mh = ["Run #", "Weight (mg)", "Length (mm)", "Hardness (%)",
-          "Glue Seam (Glucim)", "Cut Quality", "Visual Cleanness", "Notes"]
-    mrows = [mh]
-    if not manual_rows:
-        mrows.append(["", "No manual measurements recorded for this run",
-                      "", "", "", "", "", ""])
-    else:
-        for c in manual_rows:
-            mrows.append([
-                c.get("seq") or "",
-                c.get("weight_mg") or "",
-                c.get("length_mm") or "",
-                c.get("hardness") or "",
-                _flag(c.get("glue_seam_ok")),
-                _flag(c.get("cut_quality_ok")),
-                _flag(c.get("visual_appearance_ok")),
-                str(c.get("notes") or ""),
-            ])
-    mtable = Table(mrows, repeatRows=1)
-    mtable.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f4f6f7")]),
-    ]))
-    story.append(mtable)
+    story.append(_manual_measurements_table(manual_rows, styles))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+def render_shift_certificate_pdf(shift_summary: Dict[str, Any]) -> Optional[bytes]:
+    """Render ONE aggregated quality certificate PDF for a whole shift.
+
+    Aggregates every run of the shift into a single document (instead of one
+    run-level PDF per MO) so Odoo receives a single shift report attachment.
+    """
+    runs = [r for r in (shift_summary.get("runs") or []) if r.get("certificate")]
+    if not runs:
+        return None
+
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+    except ImportError as exc:  # pragma: no cover - reportlab is a runtime dep
+        logger.warning("reportlab unavailable, skipping shift certificate PDF: %s", exc)
+        return None
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, title="Quality Certificate")
+    styles = getSampleStyleSheet()
+    shift = shift_summary.get("shift") or {}
+    shift_name = str(shift.get("shift_name") or "").strip()
+    date = ""
+    for key in ("started_at", "ended_at"):
+        raw = shift.get(key)
+        if raw:
+            date = str(raw)[:10]
+            break
+    po = runs[0].get("mo_ref") or "Production run"
+    title_text = f"Quality Certificate — {po}"
+    if date:
+        title_text += f" — {date}"
+    if shift_name:
+        title_text += f" {shift_name}"
+    story = [Paragraph(title_text, styles["Title"]), Spacer(1, 12)]
+
+    for run in runs:
+        label = f"Run {run.get('seq') or ''} · {run.get('mo_ref') or ''}".strip(" ·")
+        story.append(Paragraph(label, styles["Heading2"]))
+        story.append(Spacer(1, 4))
+        story.append(_certificate_table(run.get("certificate") or []))
+        manual_rows = run.get("manual_check_rows") or run.get("manual_checks") or []
+        if isinstance(manual_rows, dict):
+            manual_rows = manual_rows.get("items") or []
+        if manual_rows:
+            story.append(Spacer(1, 10))
+            story.append(Paragraph("Manual measurements", styles["Heading3"]))
+            story.append(_manual_measurements_table(manual_rows, styles))
+        story.append(Spacer(1, 14))
 
     doc.build(story)
     return buf.getvalue()

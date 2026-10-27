@@ -8,11 +8,12 @@ import '../../app_state.dart';
 import '../auth_screen.dart';
 import '../../api_service.dart';
 import '../../local_db.dart';
-import '../../widgets/dev_banner.dart';
+import '../../widgets/app_status_banner.dart';
 import 'history_screen.dart';
 import 'manual_quality_checks_screen.dart';
 import 'pending_shifts_screen.dart';
 import '../../shift_context.dart';
+import '../../dead_man_switch.dart';
 import 'package:intl/intl.dart';
 import 'dart:async';
 import 'dart:math';
@@ -221,6 +222,29 @@ class _ReportPageState extends State<ReportPage> {
       }
     });
     if (po != null) _onPOSelected(po);
+    _armDeadManSwitch(machineId);
+  }
+
+  Future<void> _armDeadManSwitch(int? machineId) async {
+    DeadManSwitch.instance.onStartTest = _openQualityChecks;
+    if (machineId == null) {
+      DeadManSwitch.instance.disarm();
+      return;
+    }
+    final cfg = await ApiService.fetchMachineManualTestConfig(machineId);
+    final mins = cfg?['reminder_interval_minutes'];
+    DeadManSwitch.instance.arm(mins is num ? mins.toInt() : null);
+  }
+
+  void _openQualityChecks() {
+    if (!mounted || _activeShift == null) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) =>
+            ManualQualityChecksScreen(shiftContext: _activeShift),
+      ),
+    );
   }
 
   Machine? _machineById(int? id) {
@@ -455,6 +479,7 @@ class _ReportPageState extends State<ReportPage> {
       }
     });
     if (po != null) _onPOSelected(po);
+    _armDeadManSwitch(machine.id);
     // A new shift is a brand-new report: reset the idempotency key and clear the
     // production-log fields so the previous report's values (boxes, counter, ...)
     // never leak into this one. Without this, resubmitting after a shift close
@@ -709,6 +734,7 @@ class _ReportPageState extends State<ReportPage> {
         await ApiService.clearShiftContext();
         if (!mounted) return;
         setState(() => _activeShift = null);
+        DeadManSwitch.instance.disarm();
         _toast('This shift is no longer active — start a new shift.');
       } else {
         _toast('Failed to stop shift');
@@ -718,6 +744,7 @@ class _ReportPageState extends State<ReportPage> {
     await ApiService.clearShiftContext();
     if (!mounted) return;
     setState(() => _activeShift = null);
+    DeadManSwitch.instance.disarm();
   }
 
   Future<void> _checkForMatchingDraft(ShiftContext ctx) async {
@@ -2259,7 +2286,7 @@ class _ReportPageState extends State<ReportPage> {
         title: Text("Operator: ${widget.operator.name}"),
         backgroundColor: Colors.deepPurple,
         foregroundColor: Colors.white,
-        bottom: const DevBannerBar(),
+        bottom: const AppStatusBanner(),
         actions: [
           IconButton(
             icon: const Icon(Icons.history),
@@ -2314,11 +2341,15 @@ class _ReportPageState extends State<ReportPage> {
           IconButton(
             icon: const Icon(Icons.logout),
             tooltip: 'Logout',
-            onPressed: () => Navigator.pushAndRemoveUntil(
-              context,
-              MaterialPageRoute(builder: (context) => const LoginScreen()),
-              (route) => false,
-            ),
+            onPressed: () async {
+              await ApiService.clearSession();
+              if (!mounted) return;
+              Navigator.pushAndRemoveUntil(
+                context,
+                MaterialPageRoute(builder: (context) => const LoginScreen()),
+                (route) => false,
+              );
+            },
           ),
         ],
       ),

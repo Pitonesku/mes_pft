@@ -23,7 +23,7 @@ import re
 import xmlrpc.client
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.services.odoo.consumption import bobbin_length_metres
 
@@ -63,6 +63,26 @@ QC_FINAL_MEAN_TRIACETIN = "x_final_mean_triacetin"
 QC_FINAL_QUALITY_STATUS = "x_final_quality_status"
 QC_FINAL_TESTED_RODS = "x_final_tested_rods"
 QC_FINAL_REJECTED_RODS = "x_final_rejected_rods"
+
+# Filter-rod QC target/tolerance parameters and their Odoo field names. These
+# fields live on BOTH mrp.production (per-MO target) and product.template
+# (product default). Odoo does not copy them onto backorders, so the MES reads
+# them with a MO, then product, then global fallback.
+QC_SPEC_PARAMS = ("diameter", "pd", "weight", "length", "hardness")
+
+
+def _qc_nominal_field(param: str) -> str:
+    return f"x_qc_{param}_nominal"
+
+
+def _qc_tolerance_field(param: str) -> str:
+    return f"x_qc_{param}_tolerance"
+
+
+QC_SPEC_FIELDS = [
+    f for p in QC_SPEC_PARAMS
+    for f in (_qc_nominal_field(p), _qc_tolerance_field(p))
+]
 
 # MES status -> Odoo selection value.
 _STATUS_MAP = {"PASS": "pass", "WARN": "warn", "FAIL": "fail"}
@@ -530,6 +550,83 @@ class OdooClient:
     def _product_tracking(self, product_id: int) -> str:
         products = self.read("product.product", [product_id], ["tracking"])
         return str(products[0].get("tracking") or "none") if products else "none"
+
+    # -- QC target/tolerance resolution (MO, product, global fallback) ------
+
+    def read_mo_spec_fields(self, mo_id: int) -> Dict[str, Any]:
+        """Raw ``x_qc_*`` target/tolerance fields from mrp.production (Level 1)."""
+        recs = self.read("mrp.production", [int(mo_id)], QC_SPEC_FIELDS)
+        return recs[0] if recs else {}
+
+    def read_product_spec_fields(self, product_id: Any) -> Dict[str, Any]:
+        """Raw ``x_qc_*`` target/tolerance fields from the product (Level 2).
+
+        ``product_id`` may be a ``product.product`` id (or an ``[id, name]``
+        reference); the template is resolved via ``product_tmpl_id``.
+        """
+        pid = _id_ref(product_id)
+        if not pid:
+            return {}
+        tmpl_id = pid
+        prod = self.read("product.product", [pid], ["product_tmpl_id"])
+        if prod:
+            tmpl_id = _id_ref(prod[0].get("product_tmpl_id")) or pid
+        recs = self.read("product.template", [tmpl_id], QC_SPEC_FIELDS)
+        return recs[0] if recs else {}
+
+    @staticmethod
+    def spec_from_raw_fields(raw: Dict[str, Any]) -> Dict[str, Any]:
+        """Map raw ``x_qc_*`` fields to the clean spec dict (param + tolerance)."""
+        spec: Dict[str, Any] = {}
+        for param in QC_SPEC_PARAMS:
+            spec[param] = _num(raw.get(_qc_nominal_field(param)))
+            spec[f"{param}_tolerance"] = _num(raw.get(_qc_tolerance_field(param)))
+        return spec
+
+    def resolve_mo_product_spec(self, mo_id: int, product_id: Any) -> Tuple[Dict[str, Any], List[str]]:
+        """Resolve target params/tolerances from the MO, falling back to the product."""
+        mo = self.spec_from_raw_fields(self.read_mo_spec_fields(mo_id))
+        product: Dict[str, Any] = {}
+        sources: List[str] = []
+        for param in QC_SPEC_PARAMS:
+            nominal = _num(mo.get(param))
+            if nominal not in (None, 0.0):
+                sources.append(f"{param}:mo")
+                continue
+            if not product and product_id is not None:
+                product = self.spec_from_raw_fields(self.read_product_spec_fields(product_id))
+            p_nominal = _num(product.get(param))
+            if p_nominal not in (None, 0.0):
+                mo[param] = p_nominal
+                mo[f"{param}_tolerance"] = _num(product.get(f"{param}_tolerance"))
+                sources.append(f"{param}:product")
+            else:
+                sources.append(f"{param}:none")
+        return mo, sources
+
+    def fill_mo_spec_from_product(self, mo_id: int, product_id: Any) -> Dict[str, Any]:
+        """Self-heal a backorder MO whose ``x_qc_*`` fields were not copied.
+
+        Writes the product default target/tolerance fields onto the MO for any
+        parameter that is missing/zero, so the Odoo UI no longer shows zeros.
+        Never overwrites a non-zero value already on the MO.
+        """
+        mo = self.read_mo_spec_fields(mo_id)
+        product = self.read_product_spec_fields(product_id)
+        if not product:
+            return {"written": False, "reason": "no product spec"}
+        values: Dict[str, Any] = {}
+        for param in QC_SPEC_PARAMS:
+            mo_nominal = _num(mo.get(_qc_nominal_field(param)))
+            prod_nominal = _num(product.get(_qc_nominal_field(param)))
+            if mo_nominal in (None, 0.0) and prod_nominal not in (None, 0.0):
+                values[_qc_nominal_field(param)] = prod_nominal
+                prod_tol = _num(product.get(_qc_tolerance_field(param)))
+                if prod_tol is not None:
+                    values[_qc_tolerance_field(param)] = prod_tol
+        if values:
+            self.write("mrp.production", [int(mo_id)], values)
+        return {"written": bool(values), "fields": list(values.keys())}
 
     def _consumption_qty(
         self, item: Dict[str, Any], move: Dict[str, Any], cat_name: Optional[str]

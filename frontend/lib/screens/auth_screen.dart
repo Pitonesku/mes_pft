@@ -8,7 +8,6 @@ import '../update_checker.dart';
 import '../core/responsive_layout.dart';
 import 'mobile/operator_screen.dart';
 import 'mobile/admin_screen.dart';
-import 'mobile/log_viewer_screen.dart';
 import 'mobile/about_screen.dart';
 import 'web/web_shell.dart';
 import 'server_config_screen.dart';
@@ -238,16 +237,6 @@ class _LoginScreenState extends State<LoginScreen> {
                          tooltip: "Force Update Data",
                          onPressed: _forceSync,
                        ),
-                       IconButton(
-                         icon: const Icon(Icons.bug_report, color: Colors.orange),
-                         tooltip: "View Connection Logs",
-                         onPressed: () {
-                           Navigator.push(
-                             context,
-                             MaterialPageRoute(builder: (context) => const LogViewerScreen()),
-                           );
-                         },
-                       ),
                      ],
                    ),
                  ),
@@ -332,9 +321,19 @@ class _SessionGateState extends State<SessionGate> {
   Future<void> _restore() async {
     final token = ApiService.authToken;
     final user = await ApiService.loadSavedUser();
+    final hasSession = token != null && token.isNotEmpty && user != null;
     if (!mounted) return;
+    if (hasSession) {
+      // Sync real data on restore (also re-validates the token against the
+      // server). A 401 is handled by ApiService._fail -> onUnauthorized, which
+      // clears the token; in that case we fall through to the login screen.
+      await AppData.loadDataFromServer();
+    }
+    if (!mounted) return;
+    final stillAuthed =
+        ApiService.authToken != null && ApiService.authToken!.isNotEmpty;
     setState(() {
-      _user = (token != null && token.isNotEmpty) ? user : null;
+      _user = (hasSession && stillAuthed) ? user : null;
       _loading = false;
     });
   }

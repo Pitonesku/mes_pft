@@ -1044,6 +1044,67 @@ class ApiService {
     }
   }
 
+  /// Per-machine manual QC test config (visibility / required flags).
+  static Future<Map<String, dynamic>?> fetchMachineManualTestConfig(int machineId) async {
+    try {
+      final response = await _httpClient
+          .get(Uri.parse('$effectiveBaseUrl/v2/machines/$machineId/manual-test-config'),
+              headers: _authHeaders())
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("fetchMachineManualTestConfig error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  static Future<Map<String, dynamic>?> updateMachineManualTestConfig(
+      int machineId, Map<String, dynamic> config,
+      {int? reminderIntervalMinutes}) async {
+    try {
+      final body = <String, dynamic>{'config': config};
+      if (reminderIntervalMinutes != null) {
+        body['reminder_interval_minutes'] = reminderIntervalMinutes;
+      }
+      final response = await _httpClient
+          .put(Uri.parse('$effectiveBaseUrl/v2/machines/$machineId/manual-test-config'),
+              headers: _authHeaders(), body: jsonEncode(body))
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("updateMachineManualTestConfig error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  /// Manual QC checks + config for a machine's currently active run (dashboard).
+  static Future<Map<String, dynamic>?> fetchMachineManualTests(int machineId) async {
+    try {
+      final response = await _httpClient
+          .get(Uri.parse('$effectiveBaseUrl/v2/machines/$machineId/manual-tests'))
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("fetchMachineManualTests error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
   /// Odoo integration mode ('hybrid' | 'strict').
   static Future<String?> fetchOdooMode() async {
     try {

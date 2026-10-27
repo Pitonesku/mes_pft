@@ -42,9 +42,13 @@ from app.quality_stats import (
     certificate_rows,
     is_triacetin_marker,
     manual_rods,
+    manual_triacetin_measurements,
+    manual_triacetin_pct,
     merge_manual_parameters,
+    merge_triacetin,
 )
 from app.services import aggregation, manual_check_rules, run_corrections, shift_lifecycle, shift_resolver
+from app.services.manual_test_config import PARAMETERS, effective_config, sanitize_config
 from app.services.lot_number import lot_number
 from app.services.shift_lifecycle import LifecycleError
 from app.services.odoo import outbound as odoo_outbound
@@ -753,11 +757,14 @@ def _build_shift_summary(
         s["manual_check_rows"] = manual_rows
         run_summaries.append(s)
     verdict = _overall_verdict([r["status"] for r in run_summaries])
+    machine = db.get(models.Machine, shift.machine_id) if shift.machine_id else None
     return {
         "schema_version": "1.2",
         "idempotency_key": idempotency_key or f"mes:shift:{shift.id}:v1",
         "shift": {
             "machine_id": shift.machine_id,
+            "machine_name": machine.name if machine else None,
+            "shift_name": shift.shift_name,
             "started_at": shift.started_at.isoformat() if shift.started_at else None,
             "ended_at": shift.ended_at.isoformat() if shift.ended_at else None,
             "operator_id": shift.operator_id,
@@ -956,6 +963,7 @@ def _shift_quality_summary(db: Session, shift_id: int, run_id: Optional[int] = N
         if run_id is not None
         else aggregation.compute_triacetin(db, shift_id=shift_id)
     )
+    tri = merge_triacetin(tri, manual_triacetin_measurements(check_dicts))
     cert_rows = certificate_rows(stats, specs)
     aggregation.inject_triacetin_certificate(cert_rows, specs, tri["overall_pct"])
     aggregation.inject_triacetin_parameters(stats["parameters"], specs, tri["overall_pct"])
@@ -1637,6 +1645,41 @@ def set_odoo_shadow_mode(
     return {"shadow": enabled}
 
 
+@router.get("/odoo/global-specs")
+def get_odoo_global_specs(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Level 3 fallback specs (MES global defaults) stored in system_settings."""
+    _require_superadmin(current_user)
+    return aggregation.global_spec_defaults(db)
+
+
+@router.put("/odoo/global-specs")
+def set_odoo_global_specs(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Set Level 3 fallback specs (per-parameter nominal/tolerance overrides)."""
+    _require_superadmin(current_user)
+    row = db.get(models.SystemSetting, aggregation.GLOBAL_SPECS_SETTING_KEY)
+    if row is None:
+        row = models.SystemSetting(key=aggregation.GLOBAL_SPECS_SETTING_KEY, value={})
+        db.add(row)
+    clean = {}
+    for param in ("diameter", "pd", "weight", "length", "hardness"):
+        entry = payload.get(param)
+        if isinstance(entry, dict):
+            clean[param] = {
+                "nominal": entry.get("nominal"),
+                "tolerance": entry.get("tolerance"),
+            }
+    row.value = clean
+    db.commit()
+    return aggregation.global_spec_defaults(db)
+
+
 @router.get("/odoo/mos")
 def odoo_mos(
     q: Optional[str] = None,
@@ -2112,7 +2155,17 @@ async def odoo_mo_event(
     from starlette.concurrency import run_in_threadpool
 
     from app.services.odoo import inbound as odoo_inbound
-    return await run_in_threadpool(odoo_inbound.handle_mo_event, db, event.model_dump())
+    from app.services.odoo.client import OdooClient, OdooConfig
+
+    client = None
+    try:
+        cfg = OdooConfig.from_env()
+        if cfg.enabled and cfg.valid():
+            client = OdooClient(cfg)
+            client.connect()
+    except Exception:  # noqa: BLE001 - the webhook must still work without Odoo
+        client = None
+    return await run_in_threadpool(odoo_inbound.handle_mo_event, db, event.model_dump(), client)
 
 
 @router.post("/odoo/mo-recall")
@@ -2484,6 +2537,22 @@ def _dashboard_machine_payload(
         .scalar()
     )
 
+    last_manual_test_at = None
+    if open_shift is not None:
+        run = shift_lifecycle.active_run(db, open_shift.id)
+        if run is not None:
+            last_manual_test_at = (
+                db.query(func.max(func.coalesce(
+                    models.ManualQualityCheck.measured_at,
+                    models.ManualQualityCheck.created_at,
+                )))
+                .filter(
+                    models.ManualQualityCheck.mo_id == run.id,
+                    models.ManualQualityCheck.voided_at.is_(None),
+                )
+                .scalar()
+            )
+
     specs = _load_machine_specs(db, machine.id)
     rods = _windowed_rods(db, machine.id, "rods", 50)
     rod_dicts = [{k: getattr(r, k) for k in _MEASURE_PARAM_KEYS} for r in rods]
@@ -2509,6 +2578,7 @@ def _dashboard_machine_payload(
         "status_dia": _sd_status(dia.get("sd_samp"), dia_warn, dia_fail),
         "shift_started_at": open_shift.started_at.isoformat() if (open_shift is not None and open_shift.started_at is not None) else None,
         "last_measured_at": last_measured_at.isoformat() if last_measured_at else None,
+        "last_manual_test_at": last_manual_test_at.isoformat() if last_manual_test_at else None,
     }
 
 
@@ -2784,6 +2854,97 @@ def update_quality_settings(
     db.commit()
     db.refresh(s)
     return _settings_payload(s)
+
+
+class ManualTestConfigPayload(BaseModel):
+    config: Optional[Dict[str, Dict[str, bool]]] = None
+    reminder_interval_minutes: Optional[int] = None
+
+
+def _machine_manual_test_config(machine: models.Machine) -> Dict[str, Any]:
+    resolved = effective_config(machine.manual_test_config)
+    return {
+        "machine_id": machine.id,
+        "reminder_interval_minutes": machine.reminder_interval_minutes,
+        "parameters": [
+            {**p, **resolved[p["key"]]} for p in PARAMETERS
+        ],
+    }
+
+
+@router.get("/machines/{machine_id}/manual-test-config")
+def get_machine_manual_test_config(
+    machine_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    machine = db.get(models.Machine, machine_id)
+    if machine is None:
+        raise HTTPException(status_code=404, detail="Machine not found")
+    return _machine_manual_test_config(machine)
+
+
+@router.put("/machines/{machine_id}/manual-test-config")
+def update_machine_manual_test_config(
+    machine_id: int,
+    payload: ManualTestConfigPayload,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    machine = db.get(models.Machine, machine_id)
+    if machine is None:
+        raise HTTPException(status_code=404, detail="Machine not found")
+    machine.manual_test_config = sanitize_config(payload.config) or None
+    if payload.reminder_interval_minutes is not None:
+        machine.reminder_interval_minutes = payload.reminder_interval_minutes
+    db.commit()
+    db.refresh(machine)
+    return _machine_manual_test_config(machine)
+
+
+@router.get("/machines/{machine_id}/manual-tests")
+def machine_manual_tests(machine_id: int, db: Session = Depends(get_db)):
+    """All manual QC checks for a machine's currently active run, plus the
+    machine's manual-test config (drives which columns the dashboard shows)."""
+    machine = db.get(models.Machine, machine_id)
+    if machine is None:
+        raise HTTPException(status_code=404, detail="Machine not found")
+
+    run_id = None
+    mo_ref = None
+    checks: List[Dict[str, Any]] = []
+    open_shift = (
+        db.query(models.ShiftSession)
+        .filter(
+            models.ShiftSession.machine_id == machine_id,
+            (models.ShiftSession.ended_at.is_(None)) | (models.ShiftSession.status == "OPEN"),
+        )
+        .order_by(models.ShiftSession.started_at.desc())
+        .first()
+    )
+    if open_shift is not None:
+        run = shift_lifecycle.active_run(db, open_shift.id)
+        if run is not None:
+            run_id = run.id
+            mo_ref = run.mo_ref
+            rows = (
+                db.query(models.ManualQualityCheck)
+                .filter(
+                    models.ManualQualityCheck.mo_id == run.id,
+                    models.ManualQualityCheck.voided_at.is_(None),
+                )
+                .order_by(models.ManualQualityCheck.id)
+                .all()
+            )
+            checks = aggregation.manual_table_rows(aggregation.manual_check_dicts(rows))
+
+    return {
+        "machine_id": machine.id,
+        "run_id": run_id,
+        "mo_ref": mo_ref,
+        "config": _machine_manual_test_config(machine),
+        "checks": checks,
+    }
 
 
 @router.get("/quality/filters")
@@ -3484,6 +3645,10 @@ class ManualCheckPayload(BaseModel):
     notes: Optional[str] = None
     measured_at: Optional[datetime] = None
     client_check_id: Optional[str] = None   # offline-queue idempotency key
+    # Manual triacetin fallback: wet/dry batch weights (mg) + rod count.
+    triacetin_wet_mg: Optional[float] = None
+    triacetin_dry_mg: Optional[float] = None
+    triacetin_rods: Optional[int] = None
 
 
 class VoidCheckPayload(BaseModel):
@@ -3506,6 +3671,10 @@ def _manual_check_dict(c: models.ManualQualityCheck) -> Dict[str, Any]:
         "sample_rods": c.sample_rods,
         "length_mm": _num(c.length_mm),
         "hardness": _num(c.hardness),
+        "triacetin_wet_mg": _num(c.triacetin_wet_mg),
+        "triacetin_dry_mg": _num(c.triacetin_dry_mg),
+        "triacetin_rods": c.triacetin_rods,
+        "triacetin_pct": _num(c.triacetin_pct),
         "glue_seam_ok": c.glue_seam_ok,
         "cut_quality_ok": c.cut_quality_ok,
         "visual_appearance_ok": c.visual_appearance_ok,
@@ -3587,6 +3756,13 @@ def submit_manual_check(
         raise HTTPException(status_code=409, detail="Shift has no open run - start an MO first")
 
     specs = aggregation.load_run_specs(db, run)
+    triacetin_pct = manual_triacetin_pct(payload.triacetin_wet_mg, payload.triacetin_dry_mg)
+    if any(v is not None for v in (payload.triacetin_wet_mg, payload.triacetin_dry_mg, payload.triacetin_rods)) \
+            and triacetin_pct is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Triacetin needs both a wet and a positive dry weight (mg)",
+        )
     verdicts, overall = manual_check_rules.evaluate(
         specs,
         sample_weight=payload.sample_weight,
@@ -3596,6 +3772,7 @@ def submit_manual_check(
         glue_seam_ok=payload.glue_seam_ok,
         cut_quality_ok=payload.cut_quality_ok,
         visual_appearance_ok=payload.visual_appearance_ok,
+        triacetin_pct=triacetin_pct,
     )
 
     # Reject an ambiguous weight entry (e.g. "33.8" while 10 rods is selected)
@@ -3628,6 +3805,10 @@ def submit_manual_check(
         sample_rods=canonical_rods,
         length_mm=payload.length_mm,
         hardness=payload.hardness,
+        triacetin_wet_mg=payload.triacetin_wet_mg,
+        triacetin_dry_mg=payload.triacetin_dry_mg,
+        triacetin_rods=payload.triacetin_rods,
+        triacetin_pct=triacetin_pct,
         glue_seam_ok=payload.glue_seam_ok,
         cut_quality_ok=payload.cut_quality_ok,
         visual_appearance_ok=payload.visual_appearance_ok,

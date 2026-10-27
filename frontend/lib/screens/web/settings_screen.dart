@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../../api_service.dart';
 import '../../theme/theme_controller.dart';
 import '../../theme/theme_presets.dart';
+import 'manual_tests_settings.dart';
 import 'odoo_sync_screen.dart';
 import 'station_profiles_screen.dart';
 
@@ -99,7 +100,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 4,
+      length: 5,
       child: Column(children: [
         const Material(
           color: Colors.white,
@@ -113,6 +114,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               Tab(text: 'Odoo Integration'),
               Tab(text: 'General'),
               Tab(text: 'Quality Stations'),
+              Tab(text: 'Manual Tests'),
             ],
           ),
         ),
@@ -124,6 +126,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   const OdooSyncScreen(),
                   _generalTab(),
                   const StationProfilesScreen(),
+                  const ManualTestsSettings(),
                 ]),
         ),
       ]),

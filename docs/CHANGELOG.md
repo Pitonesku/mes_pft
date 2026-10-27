@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Session/logout security fix + offline-data banner (2026-10-27, build 49)
+- **Logout now actually clears the session**: the tablet logout buttons (operator + admin) previously only navigated to the login screen, leaving the bearer token and saved user in `SharedPreferences`; killing and reopening the app silently restored the session without credentials. Both handlers now call `ApiService.clearSession()` (removes `auth_token` + `auth_user`) before navigating.
+- **Session restore re-validates + syncs**: `SessionGate._restore()` now runs `AppData.loadDataFromServer()` on a restored session and only re-enters the shell if the token survives server re-validation (a 401 clears the session and returns to login). This also fixes the stale fallback/demo data (`PO-2026-001`, demo users) previously shown after auto-login.
+- **Offline/fallback data is now flagged**: added `AppData.usingFallbackData` and an orange "OFFLINE — limited data shown" banner (`OfflineBannerBar` / `AppStatusBanner`) on the tablet operator + admin screens, so demo/fallback data can no longer masquerade as a live session.
+- App version bumped to `2.1.1+49` and the release APK was deployed to the auto-update folder (`apk_releases`).
+
 ### Triacetin target/tolerance + dry-batch measurement (2026-10-22, migration 0025)
 - **Triacetin, % as a first-class quality parameter**: added `triacetin` / `triacetin_tolerance` to `quality_settings` (factory defaults `8.0` / `0.5`, used only for locally-created MOs) and to `purchase_orders` (per-item target). `_apply_po_tolerance_specs` and the Odoo inbound `_upsert_po_specs` now upsert a `quality_specs` row `parameter='triacetin'` (unit `%`, 2 decimals); the certificate matrix (`CERTIFICATE_PARAMS`, `_PARAM_META`, Flutter report tables) renders the new row.
 - **Odoo MO flow**: for Odoo-pushed MOs the effective triacetin target/tolerance come from the Odoo product spec (overridable in the Odoo MO "Quality" tab) via `spec.triacetin` / `spec.triacetin_tolerance` — MES Settings are *not* applied to Odoo orders.

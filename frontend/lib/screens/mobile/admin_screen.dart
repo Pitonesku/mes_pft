@@ -10,6 +10,9 @@ import '../../widgets/sync_button.dart';
 import 'audit_screen.dart';
 import 'about_screen.dart';
 import '../web/ai_analysis_screen.dart';
+import '../server_config_screen.dart';
+import 'log_viewer_screen.dart';
+import '../../widgets/app_status_banner.dart';
 
 
 // --- ADMIN DASHBOARD ---
@@ -31,6 +34,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
         title: Text(isSuper ? "Super Admin Panel" : "Manager Dashboard"),
         backgroundColor: isSuper ? Colors.red[800] : Colors.blue[800],
         foregroundColor: Colors.white,
+        bottom: const AppStatusBanner(),
         actions: [
           IconButton(
             icon: const Icon(Icons.info_outline),
@@ -43,11 +47,15 @@ class _AdminDashboardState extends State<AdminDashboard> {
           IconButton(
             icon: const Icon(Icons.logout),
             tooltip: 'Logout',
-            onPressed: () => Navigator.pushAndRemoveUntil(
-              context, 
-              MaterialPageRoute(builder: (context) => const LoginScreen()), 
-              (route) => false
-            ),
+            onPressed: () async {
+              await ApiService.clearSession();
+              if (!mounted) return;
+              Navigator.pushAndRemoveUntil(
+                context,
+                MaterialPageRoute(builder: (context) => const LoginScreen()),
+                (route) => false,
+              );
+            },
           )
         ],
       ),
@@ -121,6 +129,20 @@ class _AdminDashboardState extends State<AdminDashboard> {
                 Icons.precision_manufacturing,
                 Colors.red,
                 () => Navigator.push(context, MaterialPageRoute(builder: (c) => const MachineShiftSetupScreen())),
+              ),
+              _buildMenuCard(
+                "Server Settings",
+                "Change server host / port (dev vs production)",
+                Icons.settings_ethernet,
+                Colors.red,
+                () => Navigator.push(context, MaterialPageRoute(builder: (c) => const ServerConfigScreen(editMode: true))),
+              ),
+              _buildMenuCard(
+                "Connection Logs",
+                "View app connection and sync logs",
+                Icons.bug_report,
+                Colors.red,
+                () => Navigator.push(context, MaterialPageRoute(builder: (c) => const LogViewerScreen())),
               ),
             ]
           ],

@@ -166,6 +166,7 @@ def evaluate(
     glue_seam_ok: Optional[bool],
     cut_quality_ok: Optional[bool],
     visual_appearance_ok: Optional[bool],
+    triacetin_pct: Optional[float] = None,
 ) -> Tuple[Dict[str, Any], Optional[str]]:
     """Return ``(verdicts, overall_status)`` for one manual check."""
     rods = sample_rods if (sample_rods and sample_rods > 0) else DEFAULT_SAMPLE_RODS
@@ -234,6 +235,18 @@ def evaluate(
         status = _bounds_status(hardness, lower, upper)
         verdicts["hardness"] = {
             "value": hardness,
+            "target": spec.nominal if spec else None,
+            "lower": lower, "upper": upper, "status": status,
+        }
+        statuses.append(status)
+
+    if triacetin_pct is not None:
+        spec = specs.get("triacetin")
+        lower = spec.lower if spec else None
+        upper = spec.upper if spec else None
+        status = _bounds_status(triacetin_pct, lower, upper)
+        verdicts["triacetin"] = {
+            "value": triacetin_pct,
             "target": spec.nominal if spec else None,
             "lower": lower, "upper": upper, "status": status,
         }

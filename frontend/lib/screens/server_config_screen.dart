@@ -10,7 +10,8 @@ import '../api_service.dart';
 import 'auth_screen.dart';
 
 class ServerConfigScreen extends StatefulWidget {
-  const ServerConfigScreen({super.key});
+  final bool editMode;
+  const ServerConfigScreen({super.key, this.editMode = false});
 
   @override
   State<ServerConfigScreen> createState() => _ServerConfigScreenState();
@@ -27,8 +28,17 @@ class _ServerConfigScreenState extends State<ServerConfigScreen> {
   @override
   void initState() {
     super.initState();
+    _loadCurrentConfig();
     _ipController.addListener(_updatePreview);
     _portController.addListener(_updatePreview);
+  }
+
+  void _loadCurrentConfig() {
+    try {
+      final uri = Uri.parse(ApiService.baseUrl);
+      if (uri.host.isNotEmpty) _ipController.text = uri.host;
+      if (uri.hasPort) _portController.text = uri.port.toString();
+    } catch (_) {}
   }
 
   void _updatePreview() {
@@ -60,6 +70,12 @@ class _ServerConfigScreenState extends State<ServerConfigScreen> {
     // Persist and re-initialize ApiService with the new URL.
     await ApiService.reinitialize(baseUrl);
 
+    // Switching servers changes the environment (dev vs production): clear the
+    // session so the user re-authenticates against the newly selected server.
+    if (widget.editMode) {
+      await ApiService.clearSession();
+    }
+
     if (!mounted) return;
     setState(() => _isSaving = false);
 
@@ -88,7 +104,7 @@ class _ServerConfigScreenState extends State<ServerConfigScreen> {
     return Scaffold(
       backgroundColor: const Color(0xFFF0EBF8),
       appBar: AppBar(
-        title: const Text('Server Setup'),
+        title: Text(widget.editMode ? 'Server Settings' : 'Server Setup'),
         backgroundColor: Colors.deepPurple,
         foregroundColor: Colors.white,
         elevation: 0,

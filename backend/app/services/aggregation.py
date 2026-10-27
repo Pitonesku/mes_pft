@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional
 
 from sqlalchemy import func
@@ -27,7 +28,9 @@ from app.quality_stats import (
     certificate_rows,
     compute_run_stats,
     manual_rods,
+    manual_triacetin_measurements,
     merge_manual_parameters,
+    merge_triacetin,
     triacetin_measurements,
     triacetin_status,
 )
@@ -66,8 +69,96 @@ def build_param_specs(specs: Iterable[models.QualitySpec]) -> Dict[str, ParamSpe
     return result
 
 
+GLOBAL_SPECS_SETTING_KEY = "mes_global_quality_specs"
+
+# Factory-wide fallback (Level 3). Tolerances come from quality_settings +
+# system_settings; nominals come from the PO columns (auto-measured params) or a
+# global override. Hardness has no PO column, so it is None unless configured.
+_GLOBAL_SPEC_PARAMS = ("diameter", "pd", "weight", "length", "hardness")
+_FALLBACK_REPORT_UNIT = {"diameter": "mm", "pd": "mm WG", "weight": "mg", "length": "mm", "hardness": "%"}
+
+
+def global_spec_defaults(session: Session) -> Dict[str, Dict[str, Optional[float]]]:
+    """Level 3 factory defaults: ``{param: {nominal, tolerance}}``.
+
+    Merged from the ``quality_settings`` singleton (diameter/pd tolerances) and
+    the ``system_settings`` override ``mes_global_quality_specs`` (admin-editable
+    per-parameter nominal/tolerance).
+    """
+    defaults: Dict[str, Dict[str, Optional[float]]] = {
+        "diameter": {"nominal": None, "tolerance": 0.03},
+        "pd": {"nominal": None, "tolerance": 20.0},
+        "weight": {"nominal": None, "tolerance": None},
+        "length": {"nominal": None, "tolerance": 0.5},
+        "hardness": {"nominal": None, "tolerance": None},
+    }
+    qs = session.query(models.QualitySettings).first()
+    if qs is not None:
+        _set_global(defaults, "diameter", "tolerance", qs.diameter_tolerance)
+        _set_global(defaults, "pd", "tolerance", qs.pd_tolerance)
+    row = session.get(models.SystemSetting, GLOBAL_SPECS_SETTING_KEY)
+    overrides = (row.value or {}) if row is not None else {}
+    if isinstance(overrides, dict):
+        for param in _GLOBAL_SPEC_PARAMS:
+            entry = overrides.get(param)
+            if isinstance(entry, dict):
+                _set_global(defaults, param, "nominal", entry.get("nominal"))
+                _set_global(defaults, param, "tolerance", entry.get("tolerance"))
+    return defaults
+
+
+def _set_global(defaults, param: str, key: str, value) -> None:
+    f = _f(value)
+    if f is not None:
+        defaults[param][key] = f
+
+
+def fallback_param_specs(
+    session: Session,
+    run: Optional[models.ProductionRun] = None,
+    po: Optional[models.PurchaseOrder] = None,
+) -> Dict[str, ParamSpec]:
+    """Level 3 ParamSpecs from the PO nominal columns + factory default tolerances.
+
+    Guarantees ``compute_run_stats`` receives a non-empty spec set for the
+    measured parameters even when an order has no ``quality_specs`` rows (e.g.
+    Odoo-imported orders whose backorders lost their targets).
+    """
+    if po is None and run is not None and run.po_id:
+        po = session.get(models.PurchaseOrder, run.po_id)
+    glob = global_spec_defaults(session)
+    nominals = {
+        "diameter": getattr(po, "diameter", None),
+        "pd": getattr(po, "pd", None),
+        "weight": getattr(po, "weight", None),
+        "length": getattr(po, "length", None),
+        "hardness": None,
+    }
+    rows = []
+    for param in _GLOBAL_SPEC_PARAMS:
+        nominal = _f(nominals.get(param))
+        if nominal is None:
+            nominal = _f((glob.get(param) or {}).get("nominal"))
+        tolerance = _f((glob.get(param) or {}).get("tolerance"))
+        if nominal is None and tolerance is None:
+            continue
+        lower = None if (nominal is None or tolerance is None) else nominal - tolerance
+        upper = None if (nominal is None or tolerance is None) else nominal + tolerance
+        rows.append(SimpleNamespace(
+            parameter=param,
+            nominal=nominal,
+            lower_limit=lower,
+            upper_limit=upper,
+            reject_multiplier=3.0,
+            report_unit=_FALLBACK_REPORT_UNIT.get(param, ""),
+            report_scale=1000.0 if param == "weight" else 1.0,
+            decimals=3,
+        ))
+    return build_param_specs(rows)
+
+
 def load_run_specs(session: Session, run: models.ProductionRun) -> Dict[str, ParamSpec]:
-    """Resolve the frozen spec snapshot for a run; fall back to quality_specs rows."""
+    """Resolve a run's frozen specs, then quality_specs rows, then global defaults."""
     snapshot = run.spec_snapshot or {}
     # Only a snapshot that carries ``parameters`` rows is a usable frozen spec. The
     # flat ``{diameter, length, pd, ...}`` form written by older tablet builds and
@@ -82,12 +173,16 @@ def load_run_specs(session: Session, run: models.ProductionRun) -> Dict[str, Par
         built = build_param_specs([s for s in specs if isinstance(s, models.QualitySpec)])
         if built:
             return built
-    if run.po_id is None:
-        return {}
-    rows = session.query(models.QualitySpec).filter(
-        models.QualitySpec.po_id == run.po_id
-    ).all()
-    return build_param_specs(rows)
+    if run.po_id is not None:
+        rows = session.query(models.QualitySpec).filter(
+            models.QualitySpec.po_id == run.po_id
+        ).all()
+        built = build_param_specs(rows)
+        if built:
+            return built
+    # Level 3: PO nominal columns + factory default tolerances. Always returns a
+    # spec set for the measured parameters so compute_run_stats never gets {}.
+    return fallback_param_specs(session, run=run)
 
 
 def load_rods(session: Session, run_id: int) -> List[Dict[str, Optional[float]]]:
@@ -257,6 +352,10 @@ def manual_check_dicts(checks: Iterable[models.ManualQualityCheck]) -> List[Dict
             "sample_rods": int(c.sample_rods or 10),
             "length_mm": _f(c.length_mm),
             "hardness": _f(c.hardness),
+            "triacetin_wet_mg": _f(c.triacetin_wet_mg),
+            "triacetin_dry_mg": _f(c.triacetin_dry_mg),
+            "triacetin_rods": c.triacetin_rods,
+            "triacetin_pct": _f(c.triacetin_pct),
             "glue_seam_ok": c.glue_seam_ok,
             "cut_quality_ok": c.cut_quality_ok,
             "visual_appearance_ok": c.visual_appearance_ok,
@@ -311,6 +410,7 @@ def manual_table_rows(check_dicts: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             "glue_seam_ok": d.get("glue_seam_ok"),
             "cut_quality_ok": d.get("cut_quality_ok"),
             "visual_appearance_ok": d.get("visual_appearance_ok"),
+            "triacetin_pct": _f(d.get("triacetin_pct")),
             "notes": d.get("notes"),
         })
     return rows
@@ -338,6 +438,7 @@ def compute_run_summary(
     merge_manual_parameters(stats["parameters"], manual_rods(check_dicts), specs)
 
     tri = compute_triacetin(session, run_id=run.id)
+    tri = merge_triacetin(tri, manual_triacetin_measurements(check_dicts))
     rows = certificate_rows(stats, specs, manual=manual, sd_kind=sd_kind)
     inject_triacetin_certificate(rows, specs, tri["overall_pct"])
     inject_triacetin_parameters(stats["parameters"], specs, tri["overall_pct"])
@@ -419,6 +520,7 @@ def compute_order_summary(session: Session, po_id: int) -> Dict:
     merge_manual_parameters(stats["parameters"], manual_rods(order_check_dicts), specs)
 
     tri = compute_triacetin(session, run_ids=run_ids) if run_ids else {"measurements": [], "overall_pct": None}
+    tri = merge_triacetin(tri, manual_triacetin_measurements(order_check_dicts))
     cert_rows = certificate_rows(stats, specs)
     inject_triacetin_certificate(cert_rows, specs, tri["overall_pct"])
     inject_triacetin_parameters(stats["parameters"], specs, tri["overall_pct"])

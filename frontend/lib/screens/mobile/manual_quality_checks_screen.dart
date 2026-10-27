@@ -5,6 +5,7 @@
 import 'package:flutter/material.dart';
 import '../../api_service.dart';
 import '../../shift_context.dart';
+import '../../dead_man_switch.dart';
 
 class ManualQualityChecksScreen extends StatefulWidget {
   final ShiftContext? shiftContext;
@@ -25,10 +26,17 @@ class _ManualQualityChecksScreenState extends State<ManualQualityChecksScreen> {
   final _lengthCtrl = TextEditingController();
   final _hardnessCtrl = TextEditingController();
   final _notesCtrl = TextEditingController();
+  final _triWetCtrl = TextEditingController();
+  final _triDryCtrl = TextEditingController();
+  final _triRodsCtrl = TextEditingController();
   // Tri-state: null = not checked, true = OK, false = FAIL.
   bool? _glue;
   bool? _cut;
   bool? _visual;
+
+  // Per-machine manual-test config: key -> {is_visible, is_required}.
+  // Defaults to "all visible, none required" when the config is unavailable.
+  Map<String, Map<String, bool>> _cfg = {};
 
   List<dynamic> _checks = [];
 
@@ -45,6 +53,9 @@ class _ManualQualityChecksScreenState extends State<ManualQualityChecksScreen> {
     _lengthCtrl.dispose();
     _hardnessCtrl.dispose();
     _notesCtrl.dispose();
+    _triWetCtrl.dispose();
+    _triDryCtrl.dispose();
+    _triRodsCtrl.dispose();
     super.dispose();
   }
 
@@ -67,12 +78,25 @@ class _ManualQualityChecksScreenState extends State<ManualQualityChecksScreen> {
     }
     final checks = await ApiService.fetchManualChecks(shiftId: ctx.shiftId);
     final queued = (await ApiService.pendingManualChecks()).length;
+    final machineId = open?['machine_id'];
+    Map<String, Map<String, bool>> cfg = {};
+    if (machineId != null) {
+      final c = await ApiService.fetchMachineManualTestConfig((machineId as num).toInt());
+      for (final raw in (c?['parameters'] as List? ?? [])) {
+        final p = raw as Map;
+        cfg[p['key'] as String] = {
+          'is_visible': p['is_visible'] == true,
+          'is_required': p['is_required'] == true,
+        };
+      }
+    }
     if (!mounted) return;
     setState(() {
       _ctx = ctx;
       _run = open;
       _checks = checks ?? [];
       _queued = queued;
+      _cfg = cfg;
       _loading = false;
     });
   }
@@ -111,18 +135,60 @@ class _ManualQualityChecksScreenState extends State<ManualQualityChecksScreen> {
     return '→ ${(pick.value * 1000).round()} mg/rod (${pick.key})';
   }
 
+  bool _visible(String key) => _cfg[key]?['is_visible'] ?? true;
+
+  bool _required(String key) => _cfg[key]?['is_required'] ?? false;
+
+  /// Live manual triacetin result: (wet - dry) / dry * 100 (mg in, % out).
+  double? _triacetinPct() {
+    final wet = double.tryParse(_triWetCtrl.text.trim().replaceAll(',', '.'));
+    final dry = double.tryParse(_triDryCtrl.text.trim().replaceAll(',', '.'));
+    if (wet == null || dry == null || dry <= 0) return null;
+    return (wet - dry) / dry * 100.0;
+  }
+
+  String? _firstMissingRequired(double? weight, double? length, double? hardness,
+      double? triWet, double? triDry, int? triRods) {
+    String? miss(bool visible, bool required, bool filled, String label) =>
+        (visible && required && !filled) ? label : null;
+    return miss(_visible('weight'), _required('weight'), weight != null, 'Weight') ??
+        miss(_visible('length'), _required('length'), length != null, 'Length') ??
+        miss(_visible('hardness'), _required('hardness'), hardness != null, 'Hardness') ??
+        miss(_visible('glue_seam'), _required('glue_seam'), _glue != null, 'Glue Seam') ??
+        miss(_visible('cut_quality'), _required('cut_quality'), _cut != null, 'Cut Quality') ??
+        miss(_visible('visual_cleanness'), _required('visual_cleanness'), _visual != null, 'Visual Cleanness') ??
+        miss(_visible('triacetin'), _required('triacetin'),
+            triWet != null && triDry != null && triRods != null, 'Triacetin');
+  }
+
   Future<void> _submit() async {
     final c = _ctx;
     if (c == null || _submitting) return;
     final weight = double.tryParse(_weightCtrl.text.trim().replaceAll(',', '.'));
     final length = double.tryParse(_lengthCtrl.text.trim().replaceAll(',', '.'));
     final hardness = double.tryParse(_hardnessCtrl.text.trim().replaceAll(',', '.'));
+    final triWet = double.tryParse(_triWetCtrl.text.trim().replaceAll(',', '.'));
+    final triDry = double.tryParse(_triDryCtrl.text.trim().replaceAll(',', '.'));
+    final triRods = int.tryParse(_triRodsCtrl.text.trim());
     final notes = _notesCtrl.text.trim();
+
+    final missing = _firstMissingRequired(weight, length, hardness, triWet, triDry, triRods);
+    if (missing != null) {
+      _toast('$missing is required for this machine');
+      return;
+    }
+
+    final hasTri = triWet != null || triDry != null || triRods != null;
     if (weight == null && length == null && hardness == null && _glue == null &&
-        _cut == null && _visual == null && notes.isEmpty) {
+        _cut == null && _visual == null && !hasTri && notes.isEmpty) {
       _toast('Enter a value, tick a check or add a note');
       return;
     }
+    if (hasTri && (triWet == null || triDry == null || triDry <= 0 || triRods == null)) {
+      _toast('Triacetin needs wet weight, dry weight and rod count');
+      return;
+    }
+
     setState(() => _submitting = true);
     // shift_id only; the server binds the open run (machine + MO) itself.
     final saved = await ApiService.submitManualCheckQueued({
@@ -134,6 +200,9 @@ class _ManualQualityChecksScreenState extends State<ManualQualityChecksScreen> {
       'glue_seam_ok': _glue,
       'cut_quality_ok': _cut,
       'visual_appearance_ok': _visual,
+      'triacetin_wet_mg': triWet,
+      'triacetin_dry_mg': triDry,
+      'triacetin_rods': triRods,
       'notes': notes.isEmpty ? null : notes,
     });
     if (!mounted) return;
@@ -143,12 +212,16 @@ class _ManualQualityChecksScreenState extends State<ManualQualityChecksScreen> {
       _toast('Not saved: ${ApiService.lastApiDetail ?? 'rejected'}');
       return;
     }
+    DeadManSwitch.instance.reset();
     _toast(saved == null
         ? 'Offline - saved on this tablet, will be sent later'
         : 'QC check saved (${saved['overall_status'] ?? 'no limits'})');
     _weightCtrl.clear();
     _lengthCtrl.clear();
     _hardnessCtrl.clear();
+    _triWetCtrl.clear();
+    _triDryCtrl.clear();
+    _triRodsCtrl.clear();
     _notesCtrl.clear();
     setState(() {
       _glue = null;
@@ -254,56 +327,109 @@ class _ManualQualityChecksScreenState extends State<ManualQualityChecksScreen> {
                 style: const TextStyle(color: Colors.orange)),
           ),
         const SizedBox(height: 16),
-        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Expanded(
-              flex: 3,
-              child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    TextField(
-                        controller: _weightCtrl,
-                        keyboardType:
-                            const TextInputType.numberWithOptions(decimal: true),
-                        onChanged: (_) => setState(() {}),
-                        decoration: const InputDecoration(
-                            labelText: 'Weight (g total / mg per rod)',
-                            border: OutlineInputBorder())),
-                    if (_weightHint() != null)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 2, left: 2),
-                        child: Text(_weightHint()!,
-                            style: const TextStyle(
-                                fontSize: 12, color: Colors.blueGrey)),
-                      ),
-                  ])),
-          const SizedBox(width: 12),
-          Expanded(
-              flex: 2,
-              child: TextField(
-                  controller: _rodsCtrl,
-                  keyboardType: TextInputType.number,
-                  onChanged: (_) => setState(() {}),
-                  decoration: const InputDecoration(
-                      labelText: 'per N rods', border: OutlineInputBorder()))),
-          const SizedBox(width: 12),
-          Expanded(
-              flex: 3,
-              child: TextField(
-                  controller: _lengthCtrl,
-                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                  decoration: const InputDecoration(
-                      labelText: 'Length (mm)', border: OutlineInputBorder()))),
-        ]),
-        const SizedBox(height: 12),
-        TextField(
-            controller: _hardnessCtrl,
-            keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            decoration: const InputDecoration(
-                labelText: 'Hardness (%)', border: OutlineInputBorder())),
-        const SizedBox(height: 16),
-        _triState('Glue Seam', _glue, (v) => setState(() => _glue = v)),
-        _triState('Cut Quality', _cut, (v) => setState(() => _cut = v)),
-        _triState('Visual Cleanliness', _visual, (v) => setState(() => _visual = v)),
+        if (_visible('weight'))
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Expanded(
+                flex: 3,
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      TextField(
+                          controller: _weightCtrl,
+                          keyboardType:
+                              const TextInputType.numberWithOptions(decimal: true),
+                          onChanged: (_) => setState(() {}),
+                          decoration: const InputDecoration(
+                              labelText: 'Weight (g total / mg per rod)',
+                              border: OutlineInputBorder())),
+                      if (_weightHint() != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2, left: 2),
+                          child: Text(_weightHint()!,
+                              style: const TextStyle(
+                                  fontSize: 12, color: Colors.blueGrey)),
+                        ),
+                    ])),
+            const SizedBox(width: 12),
+            Expanded(
+                flex: 2,
+                child: TextField(
+                    controller: _rodsCtrl,
+                    keyboardType: TextInputType.number,
+                    onChanged: (_) => setState(() {}),
+                    decoration: const InputDecoration(
+                        labelText: 'per N rods', border: OutlineInputBorder()))),
+          ]),
+        if (_visible('length')) ...[
+          const SizedBox(height: 12),
+          TextField(
+              controller: _lengthCtrl,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              decoration: const InputDecoration(
+                  labelText: 'Length (mm)', border: OutlineInputBorder())),
+        ],
+        if (_visible('hardness')) ...[
+          const SizedBox(height: 12),
+          TextField(
+              controller: _hardnessCtrl,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              decoration: const InputDecoration(
+                  labelText: 'Hardness (%)', border: OutlineInputBorder())),
+        ],
+        if (_visible('glue_seam') ||
+            _visible('cut_quality') ||
+            _visible('visual_cleanness'))
+          const SizedBox(height: 16),
+        if (_visible('glue_seam'))
+          _triState('Glue Seam', _glue, (v) => setState(() => _glue = v)),
+        if (_visible('cut_quality'))
+          _triState('Cut Quality', _cut, (v) => setState(() => _cut = v)),
+        if (_visible('visual_cleanness'))
+          _triState('Visual Cleanness', _visual, (v) => setState(() => _visual = v)),
+        if (_visible('triacetin')) ...[
+          const SizedBox(height: 16),
+          const Text('Triacetin (manual fallback)',
+              style: TextStyle(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Expanded(
+                child: TextField(
+                    controller: _triWetCtrl,
+                    keyboardType:
+                        const TextInputType.numberWithOptions(decimal: true),
+                    onChanged: (_) => setState(() {}),
+                    decoration: const InputDecoration(
+                        labelText: 'Wet Weight (mg)',
+                        border: OutlineInputBorder()))),
+            const SizedBox(width: 12),
+            Expanded(
+                child: TextField(
+                    controller: _triDryCtrl,
+                    keyboardType:
+                        const TextInputType.numberWithOptions(decimal: true),
+                    onChanged: (_) => setState(() {}),
+                    decoration: const InputDecoration(
+                        labelText: 'Dry Weight (mg)',
+                        border: OutlineInputBorder()))),
+            const SizedBox(width: 12),
+            Expanded(
+                child: TextField(
+                    controller: _triRodsCtrl,
+                    keyboardType: TextInputType.number,
+                    onChanged: (_) => setState(() {}),
+                    decoration: const InputDecoration(
+                        labelText: 'Rods Count', border: OutlineInputBorder()))),
+          ]),
+          if (_triacetinPct() != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text('Triacetin: ${_triacetinPct()!.toStringAsFixed(2)} %',
+                  style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.deepPurple)),
+            ),
+        ],
         const SizedBox(height: 12),
         TextField(
             controller: _notesCtrl,

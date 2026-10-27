@@ -116,6 +116,13 @@ curl -X POST http://localhost:8000/api/reports \
 - `ApiService._authHeaders()` adds `Authorization: Bearer <token>` to all
   authenticated requests automatically.
 - The token is reloaded on app startup via `ApiService.loadSavedAuthToken()`.
+- `ApiService.clearSession()` wipes the token (`auth_token`) and the saved user
+  (`auth_user`) from `SharedPreferences`. The tablet logout buttons call it, so
+  a killed-and-reopened app cannot silently restore a session.
+- `SessionGate._restore()` re-validates a restored session against the server
+  (a `401` clears the token and returns to the login screen) and syncs data
+  before entering the shell, so a stale session can no longer show fallback/demo
+  data.
 
 ## Token expiry and re-login
 

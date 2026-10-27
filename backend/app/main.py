@@ -2734,6 +2734,7 @@ def _get_latest_apk_info():
         "build_number": build_number,
         "apk_path": apk_path,
         "filename": os.path.basename(apk_path),
+        "size_bytes": os.path.getsize(apk_path),
     }
 
 
@@ -2751,6 +2752,7 @@ def get_latest_app_version():
         "version_name": info["version_name"],
         "build_number": info["build_number"],
         "filename": info["filename"],
+        "size_bytes": info["size_bytes"],
         "download_url": f"/api/app/download",
     }
 
