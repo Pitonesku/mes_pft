@@ -21,6 +21,21 @@ param(
 $ErrorActionPreference = 'Stop'
 $Source = Split-Path -Parent $PSScriptRoot   # the updated development folder
 
+# Run a native command without PowerShell treating its stderr output as a fatal
+# error. Windows PowerShell 5.1 wraps native stderr in NativeCommandError; with
+# $ErrorActionPreference = 'Stop' that aborts the script on harmless warnings
+# from pip/alembic. We keep 'Stop' for cmdlets and rely on $LASTEXITCODE below.
+function Invoke-NativeCommand {
+    param([scriptblock]$Command)
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $Command
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+}
+
 # --- elevation guard (stopping/starting a SYSTEM task requires admin) ---------
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
@@ -61,20 +76,20 @@ $excludeFiles = @('*.pyc', '*.log', '*_log_backup', '*.db', '*.db-wal', '*.db-sh
 Write-Host "==> Copying updated files $Source -> $TargetDir (preserving data) ..."
 $robocopyArgs = @($Source, $TargetDir, '/E', '/R:2', '/W:3', '/NFL', '/NDL', '/NP', '/XD') `
               + $excludeDirs + @('/XF') + $excludeFiles
-& robocopy @robocopyArgs
+Invoke-NativeCommand { & robocopy @robocopyArgs }
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed with exit code $LASTEXITCODE" }
 
 # Explicitly refresh the Flutter web console if a new build is present.
 $webBuild = Join-Path $Source 'frontend\build\web'
 if (Test-Path $webBuild) {
     Write-Host '==> Copying frontend web build (frontend\build\web) ...'
-    & robocopy $webBuild (Join-Path $TargetDir 'frontend\build\web') /E /R:2 /W:3 /NFL /NDL /NP
+    Invoke-NativeCommand { & robocopy $webBuild (Join-Path $TargetDir 'frontend\build\web') /E /R:2 /W:3 /NFL /NDL /NP }
     if ($LASTEXITCODE -ge 8) { throw "robocopy (web build) failed with exit code $LASTEXITCODE" }
 }
 
 # --- 3. Install any new dependencies ------------------------------------------
 Write-Host '==> Installing dependencies (new/changed) ...'
-& $venvPython -m pip install -r (Join-Path $TargetDir 'backend\requirements.txt')
+Invoke-NativeCommand { & $venvPython -m pip install -r (Join-Path $TargetDir 'backend\requirements.txt') }
 if ($LASTEXITCODE -ne 0) { throw 'pip install -r requirements.txt failed' }
 
 # --- 4. Apply Alembic migrations (on by default) ------------------------------
@@ -82,7 +97,7 @@ if (-not $SkipMigrations) {
     Write-Host '==> Applying Alembic migrations (alembic upgrade head) ...'
     Push-Location (Join-Path $TargetDir 'backend')
     try {
-        & (Join-Path $TargetDir 'venv\Scripts\alembic.exe') upgrade head
+        Invoke-NativeCommand { & (Join-Path $TargetDir 'venv\Scripts\alembic.exe') upgrade head }
         if ($LASTEXITCODE -ne 0) { throw 'alembic upgrade head failed' }
     } finally {
         Pop-Location
