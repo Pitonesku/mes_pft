@@ -31,6 +31,7 @@ if __package__:
     auth_module = importlib.import_module(f"{__package__}.auth")
     pdf_gen = importlib.import_module(f"{__package__}.pdf_generator")
     shift_lifecycle_mod = importlib.import_module(f"{__package__}.services.shift_lifecycle")
+    report_quality = importlib.import_module(f"{__package__}.services.report_quality")
     get_db = database_mod.get_db
     SessionLocal = database_mod.SessionLocal
 else:
@@ -41,6 +42,7 @@ else:
     from auth import create_access_token, get_current_user
     from pdf_generator import PDFReportGenerator
     from services import shift_lifecycle as shift_lifecycle_mod
+    from services import report_quality
 
 hash_password = password_utils.hash_password
 verify_password = password_utils.verify_password
@@ -1111,10 +1113,14 @@ def create_report(
             f"Difference: {report_data.difference}\n"
             f"Diff,%: {raw_diff_pct_str} {diff_marker}\n"
             f"Waste (kg): {report_data.waste_kg}\n"
-            f"Machine efficiency %: {report_data.machine_efficiency}\n\n"
-
-            f"Remarks: {report_data.remarks}"
+            f"Machine efficiency %: {report_data.machine_efficiency}\n"
         )
+
+        quality_section = report_quality.quality_section_text(db, db_report)
+        if quality_section:
+            text += "\n" + quality_section + "\n"
+
+        text += f"Remarks: {report_data.remarks}"
 
         # 4. Append total material consumption (if any > 0)
         if report_data.total_acetate or report_data.total_paper or report_data.total_pva or report_data.total_hm or report_data.total_triacetin:
@@ -1283,9 +1289,12 @@ def sync_report(
             f"Box produced: {report_data.boxes_produced}\n"
             f"Produced rods: {report_data.produced_rods}\n"
             f"Waste (kg): {report_data.waste_kg}\n"
-            f"\nTotal PO Produced: {total_produced_absolute}\n"
+            f"\n\nTotal PO Produced: {total_produced_absolute}\n"
             f"Remaining to produce: {remaining_qty}"
         )
+        quality_section = report_quality.quality_section_text(db, db_report)
+        if quality_section:
+            text += "\n\n" + quality_section
 
         # 4. Queue Telegram in ReportOutbox (instead of TelegramQueue directly)
         db.add(models.ReportOutbox(

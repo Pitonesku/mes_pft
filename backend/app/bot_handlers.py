@@ -31,12 +31,14 @@ if __package__:
     database_mod = importlib.import_module(f"{__package__}.database")
 
     ai_svc = importlib.import_module(f"{__package__}.ai_service")
+    report_quality = importlib.import_module(f"{__package__}.services.report_quality")
 else:
     import models
     from database import SessionLocal
     from pdf_generator import PDFReportGenerator
 
     import ai_service as ai_svc
+    from services import report_quality
 
 # Resolve SessionLocal via database module when running as package
 if __package__:
@@ -178,7 +180,7 @@ async def generate_and_send_pdf(
 # ---------------------------------------------------------------------------
 # Helper: build the Telegram-format digital report text
 # ---------------------------------------------------------------------------
-def build_digital_report_text(report: models.ProductionReport, po: models.PurchaseOrder = None) -> str:
+def build_digital_report_text(report: models.ProductionReport, po: models.PurchaseOrder = None, db=None) -> str:
     """Build the same formatted text sent during report submission."""
     shift_display = (
         f"{report.shift_name} ({report.shift_time_range})"
@@ -238,10 +240,15 @@ def build_digital_report_text(report: models.ProductionReport, po: models.Purcha
         f"Difference: {report.difference}\n"
         f"Diff,%: {raw_diff_pct_str} {diff_marker}\n"
         f"Waste (kg): {report.waste_kg}\n"
-        f"Machine efficiency %: {report.machine_efficiency}\n\n"
-
-        f"Remarks: {report.remarks or 'No comments.'}"
+        f"Machine efficiency %: {report.machine_efficiency}\n"
     )
+
+    if db is not None:
+        quality_section = report_quality.quality_section_text(db, report)
+        if quality_section:
+            text += "\n" + quality_section + "\n"
+
+    text += f"Remarks: {report.remarks or 'No comments.'}"
 
     # Total materials used
     if report.total_acetate or report.total_paper or report.total_pva or report.total_hm or report.total_triacetin:
@@ -1674,7 +1681,7 @@ async def cb_digital_report(callback: CallbackQuery):
             models.PurchaseOrder.mo_number == report.mo_number
         ).first()
 
-        text = build_digital_report_text(report, po)
+        text = build_digital_report_text(report, po, db)
 
         await callback.message.answer(text, parse_mode=None)
         await callback.message.answer(

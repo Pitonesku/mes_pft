@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.2.0] - 2026-11-02 (build 53) - po->mo rename, Odoo guardrails, A3-A9, web Runs & Audit
 
+### Telegram report: Quality section after machine efficiency (2026-11-02, late night)
+- The Telegram report message (create_report, sync_report and the bot's digital report) now shows a Quality section after the machine-efficiency line:
+  Mean PD / Mean Dia / SD PD / SD Dia with green/yellow/red circles on the SD rows (quality_settings thresholds; means uncoloured).
+- SD covers the ORDER's own time window in the shift ([run start, submission]): one order in the shift = the whole shift; several orders (e.g. 101 at 14-18, 102 at 18-22) each count only their own samples. Rods matched by run link OR by order label (Sample ID) within the window are included. Sample SD (n-1). Reports without a linked run omit the section.
+- New service `services/report_quality.py`; 430 backend tests OK. Deployed to production.
+
 ### Kiosk tiles: QC decimals + SD-only colour on the whole tile (2026-11-02, late night, dev)
 - Kiosk Quality Monitor KPI tiles now format SD with the QC page decimals: SD PD -> 2, SD DIA -> 3, weight -> 3, hardness -> 1, length -> 0; chart tooltips match QC charts (PD 1, DIA 3).
 - Tile colour is driven ONLY by the standard deviation: PD/Diameter use the server SD status; weight/hardness/length tiles are always neutral (never coloured by mean/spec).
