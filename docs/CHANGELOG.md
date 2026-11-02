@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.2.0] - 2026-11-02 (build 53) - po->mo rename, Odoo guardrails, A3-A9, web Runs & Audit
 
+### QC: unlinked-samples banner removed (2026-11-02, late night)
+- Removed the admin "Unlinked samples ... Relink now" banner from the Quality Control screen (samples now link to fixed shifts by clock time automatically). The backend endpoints (`/quality/relink`, `/quality/unlinked-summary`) stay available.
+- Reference - SD colour limits (Settings > quality_settings): PD GREEN < 12, YELLOW 12-15, RED > 15 (mm WG); Diameter GREEN < 0.013, YELLOW 0.013-0.015, RED > 0.015 (mm). Rule: value < green limit = GREEN, value <= red limit = YELLOW, otherwise RED.
+
 ### Link by clock time to fixed shifts, order = mo_ref OR Sample ID (2026-11-02, late night)
 - **Root cause of unlinked order samples:** the station leaves `mo_ref` empty and the operator types the order number into the Sample ID field (e.g. `2610/110`); the earlier "has an order" test looked at `mo_ref` only (reported 0, really 953 on prod). A sample now has an order when `mo_ref` is set OR its Sample ID equals an existing order number (`shift_resolver.sample_order_ref`); ingest fills an empty `mo_ref` from it (additive).
 - **Linking by time needs no opened session:** when no session covers a measurement, the resolver maps its timestamp to the fixed window (06-14 / 14-22 / 22-06) and links to that window's session; if none exists a closed session covering exactly that window is synthesized (`source='fixed-window'`, no operator), reused afterwards, never duplicated. The fixed window now wins over the 15-minute post-close grace window (a rod at 14:10 is Shift 2, not Shift 1).
