@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.2.0] - 2026-11-02 (build 53) - po->mo rename, Odoo guardrails, A3-A9, web Runs & Audit
 
+### DEV synced with production (2026-11-02, late night)
+- Ran the relink sweep on the dev database with the same rules as production: 934 samples with an order linked (45 fixed-window sessions created), unlinked-with-order now 0, MO_MISMATCH 0.
+- Note: the dev uvicorn on port 8001 is held by phantom/un-killable stale sockets serving OLD code (killed every visible python process; docker has no containers; WSL is stopped). A Windows reboot clears it.
+
 ### QC: unlinked-samples banner removed (2026-11-02, late night)
 - Removed the admin "Unlinked samples ... Relink now" banner from the Quality Control screen (samples now link to fixed shifts by clock time automatically). The backend endpoints (`/quality/relink`, `/quality/unlinked-summary`) stay available.
 - Reference - SD colour limits (Settings > quality_settings): PD GREEN < 12, YELLOW 12-15, RED > 15 (mm WG); Diameter GREEN < 0.013, YELLOW 0.013-0.015, RED > 0.015 (mm). Rule: value < green limit = GREEN, value <= red limit = YELLOW, otherwise RED.
