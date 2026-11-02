@@ -10,6 +10,25 @@ import '../../models.dart';
 import '../../widgets/quality_control_chart.dart';
 import '../../widgets/quality_report_dialog.dart';
 
+/// One entry of the unified Shift dropdown: All, a fixed factory window
+/// (06-14 / 14-22 / 22-06) or a concrete shift session.
+@immutable
+class _ShiftChoice {
+  final String kind; // 'all' | 'fixed' | 'session'
+  final Object? value; // fixed: window key; session: shift id
+  const _ShiftChoice(this.kind, [this.value]);
+  static const all = _ShiftChoice('all');
+  static _ShiftChoice fixed(String key) => _ShiftChoice('fixed', key);
+  static _ShiftChoice session(int id) => _ShiftChoice('session', id);
+
+  @override
+  bool operator ==(Object other) =>
+      other is _ShiftChoice && other.kind == kind && other.value == value;
+
+  @override
+  int get hashCode => Object.hash(kind, value);
+}
+
 class QualityControlScreen extends StatefulWidget {
   final QualityRequest? initial;
   final User user;
@@ -21,8 +40,8 @@ class QualityControlScreen extends StatefulWidget {
 class _QualityControlScreenState extends State<QualityControlScreen> {
   String _machine = 'all';
   int? _poId;
-  int? _shiftId;
-  String? _fixedShift = 'current'; // 'current' | 'Shift 1' | 'Shift 2' | 'Shift 3' | null(=sessions)
+  // Unified shift selection: fixed factory window or concrete session (or All).
+  _ShiftChoice _shiftChoice = _ShiftChoice.fixed('current');
   String _window = 'rods';
   int _windowValue = 50;
   int _page = 1;
@@ -66,7 +85,8 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
     final i = widget.initial;
     if (i != null) {
       _machine = i.machine ?? 'all';
-      _shiftId = i.shiftId;
+      final initialShiftId = i.shiftId;
+      if (initialShiftId != null) _shiftChoice = _ShiftChoice.session(initialShiftId);
       _poId = i.poId;
       _initialPo = i.po;
     }
@@ -99,12 +119,16 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
     final d = await ApiService.fetchQualityData(
       machine: _machine,
       poId: _poId,
-      shiftId: (_window == 'po' || _fixedShift != null) ? null : _shiftId,
+      shiftId: (_window == 'po' || _shiftChoice.kind != 'session')
+          ? null
+          : _shiftChoice.value as int,
       window: _window,
       windowValue: _windowValue,
       page: _page,
       pageSize: 50,
-      fixedShift: _window == 'po' ? null : _fixedShift,
+      fixedShift: (_window == 'po' || _shiftChoice.kind != 'fixed')
+          ? null
+          : _shiftChoice.value as String,
     );
     if (!mounted) return;
     setState(() {
@@ -118,7 +142,7 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
   }
 
   void _reset() {
-    setState(() { _machine = 'all'; _poId = null; _shiftId = null; _fixedShift = 'current'; _window = 'rods'; _windowValue = 50; _page = 1; });
+    setState(() { _machine = 'all'; _poId = null; _shiftChoice = _ShiftChoice.fixed('current'); _window = 'rods'; _windowValue = 50; _page = 1; });
     _load();
   }
 
@@ -143,8 +167,10 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
     setState(() {
       _machine = m;
       _page = 1;
-      final valid = _filteredShifts.any((s) => s['id'] == _shiftId);
-      if (_shiftId != null && !valid) _shiftId = null;
+      if (_shiftChoice.kind == 'session' &&
+          !_filteredShifts.any((s) => s['id'] == _shiftChoice.value)) {
+        _shiftChoice = _ShiftChoice.all;
+      }
     });
     _load();
   }
@@ -153,19 +179,21 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
     setState(() {
       _poId = id;
       _page = 1;
-      final list = _filteredShifts;
-      _shiftId = (id != null && list.isNotEmpty) ? (list.first['id'] as int) : null;
+      if (_shiftChoice.kind == 'session') {
+        final valid = _filteredShifts.any((s) => s['id'] == _shiftChoice.value);
+        if (!valid) _shiftChoice = _ShiftChoice.all;
+      } else if (id != null && _shiftChoice.kind == 'all') {
+        final list = _filteredShifts;
+        if (list.isNotEmpty) {
+          _shiftChoice = _ShiftChoice.session(list.first['id'] as int);
+        }
+      }
     });
     _load();
   }
 
-  void _setShift(int? id) {
-    setState(() { _shiftId = id; if (id != null) _fixedShift = null; _page = 1; });
-    _load();
-  }
-
-  void _setFixedShift(String? key) {
-    setState(() { _fixedShift = key; if (key != null) _shiftId = null; _page = 1; });
+  void _setShiftChoice(_ShiftChoice? c) {
+    setState(() { _shiftChoice = c ?? _ShiftChoice.all; _page = 1; });
     _load();
   }
 
@@ -255,7 +283,6 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
   Widget _filterBar() {
     return Wrap(spacing: 12, runSpacing: 10, crossAxisAlignment: WrapCrossAlignment.center, children: [
       _machinePills(),
-      _fixedShiftChips(),
       _poDropdown(),
       _shiftDropdown(),
       _windowChips(),
@@ -263,25 +290,6 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
     ]);
   }
 
-  /// Fixed plant shifts (06-14 / 14-22 / 22-06): measurements are bucketed by
-  /// their timestamp, independent of when tablet sessions were opened/closed.
-  Widget _fixedShiftChips() {
-    return Wrap(spacing: 6, children: [
-      for (final f in _fixedShifts)
-        ChoiceChip(
-          label: Text(f['label'].toString()),
-          selected: _fixedShift == f['key'].toString(),
-          onSelected: (_) => _setFixedShift(f['key'].toString()),
-          showCheckmark: false,
-        ),
-      ChoiceChip(
-        label: const Text('All (sessions)'),
-        selected: _fixedShift == null,
-        onSelected: (_) => _setFixedShift(null),
-        showCheckmark: false,
-      ),
-    ]);
-  }
 
   Widget _machinePills() {
     final opts = <String>['all', ..._machines.map((m) => m['name'].toString())];
@@ -306,19 +314,50 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
     );
   }
 
+  /// Unified shift selector: All shifts, the fixed factory windows of the
+  /// current day (order: Current, Shift 1, Shift 2, Shift 3) and the concrete
+  /// shift sessions (history).
+  List<_ShiftChoice> get _shiftItems {
+    const order = ['current', 'Shift 1', 'Shift 2', 'Shift 3'];
+    final fixed = [..._fixedShifts]
+      ..sort((a, b) => order.indexOf(a['key']).compareTo(order.indexOf(b['key'])));
+    return [
+      _ShiftChoice.all,
+      for (final f in fixed) _ShiftChoice.fixed(f['key'].toString()),
+      for (final s in _filteredShifts) _ShiftChoice.session(s['id'] as int),
+    ];
+  }
+
+  String _shiftLabel(_ShiftChoice c) {
+    switch (c.kind) {
+      case 'all':
+        return 'All shifts';
+      case 'fixed':
+        final f = _fixedShifts.firstWhere(
+            (x) => x['key'] == c.value, orElse: () => {'label': c.value.toString()});
+        return f['label'].toString();
+      default:
+        final s = _filteredShifts.firstWhere(
+            (x) => x['id'] == c.value, orElse: () => {'label': '#${c.value}'});
+        return s['label'].toString();
+    }
+  }
+
   Widget _shiftDropdown() {
-    final shifts = _filteredShifts;
-    final dimmed = _window == 'po' || _fixedShift != null;
+    final dimmed = _window == 'po';
+    final items = _shiftItems;
+    var value = _shiftChoice;
+    if (dimmed || !items.any((i) => i == value)) {
+      value = _ShiftChoice.all;
+    }
     return Opacity(
       opacity: dimmed ? 0.4 : 1.0,
-      child: _dropdown<int?>(
-        value: dimmed ? null : _shiftId,
+      child: _dropdown<_ShiftChoice>(
+        value: value,
         hint: 'Shift',
-        items: [null, ...shifts.map((s) => s['id'] as int)],
-        label: (id) => dimmed
-            ? (_fixedShift != null ? 'Fixed shift active' : 'All Shifts')
-            : (id == null ? 'All shifts' : (shifts.firstWhere((s) => s['id'] == id, orElse: () => {'label': '#$id'})['label']).toString()),
-        onChanged: dimmed ? null : _setShift,
+        items: items,
+        label: _shiftLabel,
+        onChanged: dimmed ? null : _setShiftChoice,
       ),
     );
   }
@@ -571,7 +610,10 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
     if (_machine != 'all') qp['machine'] = _machine;
     if (_poId != null) qp['po_id'] = '$_poId';
     // Same rule as _load(): "Entire PO" ignores the selected shift.
-    if (_shiftId != null && _window != 'po') qp['shift_id'] = '$_shiftId';
+    if (_window != 'po') {
+      if (_shiftChoice.kind == 'session') qp['shift_id'] = '${_shiftChoice.value}';
+      if (_shiftChoice.kind == 'fixed') qp['fixed_shift'] = _shiftChoice.value as String;
+    }
     final uri = Uri.parse('${ApiService.effectiveBaseUrl}/v2/quality').replace(queryParameters: qp);
     launchUrl(Uri.base.resolve(uri.toString()), webOnlyWindowName: '_blank');
   }
@@ -587,7 +629,12 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
     final d = await ApiService.fetchQualityData(
       machine: _machine,
       poId: _poId,
-      shiftId: _window == 'po' ? null : _shiftId,
+      shiftId: (_window == 'po' || _shiftChoice.kind != 'session')
+          ? null
+          : _shiftChoice.value as int,
+      fixedShift: (_window == 'po' || _shiftChoice.kind != 'fixed')
+          ? null
+          : _shiftChoice.value as String,
       window: _window,
       windowValue: _windowValue,
       page: 1,

@@ -45,6 +45,30 @@ class FixedWindowTests(unittest.TestCase):
         self.assertEqual(w.start, at(14, 0))
         self.assertEqual(w.end, at(22, 0))
 
+    def test_off_schedule_session_start_is_irrelevant(self):
+        # The operator physically opened the session at 20:30 (off schedule).
+        # Bucketing is computed from measured_at only - the 20:30 session start
+        # plays no role whatsoever.
+        self.assertEqual(shift_windows.window_for(TEMPLATES, at(20, 31)).name, "Shift 2")
+        self.assertEqual(shift_windows.window_for(TEMPLATES, at(21, 59)).name, "Shift 2")
+        self.assertEqual(shift_windows.window_for(TEMPLATES, at(22, 0)).name, "Shift 3")
+        self.assertEqual(shift_windows.window_for(TEMPLATES, at(5, 59, day=11)).name, "Shift 3")
+        self.assertEqual(shift_windows.window_for(TEMPLATES, at(6, 0, day=11)).name, "Shift 1")
+
+    def test_day_is_fully_tiled_no_gaps(self):
+        # Every minute of the day belongs to exactly one fixed window.
+        from datetime import timedelta
+        t = datetime(2026, 11, 11, 0, 0, tzinfo=TZ)
+        names = []
+        for _ in range(24 * 60):
+            w = shift_windows.window_for(TEMPLATES, t)
+            self.assertIsNotNone(w, f"gap at {t}")
+            names.append(w.name)
+            t += timedelta(minutes=1)
+        self.assertIn("Shift 1", names)
+        self.assertIn("Shift 2", names)
+        self.assertIn("Shift 3", names)
+
     def test_window_for_label(self):
         w = shift_windows.window_for_label(TEMPLATES, "Shift 2", at(10, 0))
         self.assertEqual(w.start, at(14, 0))
