@@ -33,8 +33,10 @@ class QualityKpiWidget extends StatelessWidget {
     final sd = _scaled(_num(entry?['sd_samp']), display.scale);
     final hasData = mean != null || sd != null;
 
-    // Colour comes from the SD status only (null = no SD threshold = neutral).
-    final status = _sdStatusFor(param.key);
+    // Colour comes from the SD status ONLY on SD tiles: mean tiles (and the
+    // combined Mean+SD tile) are always neutral, never coloured by the
+    // standard deviation.
+    final status = metric == 'sd' ? _sdStatusFor(param.key) : null;
     final accent = _statusColor(status);
     final onFill = _onColor(accent);
     final subFill = _subOnColor(accent);
