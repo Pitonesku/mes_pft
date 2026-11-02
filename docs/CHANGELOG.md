@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.2.0] - 2026-11-02 (build 53) - po->mo rename, Odoo guardrails, A3-A9, web Runs & Audit
 
 ### Telegram report: Quality section after machine efficiency (2026-11-02, late night)
+- Hardening: the order window end is clamped to the run's end (the MO switch), so a late-synced report can never pull in rods of the next order or a later re-run of the same order number. Boundary rod at the switch belongs to the incoming order. 3-orders-in-a-shift + late-sync + boundary tests added (8 section tests, 433 total). Deployed to production.
+
 - The Telegram report message (create_report, sync_report and the bot's digital report) now shows a Quality section after the machine-efficiency line:
   Mean PD / Mean Dia / SD PD / SD Dia with green/yellow/red circles on the SD rows (quality_settings thresholds; means uncoloured).
 - SD covers the ORDER's own time window in the shift ([run start, submission]): one order in the shift = the whole shift; several orders (e.g. 101 at 14-18, 102 at 18-22) each count only their own samples. Rods matched by run link OR by order label (Sample ID) within the window are included. Sample SD (n-1). Reports without a linked run omit the section.

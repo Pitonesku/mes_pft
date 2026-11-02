@@ -79,6 +79,14 @@ def quality_section_text(db: Session, report) -> Optional[str]:
     order = (run.mo_ref or getattr(report, "mo_number", "") or "").strip()
     start = run.started_at
     end = _report_end_utc(report)
+    # A finished run ends at the MO switch: clamp the window so a late-synced
+    # report can never pull in rods of the next order (or a later re-run of the
+    # same order number).
+    if run.ended_at is not None:
+        run_end = run.ended_at
+        if getattr(run_end, "tzinfo", None) is None:
+            run_end = run_end.replace(tzinfo=timezone.utc)
+        end = min(end, run_end.astimezone(timezone.utc))
     if end <= start:
         return None
 

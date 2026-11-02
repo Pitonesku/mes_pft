@@ -124,6 +124,73 @@ class ReportQualitySectionTests(DbTestCase):
         self.assertIn("Mean PD: 303.00", sec)  # (300+306)/2 -> both rods included
         self.assertIn("SD PD: 4.24", sec)
 
+    def test_three_orders_in_one_shift(self):
+        # 101 14:00-16:00, 102 16:00-18:00, 103 18:00-20:00 on the same shift.
+        shift = self.make_shift(self.m1)
+        t0 = datetime(2020, 6, 1, 12, 0, tzinfo=timezone.utc)
+        pos = [self.po_a, self.po_b, None]
+        third = models.PurchaseOrder(mo_number="T-103", target_qty=1000,
+                                     cu=0, weight=0, box_type=1, acetate_type="a",
+                                     paper_type="p", pva_glue_type="v", hm_glue_type="h",
+                                     triacetin_type="t", diameter=7.7, length=108, pd=320)
+        self.db.add(third)
+        self.db.flush()
+        runs = []
+        for i, po in enumerate([self.po_a, self.po_b, third]):
+            runs.append(self._mk_run(shift, po, i + 1, t0 + timedelta(hours=2 * i),
+                                     t0 + timedelta(hours=2 * (i + 1))))
+        # rods per order: 300/302 | 400/406 | 500/506
+        self._mk_rod(self.m1, runs[0], t0 + timedelta(minutes=10), 300, 7.70)
+        self._mk_rod(self.m1, runs[0], t0 + timedelta(minutes=20), 302, 7.72)
+        self._mk_rod(self.m1, runs[1], t0 + timedelta(hours=2, minutes=10), 400, 7.80)
+        self._mk_rod(self.m1, runs[1], t0 + timedelta(hours=2, minutes=20), 406, 7.86)
+        self._mk_rod(self.m1, runs[2], t0 + timedelta(hours=4, minutes=10), 500, 7.90)
+        self._mk_rod(self.m1, runs[2], t0 + timedelta(hours=4, minutes=20), 506, 7.96)
+        rep = self._report(runs[1], self.m1, self.po_b.mo_number, t0 + timedelta(hours=4))
+        sec = report_quality.quality_section_text(self.db, rep)
+        self.assertIn("Mean PD: 403.00", sec)   # only order 102's rods
+        self.assertIn("SD PD: 4.24", sec)
+        self.assertNotIn("Mean PD: 300", sec)
+        self.assertNotIn("Mean PD: 500", sec)
+
+    def test_boundary_rod_belongs_to_next_order(self):
+        shift = self.make_shift(self.m1)
+        t0 = datetime(2020, 6, 1, 12, 0, tzinfo=timezone.utc)
+        run_a = self._mk_run(shift, self.po_a, 1, t0, t0 + timedelta(hours=2))
+        run_b = self._mk_run(shift, self.po_b, 2, t0 + timedelta(hours=2), t0 + timedelta(hours=4))
+        # a rod measured exactly at the switch instant: belongs to order B
+        self._mk_rod(self.m1, run_b, t0 + timedelta(hours=2), 400, 7.80)
+        rep_a = self._report(run_a, self.m1, self.po_a.mo_number, t0 + timedelta(hours=2))
+        sec_a = report_quality.quality_section_text(self.db, rep_a)
+        self.assertIsNone(sec_a)  # nothing in order A's window
+        rep_b = self._report(run_b, self.m1, self.po_b.mo_number, t0 + timedelta(hours=4))
+        sec_b = report_quality.quality_section_text(self.db, rep_b)
+        self.assertIn("Mean PD: 400.00", sec_b)
+
+    def test_late_sync_clamped_to_run_end(self):
+        shift = self.make_shift(self.m1)
+        t0 = datetime(2020, 6, 1, 12, 0, tzinfo=timezone.utc)
+        run_a = self._mk_run(shift, self.po_a, 1, t0, t0 + timedelta(hours=2))
+        self._mk_run(shift, self.po_b, 2, t0 + timedelta(hours=2), t0 + timedelta(hours=4))
+        self._mk_rod(self.m1, run_a, t0 + timedelta(minutes=10), 300, 7.70)
+        # a later rod of the SAME order label, run-less, after run A ended
+        s = models.QualitySample(machine_id=self.m1.id, produced_at=t0,
+                                 mo_ref="", sample_id=self.po_a.mo_number,
+                                 link_status="FIXED_WINDOW", kind="PRODUCTION")
+        self.db.add(s)
+        self.db.flush()
+        self.db.add(models.QualityMeasurement(
+            sample_id=s.id, shift_id=run_a.shift_id, run_id=None,
+            machine_id=self.m1.id, measured_at=t0 + timedelta(hours=4, minutes=10),
+            rod_no=2, pd=310, diameter=7.80))
+        self.db.flush()
+        # report A synced very late (during the next orders) without an original timestamp
+        rep = self._report(run_a, self.m1, self.po_a.mo_number, t0 + timedelta(hours=5))
+        sec = report_quality.quality_section_text(self.db, rep)
+        self.assertIn("Mean PD: 300.00", sec)
+        self.assertIn("SD PD: \u2014", sec)  # single rod -> no SD
+        self.assertNotIn("310", sec)
+
 
 if __name__ == "__main__":
     unittest.main()
