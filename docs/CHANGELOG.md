@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.2.0] - 2026-11-02 (build 53) - po->mo rename, Odoo guardrails, A3-A9, web Runs & Audit
 
+### Kiosk tiles: QC decimals + SD-only colour on the whole tile (2026-11-02, late night, dev)
+- Kiosk Quality Monitor KPI tiles now format SD with the QC page decimals: SD PD -> 2, SD DIA -> 3, weight -> 3, hardness -> 1, length -> 0; chart tooltips match QC charts (PD 1, DIA 3).
+- Tile colour is driven ONLY by the standard deviation: PD/Diameter use the server SD status; weight/hardness/length tiles are always neutral (never coloured by mean/spec).
+- The status colour now fills the whole tile (green/amber/red with contrast text) instead of only a border; triacetin tile gets the same fill treatment (keeps its own triacetin status).
+- Dev web console rebuilt (build 56). No backend changes, production untouched.
+
 ### DEV synced with production (2026-11-02, late night)
 - Ran the relink sweep on the dev database with the same rules as production: 934 samples with an order linked (45 fixed-window sessions created), unlinked-with-order now 0, MO_MISMATCH 0.
 - Note: the dev uvicorn on port 8001 is held by phantom/un-killable stale sockets serving OLD code (killed every visible python process; docker has no containers; WSL is stopped). A Windows reboot clears it.

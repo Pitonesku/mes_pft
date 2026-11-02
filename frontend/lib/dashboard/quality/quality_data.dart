@@ -18,6 +18,12 @@ class QualityMonitorData {
     return e is Map<String, dynamic> ? e : null;
   }
 
+  /// Server-side SD-only statuses (GREEN/YELLOW/RED/NO_DATA) for the two
+  /// parameters that have SD thresholds. Kiosk tiles colour by SD only.
+  String? get statusPd => live?['status_pd']?.toString();
+
+  String? get statusDia => live?['status_dia']?.toString();
+
   /// Triacetin summary from the live payload (overall/last/last_at/status/...).
   Map<String, dynamic>? get triacetin =>
       live?['triacetin'] as Map<String, dynamic>?;

@@ -24,13 +24,24 @@ class QualityChartWidget extends StatelessWidget {
       parameter: param.key,
       lineColor: param.color,
       series: data.series,
-      formatValue: (v) => v.toStringAsFixed(display.decimals),
+      // Chart tooltip decimals match the Quality Control page charts.
+      formatValue: (v) => v.toStringAsFixed(_chartDecimals(param.key)),
       valueScale: display.scale,
       unitLabel: display.unit,
       yMin: _num(config['yMin']),
       yMax: _num(config['yMax']),
     );
   }
+
+  int _chartDecimals(String key) => switch (key) {
+        'pd' => 1,
+        'diameter' => 3,
+        'weight' => 3,
+        'hardness' => 1,
+        'length' => 0,
+        'triacetin' => 2,
+        _ => 2,
+      };
 
   double? _num(dynamic v) =>
       v == null ? null : (v is num ? v.toDouble() : double.tryParse('$v'));

@@ -22,36 +22,28 @@ class TriacetinKpiWidget extends StatelessWidget {
     final target = _num(tri?['target']);
     final tolerance = _num(tri?['tolerance']);
     final accent = _statusColor(status);
+    final onFill = _onColor(accent);
+    final subFill = _subOnColor(accent);
     final hasData = overall != null || last != null;
 
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFF1A1E2B),
+        color: accent,
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: accent, width: 2),
+        border: accent == _neutral
+            ? Border.all(color: Colors.white24, width: 1)
+            : null,
       ),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Row(children: [
-            Container(
-                width: 8,
-                height: 8,
-                decoration:
-                    BoxDecoration(color: accent, shape: BoxShape.circle)),
-            const SizedBox(width: 6),
-            const Expanded(
-              child: Text('TRIACETIN',
-                  style: TextStyle(
-                      color: Colors.white70,
-                      fontSize: 12,
-                      letterSpacing: 0.5),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis),
-            ),
-          ]),
+          Text('TRIACETIN',
+              style: TextStyle(
+                  color: subFill, fontSize: 12, letterSpacing: 0.5),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis),
           const SizedBox(height: 6),
           Expanded(
             child: hasData
@@ -64,8 +56,8 @@ class TriacetinKpiWidget extends StatelessWidget {
                         alignment: Alignment.centerLeft,
                         child: Text(
                             overall == null ? '—' : '${overall.toStringAsFixed(2)} %',
-                            style: const TextStyle(
-                                color: Colors.white,
+                            style: TextStyle(
+                                color: onFill,
                                 fontSize: 30,
                                 fontWeight: FontWeight.bold)),
                       ),
@@ -74,15 +66,14 @@ class TriacetinKpiWidget extends StatelessWidget {
                         last == null
                             ? ''
                             : 'Last: ${last.toStringAsFixed(2)} % ${_fmtTime(lastAt)}',
-                        style: const TextStyle(
-                            color: Colors.white70, fontSize: 11),
+                        style: TextStyle(color: subFill, fontSize: 11),
                       ),
                     ],
                   )
-                : const Center(
+                : Center(
                     child: Text('No data',
                         style: TextStyle(
-                            color: Colors.white38,
+                            color: subFill,
                             fontSize: 14,
                             fontWeight: FontWeight.w500))),
           ),
@@ -90,22 +81,34 @@ class TriacetinKpiWidget extends StatelessWidget {
             Text(
               'Target: ${target.toStringAsFixed(2)}'
               '${tolerance != null ? ' \u00b1 ${tolerance.toStringAsFixed(2)}' : ''} %',
-              style: const TextStyle(color: Colors.white54, fontSize: 10),
+              style: TextStyle(color: subFill, fontSize: 10),
             ),
         ],
       ),
     );
   }
 
+  static const Color _neutral = Color(0xFF1A1E2B);
+
   double? _num(dynamic v) =>
       v == null ? null : (v is num ? v.toDouble() : double.tryParse('$v'));
 
   Color _statusColor(String? s) => switch (s) {
-        'PASS' => Colors.green,
-        'WARN' => Colors.amber,
-        'FAIL' => Colors.red,
-        _ => Colors.grey,
+        'PASS' => const Color(0xFF2E7D32),
+        'WARN' => const Color(0xFFF9A825),
+        'FAIL' => const Color(0xFFC62828),
+        _ => _neutral,
       };
+
+  Color _onColor(Color c) {
+    if (c == const Color(0xFFF9A825)) return Colors.black87;
+    return Colors.white;
+  }
+
+  Color _subOnColor(Color c) {
+    if (c == const Color(0xFFF9A825)) return Colors.black54;
+    return Colors.white70;
+  }
 
   String _fmtTime(String? iso) {
     if (iso == null || iso.isEmpty) return '';
