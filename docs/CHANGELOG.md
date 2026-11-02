@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.2.0] - 2026-11-02 (build 53) - po->mo rename, Odoo guardrails, A3-A9, web Runs & Audit
 
+### Fixed-window linking + 4-entry shift dropdown + report-sync FK guard (2026-11-02, evening)
+- **Relink now links by fixed shift windows:** samples falling in the gap between sessions (e.g. M2 2026-11-02, Shift 1 auto-closed 14:00 local, Shift 2 re-opened 20:23) now link to the session of the fixed shift their timestamp belongs to (`shift_resolver` FIXED_WINDOW fallback, used by both ingest and the relink sweep). Prod relink run: 140 samples linked, including all 22 gap samples -> Shift 2 session 524.
+- **QC Shift dropdown is exactly 4 entries:** All shifts / Current shift / the two other fixed windows. Session entries (and the machine-labeled rows) are gone.
+- **Relink message** now explains remaining samples.
+- **Critical fix:** POST /api/reports and /api/reports/sync no longer fail with production_reports_run_id_fkey when a tablet sends a stale run_id/shift_id - the ids are validated and nulled before insert (link_report_to_run re-resolves). Stops the report-loss retry loop seen in the prod log.
+- Full backend suite: 414 tests OK. Deployed to production.
+
 ### Fixed shift windows + bug reporting (2026-11-02, build 56)
 - UPDATE (2026-11-02, evening): re-applied to production with the QC filter UI redesigned as a single compact Shift dropdown (Machine -> PO -> Shift) that unifies fixed factory windows (Current / Shift 1 / Shift 2 / Shift 3) and session history - the scattered top-bar chips are gone. Time-anchoring hardened with new tests (off-schedule session at 20:30, full-day tiling with no gaps). Verified on prod: Shift 2 (14:00-22:00) shows 580 rods.
 - NOTE (2026-11-02): this release was REVERTED ON PRODUCTION at the request of the user. Production was rolled back to the previous state: backend + web console = hotfix state (commit 46c0895, web build 55), DB migration 0031 downgraded (bug_reports tables dropped), and the b56 APK removed from the production apk_releases (auto-update serves build 55). The code remains intact on master for a future redeploy.

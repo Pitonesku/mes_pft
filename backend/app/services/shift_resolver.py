@@ -33,6 +33,7 @@ LINK_UNRESOLVED_MACHINE = "UNRESOLVED_MACHINE"
 LINK_NON_PRODUCTION = "NON_PRODUCTION"
 LINK_CLOCK_SKEW = "CLOCK_SKEW"
 LINK_MO_MISMATCH = "MO_MISMATCH"
+LINK_FIXED_WINDOW = "FIXED_WINDOW"
 
 DEFAULT_GRACE_MINUTES = 15
 DEFAULT_CLOCK_SKEW_MINUTES = 10
@@ -153,7 +154,50 @@ def resolve_shift(
     if shift:
         return shift.id, LINK_LINKED_GRACE
 
+    # Fixed factory windows (06-14 / 14-22 / 22-06): when no session interval
+    # covers the timestamp (e.g. the gap between an auto-closed session and a
+    # late re-opened one), link the sample to the session of the fixed shift
+    # the timestamp belongs to. Machine-matched sessions win; otherwise the
+    # same-name session overlapping that window's date is used.
+    fixed_session = _resolve_by_fixed_window(session, machine_id, ts)
+    if fixed_session is not None:
+        return fixed_session.id, LINK_FIXED_WINDOW
+
     return None, LINK_NO_SHIFT
+
+
+def _resolve_by_fixed_window(session: Session, machine_id: int, ts: datetime):
+    """Map a timestamp to its fixed plant window, then to the shift session with
+    the matching shift name on that window's date. Returns the session or None."""
+    try:
+        from app.config import get_plant_timezone
+        from app.services import shift_windows
+    except Exception:  # noqa: BLE001
+        return None
+    templates = [
+        (s.name, s.start, s.end)
+        for s in session.query(models.Shift).order_by(models.Shift.id).all()
+    ]
+    if not templates:
+        return None
+    win = shift_windows.window_for(templates, ts, get_plant_timezone())
+    if win is None:
+        return None
+    q = session.query(models.ShiftSession).filter(
+        models.ShiftSession.shift_name == win.name,
+        models.ShiftSession.started_at < win.end,
+    )
+    q = q.filter(
+        (models.ShiftSession.ended_at.is_(None))
+        | (models.ShiftSession.ended_at > win.start)
+    )
+    candidates = q.order_by(models.ShiftSession.started_at.desc()).all()
+    if not candidates:
+        return None
+    for s in candidates:
+        if s.machine_id == machine_id:
+            return s
+    return candidates[0]
 
 
 def _has_machine_run():

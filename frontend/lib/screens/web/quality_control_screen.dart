@@ -19,7 +19,6 @@ class _ShiftChoice {
   const _ShiftChoice(this.kind, [this.value]);
   static const all = _ShiftChoice('all');
   static _ShiftChoice fixed(String key) => _ShiftChoice('fixed', key);
-  static _ShiftChoice session(int id) => _ShiftChoice('session', id);
 
   @override
   bool operator ==(Object other) =>
@@ -51,7 +50,6 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
 
   List<dynamic> _machines = [];
   List<dynamic> _pos = [];
-  List<dynamic> _shifts = [];
   List<dynamic> _fixedShifts = [];
   Map<String, dynamic>? _data;
   bool _loading = true;
@@ -72,10 +70,13 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
     final result = await ApiService.relinkUnlinkedSamples();
     if (!mounted) return;
     setState(() => _relinking = false);
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(result == null
-            ? 'Relink failed: ${ApiService.lastApiDetail ?? 'unknown error'}'
-            : 'Relinked ${result['relinked']} of ${result['total_unlinked']} samples')));
+    final remaining = result == null ? null : (result['total_unlinked'] ?? 0) - (result['relinked'] ?? 0);
+    final msg = result == null
+        ? 'Relink failed: ${ApiService.lastApiDetail ?? 'unknown error'}'
+        : (remaining != null && remaining > 0
+            ? 'Relinked ${result['relinked']} of ${result['total_unlinked']} samples - $remaining remain (no shift session covers their time)'
+            : 'Relinked ${result['relinked']} of ${result['total_unlinked']} samples');
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
     await _loadUnlinked();
   }
 
@@ -85,8 +86,8 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
     final i = widget.initial;
     if (i != null) {
       _machine = i.machine ?? 'all';
-      final initialShiftId = i.shiftId;
-      if (initialShiftId != null) _shiftChoice = _ShiftChoice.session(initialShiftId);
+      // Deep-linked shift sessions are intentionally ignored: the QC screen now
+      // works exclusively on fixed factory windows (see the user requirement).
       _poId = i.poId;
       _initialPo = i.po;
     }
@@ -100,7 +101,6 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
     setState(() {
       _machines = (f?['machines'] as List<dynamic>?) ?? [];
       _pos = (f?['pos'] as List<dynamic>?) ?? [];
-      _shifts = (f?['shifts'] as List<dynamic>?) ?? [];
       _fixedShifts = (f?['fixed_shifts'] as List<dynamic>?) ?? [];
       if (_initialPo != null && _poId == null) {
         for (final p in _pos) {
@@ -146,31 +146,10 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
     _load();
   }
 
-  int? _machineId(String name) {
-    for (final m in _machines) {
-      if (m['name'] == name) return m['id'] as int;
-    }
-    return null;
-  }
-
-  List<dynamic> get _filteredShifts {
-    var list = _shifts;
-    final mid = _machineId(_machine);
-    if (mid != null) list = list.where((s) => s['machine_id'] == mid).toList();
-    if (_poId != null) {
-      list = list.where((s) => ((s['po_ids'] as List<dynamic>?) ?? const []).contains(_poId)).toList();
-    }
-    return list;
-  }
-
   void _setMachine(String m) {
     setState(() {
       _machine = m;
       _page = 1;
-      if (_shiftChoice.kind == 'session' &&
-          !_filteredShifts.any((s) => s['id'] == _shiftChoice.value)) {
-        _shiftChoice = _ShiftChoice.all;
-      }
     });
     _load();
   }
@@ -179,15 +158,6 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
     setState(() {
       _poId = id;
       _page = 1;
-      if (_shiftChoice.kind == 'session') {
-        final valid = _filteredShifts.any((s) => s['id'] == _shiftChoice.value);
-        if (!valid) _shiftChoice = _ShiftChoice.all;
-      } else if (id != null && _shiftChoice.kind == 'all') {
-        final list = _filteredShifts;
-        if (list.isNotEmpty) {
-          _shiftChoice = _ShiftChoice.session(list.first['id'] as int);
-        }
-      }
     });
     _load();
   }
@@ -321,10 +291,11 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
     const order = ['current', 'Shift 1', 'Shift 2', 'Shift 3'];
     final fixed = [..._fixedShifts]
       ..sort((a, b) => order.indexOf(a['key']).compareTo(order.indexOf(b['key'])));
+    // Exactly four positions: All shifts + Current shift + the two other
+    // fixed windows. Shift sessions are intentionally not listed.
     return [
       _ShiftChoice.all,
       for (final f in fixed) _ShiftChoice.fixed(f['key'].toString()),
-      for (final s in _filteredShifts) _ShiftChoice.session(s['id'] as int),
     ];
   }
 
@@ -332,14 +303,10 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
     switch (c.kind) {
       case 'all':
         return 'All shifts';
-      case 'fixed':
+      default:
         final f = _fixedShifts.firstWhere(
             (x) => x['key'] == c.value, orElse: () => {'label': c.value.toString()});
         return f['label'].toString();
-      default:
-        final s = _filteredShifts.firstWhere(
-            (x) => x['id'] == c.value, orElse: () => {'label': '#${c.value}'});
-        return s['label'].toString();
     }
   }
 

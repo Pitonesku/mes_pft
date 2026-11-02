@@ -902,6 +902,21 @@ async def upload_pdf_report(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error uploading PDF: {str(e)}")
 
+def _sanitize_report_fk_hints(p: dict, db: Session) -> None:
+    """Client-supplied shift/run ids are hints only: drop the ones that no
+    longer exist so the INSERT never violates a foreign key (a stale tablet
+    context must not be able to lose the whole report)."""
+    if p.get("run_id"):
+        if db.get(models.ProductionRun, p["run_id"]) is None:
+            p["run_id"] = None
+    if p.get("shift_id"):
+        if db.get(models.ShiftSession, p["shift_id"]) is None:
+            p["shift_id"] = None
+    if p.get("parent_report_id"):
+        if db.get(models.ProductionReport, p["parent_report_id"]) is None:
+            p["parent_report_id"] = None
+
+
 # --- 4. REPORT SUBMISSION (with Telegram bot) ---
 
 @router.post("/api/reports")
@@ -1006,6 +1021,7 @@ def create_report(
             payload['sync_at'] = submitted_utc
         else:
             payload['sync_at'] = datetime.now(timezone.utc).replace(tzinfo=None)
+        _sanitize_report_fk_hints(payload, db)
         db_report = models.ProductionReport(**payload)
         db.add(db_report)
         db.flush()  # Get the report ID before commit
@@ -1214,6 +1230,7 @@ def sync_report(
             p['sync_at'] = submitted_utc_sync
         else:
             p['sync_at'] = datetime.now(timezone.utc).replace(tzinfo=None)
+        _sanitize_report_fk_hints(p, db)
         db_report = models.ProductionReport(**p)
         db.add(db_report)
         db.flush()
