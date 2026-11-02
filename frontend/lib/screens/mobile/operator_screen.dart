@@ -14,6 +14,7 @@ import 'manual_quality_checks_screen.dart';
 import 'pending_shifts_screen.dart';
 import '../../shift_context.dart';
 import '../../dead_man_switch.dart';
+import '../../utils/logger.dart';
 import 'package:intl/intl.dart';
 import 'dart:async';
 import 'dart:math';
@@ -78,6 +79,7 @@ class _ReportPageState extends State<ReportPage> {
   final _weightController = TextEditingController();
 
   final _boxProducedController = TextEditingController();
+  final _quarantineBoxesController = TextEditingController();
   final _machineCounterController = TextEditingController();
   final _rodsProducedController = TextEditingController();
   final _differenceController = TextEditingController();
@@ -104,6 +106,7 @@ class _ReportPageState extends State<ReportPage> {
     _pdController.dispose();
     _weightController.dispose();
     _boxProducedController.dispose();
+    _quarantineBoxesController.dispose();
     _machineCounterController.dispose();
     _rodsProducedController.dispose();
     _differenceController.dispose();
@@ -228,11 +231,13 @@ class _ReportPageState extends State<ReportPage> {
   Future<void> _armDeadManSwitch(int? machineId) async {
     DeadManSwitch.instance.onStartTest = _openQualityChecks;
     if (machineId == null) {
+      AppLog.i('[DeadManSwitch] arm: no machine -> disarm');
       DeadManSwitch.instance.disarm();
       return;
     }
     final cfg = await ApiService.fetchMachineManualTestConfig(machineId);
     final mins = cfg?['reminder_interval_minutes'];
+    AppLog.i('[DeadManSwitch] arm: machine=$machineId cfg=$cfg');
     DeadManSwitch.instance.arm(mins is num ? mins.toInt() : null);
   }
 
@@ -488,7 +493,12 @@ class _ReportPageState extends State<ReportPage> {
     _startNewReportIdentity();
     _resetProductionLog();
     _toast('Shift started');
-    await _checkForMatchingDraft(ctx);
+    final draftHandled = await _checkForMatchingDraft(ctx);
+    if (!draftHandled) {
+      // Previous shift on this machine: offer to copy its end counters as the
+      // new start data (acetate/paper/glue/triacetin: stop -> start).
+      await _checkForPreviousReportOnMachine(machine);
+    }
   }
 
   Future<void> _changeMo() async {
@@ -585,6 +595,10 @@ class _ReportPageState extends State<ReportPage> {
     _onPOSelected(chosen);
     _resetProductionLog();
     _toast('Switched to ${chosen.poNumber}');
+    final machine = _selectedMachine;
+    if (machine != null) {
+      await _checkForPreviousReportOnMachine(machine);
+    }
   }
 
   /// A report belongs to exactly one MO run: after an MO / machine change the next
@@ -599,8 +613,198 @@ class _ReportPageState extends State<ReportPage> {
     _reportRunId = null;
   }
 
+  // --- PREVIOUS REPORT COPY FEATURE (previous shift: stop -> start) ---------
+
+  Future<Map<String, dynamic>?> _findLastReportForMachine(String machineName) async {
+    // 1. Server first (works across all devices/tablets).
+    try {
+      final serverData = await ApiService.fetchLastReportByMachine(machineName);
+      if (serverData != null) {
+        final syncAt = serverData['sync_at'] as String? ??
+            serverData['report_date'] as String? ?? '';
+        serverData['_local_created_at'] = syncAt;
+        return serverData;
+      }
+    } catch (_) {}
+
+    // 2. Fallback: local DB (offline mode).
+    final allReports = await LocalDB.instance.getAllReports();
+    final machineReports = allReports.where((row) {
+      final status = row['status'] as String? ?? '';
+      if (status != 'synced' && status != 'pending') return false;
+      try {
+        final data = jsonDecode(row['report_data'] as String) as Map<String, dynamic>;
+        return (data['machine_name']?.toString() ?? '') == machineName;
+      } catch (_) {
+        return false;
+      }
+    }).toList();
+    if (machineReports.isEmpty) return null;
+    final latest = machineReports.first;
+    final data = jsonDecode(latest['report_data'] as String) as Map<String, dynamic>;
+    data['_local_created_at'] = latest['created_at'];
+    return data;
+  }
+
+  Future<void> _checkForPreviousReportOnMachine(Machine machine) async {
+    final prevData = await _findLastReportForMachine(machine.name);
+    if (prevData == null || !mounted) return;
+
+    final createdAtStr = prevData['_local_created_at'] as String? ?? '';
+    var formattedDate = createdAtStr;
+    try {
+      final dt = DateTime.parse(createdAtStr);
+      formattedDate = DateFormat('dd.MM.yyyy HH:mm').format(dt.toLocal());
+    } catch (_) {}
+    final prevOperator = prevData['operator_name'] as String? ?? 'Unknown';
+
+    final useIt = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Row(children: [
+          Icon(Icons.history, color: Colors.deepPurple),
+          SizedBox(width: 8),
+          Text('Previous Report Found',
+              style: TextStyle(color: Colors.deepPurple, fontSize: 16)),
+        ]),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Machine: ${machine.name}',
+                style: const TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 6),
+            Text('Submitted: $formattedDate'),
+            Text('By operator: $prevOperator'),
+            const SizedBox(height: 12),
+            const Text(
+              'Would you like to use data from this report?\n\n'
+              '• PO number & lot will be copied\n'
+              '• Last bale of each material: batch & stop→start',
+              style: TextStyle(fontSize: 13),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('NO, START FRESH',
+                  style: TextStyle(color: Colors.grey))),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.deepPurple,
+                foregroundColor: Colors.white),
+            child: const Text('YES, USE THIS DATA'),
+          ),
+        ],
+      ),
+    );
+    if (useIt == true && mounted) {
+      _copyFromPreviousReport(prevData);
+    }
+  }
+
+  void _copyFromPreviousReport(Map<String, dynamic> d) {
+    PurchaseOrder? foundPO;
+    try {
+      if (d['po_number'] != null) {
+        foundPO = AppData.activePOs.firstWhere(
+          (p) => p.poNumber == d['po_number'],
+        );
+      }
+    } catch (_) {}
+
+    setState(() {
+      // Copy PO (specs) and lot.
+      if (foundPO != null) {
+        _selectedPO = foundPO;
+        _isModifyEnabled = false;
+        _boxTypeController.text = foundPO.boxType.toString();
+        _diameterController.text = foundPO.diameter.toString();
+        _lengthController.text = foundPO.length.toString();
+        _pdController.text = foundPO.pd.toString();
+        _weightController.text = foundPO.weight.toString();
+      }
+      _lotController.text = d['lot_number'] ?? '';
+
+      // Take the last item of each material list: previous stop becomes the
+      // new start (batch + type copied too). Fall back to the PO default type
+      // when the previous report has no entry for that material.
+      MaterialItem? buildFromLastItem(List<dynamic>? items) {
+        if (items == null || items.isEmpty) return null;
+        final last = items.last;
+        if (last is! Map<String, dynamic>) return null;
+        final type = last['type']?.toString() ?? '';
+        final batch = last['batch']?.toString() ?? '';
+        final stop = last['stop']?.toString() ?? '';
+        final item = MaterialItem(defaultType: type);
+        item.batch.text = batch;
+        item.start.text = stop; // previous stop becomes new start
+        return item;
+      }
+
+      final newAcetate = buildFromLastItem(d['acetate_list'] as List<dynamic>?);
+      if (newAcetate != null) {
+        _acetate.clear();
+        _acetate.add(newAcetate);
+      } else if (foundPO != null) {
+        _acetate.clear();
+        _acetate.add(MaterialItem(defaultType: foundPO.acetateType));
+      }
+
+      final newPaper = buildFromLastItem(d['paper_list'] as List<dynamic>?);
+      if (newPaper != null) {
+        _paper.clear();
+        _paper.add(newPaper);
+      } else if (foundPO != null) {
+        _paper.clear();
+        _paper.add(MaterialItem(defaultType: foundPO.paperType));
+      }
+
+      final newPva = buildFromLastItem(d['pva_list'] as List<dynamic>?);
+      if (newPva != null) {
+        _pvaGlue.clear();
+        _pvaGlue.add(newPva);
+      } else if (foundPO != null) {
+        _pvaGlue.clear();
+        _pvaGlue.add(MaterialItem(defaultType: foundPO.pvaGlueType));
+      }
+
+      final newHm = buildFromLastItem(d['hm_list'] as List<dynamic>?);
+      if (newHm != null) {
+        _hmGlue.clear();
+        _hmGlue.add(newHm);
+      } else if (foundPO != null) {
+        _hmGlue.clear();
+        _hmGlue.add(MaterialItem(defaultType: foundPO.hmGlueType));
+      }
+
+      final newTri = buildFromLastItem(d['tri_list'] as List<dynamic>?);
+      if (newTri != null) {
+        _triacetin.clear();
+        _triacetin.add(newTri);
+      } else if (foundPO != null) {
+        _triacetin.clear();
+        _triacetin.add(MaterialItem(defaultType: foundPO.triacetinType));
+      }
+
+      _calculateProductionLog();
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Data copied from previous report. Please fill in shift & production details.'),
+        backgroundColor: Colors.deepPurple,
+        duration: Duration(seconds: 4),
+      ),
+    );
+  }
+
   bool _hasProductionData() =>
       _boxProducedController.text.trim().isNotEmpty ||
+      _quarantineBoxesController.text.trim().isNotEmpty ||
       _machineCounterController.text.trim().isNotEmpty ||
       _rodsProducedController.text.trim().isNotEmpty ||
       _wasteController.text.trim().isNotEmpty;
@@ -747,10 +951,10 @@ class _ReportPageState extends State<ReportPage> {
     DeadManSwitch.instance.disarm();
   }
 
-  Future<void> _checkForMatchingDraft(ShiftContext ctx) async {
+  Future<bool> _checkForMatchingDraft(ShiftContext ctx) async {
     final matching = await _findMatchingDrafts(
         ctx.machineName, ctx.shiftName, _getShiftDateString(), ctx.moRef);
-    if (matching.isEmpty || !mounted) return;
+    if (matching.isEmpty || !mounted) return false;
     final draftMo = (matching.first['data'] as Map<String, dynamic>)['po_number'];
     final restore = await showDialog<bool>(
       context: context,
@@ -772,6 +976,7 @@ class _ReportPageState extends State<ReportPage> {
       _loadDraftData(matching.first['data'] as Map<String, dynamic>,
           matching.first['id'] as int?);
     }
+    return true; // a draft dialog was handled - skip the previous-report offer
   }
 
   Future<List<Map<String, dynamic>>> _findMatchingDrafts(
@@ -846,6 +1051,7 @@ class _ReportPageState extends State<ReportPage> {
       _pdController.text = d['pd'] ?? "";
       _weightController.text = d['weight'] ?? "";
       _boxProducedController.text = d['boxes_produced'] ?? "";
+      _quarantineBoxesController.text = d['quarantine_boxes'] ?? "";
       _machineCounterController.text = d['machine_counter'] ?? "";
       _rodsProducedController.text = d['produced_rods']?.toString() ?? "";
       _differenceController.text = d['difference']?.toString() ?? "";
@@ -983,9 +1189,13 @@ class _ReportPageState extends State<ReportPage> {
   void _calculateProductionLog() {
     int boxType = int.tryParse(_boxTypeController.text) ?? 0;
     int boxes = int.tryParse(_boxProducedController.text) ?? 0;
+    int quarantine = int.tryParse(_quarantineBoxesController.text) ?? 0;
     int counter = int.tryParse(_machineCounterController.text) ?? 0;
     int rods = boxes * boxType;
-    int diff = counter - rods;
+    // Quarantine boxes are accounted output too: the difference is the
+    // machine counter minus good rods minus quarantined rods.
+    int accounted = rods + quarantine * boxType;
+    int diff = counter - accounted;
     double diffPct = counter > 0 ? (diff / counter) * 100 : 0.0;
 
     setState(() {
@@ -1084,6 +1294,7 @@ class _ReportPageState extends State<ReportPage> {
       'pd': _pdController.text,
       'weight': _weightController.text,
       'boxes_produced': _boxProducedController.text,
+      'quarantine_boxes': _quarantineBoxesController.text,
       'machine_counter': _machineCounterController.text,
       'produced_rods': _rodsProducedController.text,
       'difference': _differenceController.text,
@@ -1172,6 +1383,7 @@ class _ReportPageState extends State<ReportPage> {
       "pd": double.tryParse(_pdController.text)?.toInt() ?? 0,
       "weight": double.tryParse(_weightController.text) ?? 0.0,
       "boxes_produced": int.tryParse(_boxProducedController.text) ?? 0,
+      "quarantine_boxes": int.tryParse(_quarantineBoxesController.text) ?? 0,
       "machine_counter": int.tryParse(_machineCounterController.text) ?? 0,
       "produced_rods": int.tryParse(_rodsProducedController.text) ?? 0,
       "waste_kg": double.tryParse(_wasteController.text) ?? 0.0,
@@ -1341,7 +1553,7 @@ class _ReportPageState extends State<ReportPage> {
             ]);
 
             rows.add(
-              pw.Table.fromTextArray(
+              pw.TableHelper.fromTextArray(
                 headers: table.first,
                 data: table.sublist(1),
                 headerStyle: pw.TextStyle(
@@ -1455,6 +1667,10 @@ class _ReportPageState extends State<ReportPage> {
                           _previewRow(
                             "Boxes Produced",
                             _boxProducedController.text,
+                          ),
+                          _previewRow(
+                            "Quarantine Boxes",
+                            _quarantineBoxesController.text,
                           ),
                           _previewRow(
                             "Produced Rods",
@@ -1613,7 +1829,7 @@ class _ReportPageState extends State<ReportPage> {
     double overallTotal = 0.0;
 
     for (final it in list) {
-      final String type = (it.type.text ?? 'Unknown').trim();
+      final String type = (it.type.text).trim();
       final String batch = (it.batch.text.trim().isNotEmpty)
           ? it.batch.text
           : 'No Batch';
@@ -1838,7 +2054,7 @@ class _ReportPageState extends State<ReportPage> {
                     table.add([type, batch, start, stop, used.toStringAsFixed(2)]);
                   }
                   table.add(['Total', '', '', '', total.toStringAsFixed(2)]);
-                  rows.add(pw.Table.fromTextArray(
+                  rows.add(pw.TableHelper.fromTextArray(
                     headers: table.first,
                     data: table.sublist(1),
                     headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 9),
@@ -2721,6 +2937,16 @@ class _ReportPageState extends State<ReportPage> {
                             controller: _boxProducedController,
                             decoration: activeStyle,
                             validator: _reqValidator,
+                            keyboardType: TextInputType.number,
+                            onChanged: (_) => _calculateProductionLog(),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        _labeledField(
+                          "Quarantine Boxes (yellow hold)",
+                          TextFormField(
+                            controller: _quarantineBoxesController,
+                            decoration: activeStyle,
                             keyboardType: TextInputType.number,
                             onChanged: (_) => _calculateProductionLog(),
                           ),

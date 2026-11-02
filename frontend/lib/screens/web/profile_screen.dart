@@ -3,6 +3,7 @@
 import 'package:flutter/material.dart';
 import '../../models.dart';
 import '../../api_service.dart';
+import '../../core/app_version_info.dart';
 
 class ProfileScreen extends StatefulWidget {
   final User user;
@@ -85,6 +86,17 @@ class _ProfileScreenState extends State<ProfileScreen> {
   void _showError(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text(msg), backgroundColor: Colors.red));
+  }
+
+  Widget _aboutRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(children: [
+        SizedBox(width: 130, child: Text(label,
+            style: TextStyle(fontSize: 13, color: Colors.grey[700]))),
+        Expanded(child: Text(value, style: const TextStyle(fontSize: 13))),
+      ]),
+    );
   }
 
   @override
@@ -193,6 +205,20 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     backgroundColor: Colors.deepPurple,
                     padding: const EdgeInsets.symmetric(vertical: 14)),
                   onPressed: _saving ? null : _save)),
+              const SizedBox(height: 32),
+
+              // About / versions
+              const Text('About',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold,
+                  color: Colors.deepPurple)),
+              const Divider(),
+              const SizedBox(height: 4),
+              _aboutRow('Web console', AppVersionInfo.webVersionLabel),
+              _aboutRow('Backend API',
+                  AppVersionInfo.backendVersion.isEmpty ? '?' : AppVersionInfo.backendVersion),
+              _aboutRow('Data version',
+                  AppVersionInfo.dataVersion.isEmpty ? '?' : AppVersionInfo.dataVersion),
+              _aboutRow('Server', ApiService.effectiveBaseUrl),
             ]),
           ),
         ),

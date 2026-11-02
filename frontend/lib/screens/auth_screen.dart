@@ -11,6 +11,7 @@ import 'mobile/admin_screen.dart';
 import 'mobile/about_screen.dart';
 import 'web/web_shell.dart';
 import 'server_config_screen.dart';
+import '../core/offline_auth.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -22,6 +23,46 @@ class _LoginScreenState extends State<LoginScreen> {
   final _nameController = TextEditingController();
   final _passController = TextEditingController();
   bool _isLoadingData = false;
+  int _logoTaps = 0;
+  DateTime _lastLogoTap = DateTime.fromMillisecondsSinceEpoch(0);
+
+  void _onLogoTap() {
+    final now = DateTime.now();
+    if (now.difference(_lastLogoTap) > const Duration(seconds: 3)) {
+      _logoTaps = 0;
+    }
+    _lastLogoTap = now;
+    _logoTaps++;
+    if (_logoTaps >= 5) {
+      _logoTaps = 0;
+      _openServerSettings();
+    }
+  }
+
+  void _openServerSettings() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const ServerConfigScreen(editMode: true)),
+    );
+  }
+
+  /// Shared navigation into the app shell (online or offline entry).
+  void _enterShell(User user) {
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (c) => ResponsiveLayout(
+          currentUser: user,
+          mobileBuilder: (ctx, u) => u.role == UserRole.operator
+              ? ReportPage(operator: u)
+              : AdminDashboard(currentUser: u),
+          desktopBuilder: (ctx, u) => u.role == UserRole.operator
+              ? ReportPage(operator: u)
+              : WebShell(currentUser: u),
+        ),
+      ),
+    );
+  }
 
   @override
   void initState() {
@@ -91,18 +132,57 @@ class _LoginScreenState extends State<LoginScreen> {
 
         await ApiService.saveUser(user);
 
+        // Device-bound offline login: cache a password verifier + profile so
+        // this device can log in while the server is unreachable.
+        try {
+          await OfflineAuth.cacheCredentials(
+            username: username,
+            password: password,
+            userJson: {
+              'username': username,
+              'email': loginResponse['email'] ?? '',
+              'role_id': roleId,
+            },
+          );
+        } catch (_) {}
+
+        if (mounted) _enterShell(user);
+        return;
+      }
+
+      // 2. Server unreachable? Try the device-bound offline login (verifies the
+      //    password against the PBKDF2 verifier stored at the last online login
+      //    on this device). Wrong credentials stay rejected.
+      final reachable = await ApiService.isServerReachable();
+      if (!reachable) {
+        final cached = await OfflineAuth.verifyOffline(username, password);
+        if (cached != null) {
+          final offlineUser = User(
+            name: username,
+            password: password,
+            email: cached['email']?.toString() ?? '',
+            role: _mapRoleIdToRole(cached['role_id'] as int?),
+            canModifyPO: false,
+          );
+          AppData.usingFallbackData = true; // orange OFFLINE banner
+          await ApiService.saveUser(offlineUser);
+          if (mounted) {
+            setState(() => _isLoadingData = false);
+            _enterShell(offlineUser);
+          }
+          return;
+        }
         if (mounted) {
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(
-              builder: (c) => ResponsiveLayout(
-                currentUser: user,
-                mobileBuilder: (ctx, u) => u.role == UserRole.operator
-                    ? ReportPage(operator: u)
-                    : AdminDashboard(currentUser: u),
-                desktopBuilder: (ctx, u) => u.role == UserRole.operator
-                    ? ReportPage(operator: u)
-                    : WebShell(currentUser: u),
+          setState(() => _isLoadingData = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text(
+                'Server unreachable. Log in online once on this device to enable offline access.'),
+              backgroundColor: Colors.orange,
+              action: SnackBarAction(
+                label: 'Server',
+                textColor: Colors.white,
+                onPressed: _openServerSettings,
               ),
             ),
           );
@@ -110,10 +190,7 @@ class _LoginScreenState extends State<LoginScreen> {
         return;
       }
 
-      // 2. Server rejected the credentials (or is unreachable). There is no
-      //    offline/local fallback login: a session can only be established by the
-      //    server, so a forgotten or blanked password can never grant access to a
-      //    cached superadmin or demo account.
+      // 3. Server is reachable but rejected the credentials.
       if (mounted) {
         setState(() => _isLoadingData = false);
         ScaffoldMessenger.of(context).showSnackBar(
@@ -237,6 +314,11 @@ class _LoginScreenState extends State<LoginScreen> {
                          tooltip: "Force Update Data",
                          onPressed: _forceSync,
                        ),
+                       IconButton(
+                         icon: const Icon(Icons.dns_outlined, color: Colors.deepPurple),
+                         tooltip: "Server Settings",
+                         onPressed: _openServerSettings,
+                       ),
                      ],
                    ),
                  ),
@@ -264,7 +346,10 @@ class _LoginScreenState extends State<LoginScreen> {
     return Column(
       mainAxisSize: MainAxisSize.min, 
       children: [
-        const Icon(Icons.account_circle, size: 80, color: Colors.deepPurple),
+        GestureDetector(
+          onTap: _onLogoTap,
+          child: const Icon(Icons.account_circle, size: 80, color: Colors.deepPurple),
+        ),
         const SizedBox(height: 16),
         const Text("System Login", style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
         const SizedBox(height: 32),

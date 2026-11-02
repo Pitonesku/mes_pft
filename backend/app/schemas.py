@@ -2,7 +2,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional, List
 from datetime import date, datetime
 
-# --- РОЛИ И ПРАВА ---
+# --- ROLES AND PERMISSIONS ---
 class RoleBase(BaseModel):
     role_name: str
     can_create_po: bool = False
@@ -11,12 +11,13 @@ class RoleBase(BaseModel):
     can_manage_users: bool = False
     can_setup_machines: bool = False
     can_view_all_reports: bool = False
+    can_manage_quality: bool = False
 
 class Role(RoleBase):
     id: int
     model_config = ConfigDict(from_attributes=True)
 
-# --- ПОЛЬЗОВАТЕЛИ ---
+# --- USERS ---
 class UserBase(BaseModel):
     username: str
     email: Optional[str] = None
@@ -26,9 +27,10 @@ class UserBase(BaseModel):
     can_edit_report: bool = False
     can_create_po: bool = False
     can_edit_po: bool = False
+    can_manage_quality: bool = False
 
 class UserCreate(UserBase):
-    password: str # При создании передаем чистый пароль, сервер его захэширует
+    password: str  # plain password on create; the server hashes it
 
 class UserUpdate(UserBase):
     password: Optional[str] = None
@@ -50,7 +52,7 @@ class LoginResponse(BaseModel):
     role_id: Optional[int] = None
     message: str
 
-# --- МАТЕРИАЛЫ ---
+# --- MATERIALS ---
 class MaterialBase(BaseModel):
     category: str
     type_name: str
@@ -121,15 +123,16 @@ class PO(POBase):
     created_at: datetime
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
-# --- ОТЧЕТЫ (PRODUCTION REPORTS) ---
+# --- REPORTS (PRODUCTION REPORTS) ---
 class ReportBase(BaseModel):
-    # Обязательные базовые поля
+    # Required base fields
     report_date: str
     shift_name: str
     machine_name: str
     operator_name: str
     po_number: str
     boxes_produced: int
+    quarantine_boxes: Optional[int] = 0  # finished boxes pending engineering inspection
     waste_kg: float
     
     # Client-generated idempotency key (UUID) to prevent duplicate submissions
@@ -144,17 +147,17 @@ class ReportBase(BaseModel):
     timezone_offset: Optional[int] = None  # minutes from UTC (e.g., -420 for PDT)
     submitted_at_utc: Optional[datetime] = None  # absolute UTC timestamp of submission
     
-    # Новые поля для Telegram и расчетов (делаем Optional, чтобы не было 422)
+    # New fields for Telegram and calculations (Optional to avoid 422)
     shift_time_range: Optional[str] = ""
     
-    # Технические параметры фильтра (из PO или ручного ввода)
+    # Filter technical parameters (from PO or manual entry)
     box_type: Optional[int] = 0
     diameter: Optional[float] = 0.0
     length: Optional[float] = 0.0
     pd: Optional[int] = 0
     weight: Optional[float] = 0.0
     
-    # Показатели производства
+    # Production figures
     lot_number: Optional[str] = ""
     machine_counter: Optional[int] = 0
     produced_rods: Optional[int] = 0
@@ -163,14 +166,14 @@ class ReportBase(BaseModel):
     diff_percent: Optional[str] = "0%"
     efficiency_box_min: Optional[float] = 0.0
     
-    # Расход материалов (числовые значения)
+    # Material consumption (numeric values)
     total_acetate: Optional[float] = 0.0
     total_paper: Optional[float] = 0.0
     total_pva: Optional[float] = 0.0
     total_hm: Optional[float] = 0.0
     total_triacetin: Optional[float] = 0.0
 
-    # --- ТИПЫ МАТЕРИАЛОВ И БАТЧИ ДЛЯ КАЖДОЙ СМЕНЫ ---
+    # --- MATERIAL TYPES AND BATCHES PER SHIFT ---
     acetate_type: Optional[str] = ""
     acetate_batch: Optional[str] = "No Batch"
     
@@ -193,13 +196,13 @@ class ReportBase(BaseModel):
     tri_list: Optional[List[dict]] = None
     # ------------------------------------------------
 
-    # Системные поля истории изменений
+    # System fields for the change history
     parent_report_id: Optional[int] = None
     edited_by: Optional[str] = None
     edited_at: Optional[datetime] = None
     status: Optional[str] = "original"
     
-    # Прочее
+    # Misc
     remarks: Optional[str] = ""
     is_modified_manually: Optional[bool] = False
     is_archived: Optional[bool] = False

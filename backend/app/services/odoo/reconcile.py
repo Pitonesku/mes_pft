@@ -64,7 +64,7 @@ def reconcile_order(client: OdooClient, po: models.PurchaseOrder) -> Dict[str, A
     after = (po.odoo_state, po.odoo_current_mo_id, po.sync_mode)
     return {
         "po_id": po.id,
-        "po_number": po.po_number,
+        "po_number": po.mo_number,
         "state": po.odoo_state,
         "changed": before != after,
         "notes": notes,
@@ -278,7 +278,7 @@ def suggest_unlinked_orders(
     unmatched: List[Dict[str, Any]] = []
     review: List[Dict[str, Any]] = []
     for order in orders:
-        number = _norm(order.po_number or "")
+        number = _norm(order.mo_number or "")
         candidates: List[Dict[str, Any]] = []
 
         for group, chain in chains.items():
@@ -290,7 +290,7 @@ def suggest_unlinked_orders(
             if matched_on:
                 candidates.append(_candidate(group, chain, matched_on, order))
 
-        window = _report_window(session, order.po_number)
+        window = _report_window(session, order.mo_number)
         if not candidates and _order_has_spec(order):
             for group, chain in chains.items():
                 if _spec_matches(order, chain):
@@ -305,7 +305,7 @@ def suggest_unlinked_orders(
         ))
         row = {
             "local_mo_id": order.id,
-            "po_number": order.po_number,
+            "po_number": order.mo_number,
             "target_qty": order.target_qty,
             "reports_from": window["from"].isoformat() if window and window["from"] else None,
             "reports_to": window["to"].isoformat() if window and window["to"] else None,
@@ -316,7 +316,7 @@ def suggest_unlinked_orders(
             matched.append(row)
         else:
             unmatched.append({
-                "local_mo_id": order.id, "po_number": order.po_number,
+                "local_mo_id": order.id, "po_number": order.mo_number,
                 "reason": "heuristic candidates need review" if candidates else "no Odoo MO",
             })
 
@@ -368,7 +368,7 @@ def _report_window(session: Session, po_number: str) -> Optional[Dict[str, Optio
             func.min(models.ProductionReport.report_date),
             func.max(models.ProductionReport.report_date),
         )
-        .filter(models.ProductionReport.po_number == po_number)
+        .filter(models.ProductionReport.mo_number == po_number)
         .first()
     )
     if not row or not row[0]:

@@ -1,5 +1,6 @@
 // lib/core/hash_navigation_stub.dart
 /// Non-web (Android/desktop) no-op implementation.
+library;
 
 void listenToHashChange(void Function(String fragment) callback) {}
 

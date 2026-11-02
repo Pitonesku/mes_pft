@@ -113,7 +113,7 @@ class ReportLinkTests(DbTestCase):
         r2, _ = lc.switch_mo(self.db, s, self.user.id, self.po_b)
         rep = self.make_report(s, self.po_a)
         run = lc.link_report_to_run(self.db, rep)
-        self.assertEqual(run.mo_ref, self.po_a.po_number)          # MO-A, not the active MO-B
+        self.assertEqual(run.mo_ref, self.po_a.mo_number)          # MO-A, not the active MO-B
         self.assertEqual((rep.run_id, run.report_id), (run.id, rep.id))
         self.assertNotEqual(run.id, r2.id)
 
@@ -122,7 +122,7 @@ class ReportLinkTests(DbTestCase):
         lc.start_first_run(self.db, s, self.po_a)
         r2, _ = lc.switch_mo(self.db, s, self.user.id, self.po_b)
         rep = self.make_report(s, self.po_a, run_id=r2.id)         # stale context points at MO-B
-        self.assertEqual(lc.link_report_to_run(self.db, rep).mo_ref, self.po_a.po_number)
+        self.assertEqual(lc.link_report_to_run(self.db, rep).mo_ref, self.po_a.mo_number)
 
     def test_report_without_matching_run_is_left_unlinked(self):
         s = self.make_shift()

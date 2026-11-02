@@ -14,6 +14,7 @@ class MaterialsScreen extends StatefulWidget {
 }
 
 class _MaterialsScreenState extends State<MaterialsScreen> {
+  bool _saving = false;
   bool _loading = false;
   String _filter = '';
 
@@ -72,11 +73,10 @@ class _MaterialsScreenState extends State<MaterialsScreen> {
     MaterialCategory cat = existing?.category ?? MaterialCategory.acetate;
     bool hidden = existing?.isHidden ?? false;
 
-    final ok = await showDialog<bool>(
+    await showDialog<bool>(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
-        bool _saving = false;
         return AlertDialog(
         title: Text(existing == null ? 'Add Material' : 'Edit Material'),
         content: SizedBox(width: 400, child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -105,10 +105,14 @@ class _MaterialsScreenState extends State<MaterialsScreen> {
         ])),
         actions: [
           TextButton(
-            onPressed: _saving ? null : () => Navigator.pop(ctx, false),
+            onPressed: () {
+              if (_saving) return;
+              Navigator.pop(ctx, false);
+            },
             child: const Text('CANCEL')),
           FilledButton(
-            onPressed: _saving ? null : () async {
+            onPressed: () async {
+              if (_saving) return;
               if (typeC.text.trim().isEmpty) return;
               setD(() => _saving = true);
               try {
@@ -150,8 +154,7 @@ class _MaterialsScreenState extends State<MaterialsScreen> {
   }
 
   Future<void> _delete(RawMaterial m) async {
-    bool _saving = false;
-    final ok = await showDialog<bool>(context: context,
+    await showDialog<bool>(context: context,
       builder: (ctx) => StatefulBuilder(builder: (ctx, setD) => AlertDialog(
         title: const Text('Delete Material?'),
         content: Text('Delete "${m.type}"? This cannot be undone.'),

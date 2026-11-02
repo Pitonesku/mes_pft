@@ -161,6 +161,51 @@ def enqueue_run_dispatch(
     return item
 
 
+def enqueue_quarantine_release(
+    session: Session,
+    resolution_id: int,
+    po: models.PurchaseOrder,
+    boxes: int,
+    reference: str,
+    config: Optional[OdooConfig] = None,
+) -> Optional[models.OdooOutbox]:
+    """Queue a quarantine RELEASE for dispatch: the MES calls the Odoo addon's
+    ``mrp.production.mes_quarantine_release`` which books an inventory-adjustment
+    stock.move WITHOUT touching the (already closed) MO.
+
+    Idempotent per resolution: returns the existing item when one is queued.
+    """
+    if not enabled(config):
+        return None
+    if not po.odoo_mo_id:
+        return None  # local order - nothing to adjust in Odoo
+    key = f"mes:qrelease:{resolution_id}"
+    existing = (
+        session.query(models.OdooOutbox)
+        .filter(models.OdooOutbox.idempotency_key == key)
+        .first()
+    )
+    if existing is not None:
+        return existing
+    payload = {
+        "aggregate_type": "quarantine_release",
+        "mo_id": int(po.odoo_mo_id),
+        "mo_name": po.odoo_mo_name or po.mo_number,
+        "boxes": int(boxes),
+        "reference": reference,
+    }
+    item = models.OdooOutbox(
+        aggregate_type="quarantine_release",
+        aggregate_id=resolution_id,
+        idempotency_key=key,
+        payload=payload,
+        payload_hash=aggregation.fingerprint(payload),
+        status="pending",
+    )
+    session.add(item)
+    return item
+
+
 def dispatch_pending(
     session_factory, config: OdooConfig, limit: int = 20, shadow: Optional[bool] = None
 ) -> int:
@@ -260,13 +305,13 @@ def _verified_reports(session: Session, db_run) -> List[Any]:
     if shift is None:
         raise AwaitingVerification("shift not found")
     po = session.get(models.PurchaseOrder, db_run.po_id) if db_run.po_id else None
-    po_number = (po.po_number if po is not None else None) or db_run.mo_ref
+    po_number = (po.mo_number if po is not None else None) or db_run.mo_ref
     if not po_number:
         raise AwaitingVerification("run has no MO/PO number")
     machine = session.get(models.Machine, shift.machine_id)
 
     query = session.query(models.ProductionReport).filter(
-        models.ProductionReport.po_number == po_number,
+        models.ProductionReport.mo_number == po_number,
         models.ProductionReport.status != "obsolete",
         (models.ProductionReport.is_deleted.is_(None)) | (models.ProductionReport.is_deleted.is_(False)),
     )
@@ -368,6 +413,13 @@ def _dispatch_item(
     sink: Optional[list] = None,
 ) -> None:
     payload = item.payload or {}
+
+    # Quarantine release: ad-hoc Odoo inventory adjustment (stock.move) that does
+    # NOT touch the closed MO. Recorded in shadow mode like every other write.
+    if item.aggregate_type == "quarantine_release":
+        _dispatch_quarantine_release(session, client, item, payload, sink)
+        return
+
     for run in payload.get("runs", []):
         run_id = run.get("run_id")
         if not run_id:
@@ -423,6 +475,52 @@ def _dispatch_item(
     # of one run-level PDF per MO.
     if item.aggregate_type == "shift":
         _attach_shift_certificate(session, client, payload)
+
+
+# --------------------------------------------------------------------------- #
+# Quarantine release dispatch (mrp.production.mes_quarantine_release)
+# --------------------------------------------------------------------------- #
+
+def _dispatch_quarantine_release(
+    session: Session,
+    client: OdooClient,
+    item: models.OdooOutbox,
+    payload: Dict[str, Any],
+    sink: Optional[list] = None,
+) -> None:
+    """Call the mes_integration addon method and book the result on the outbox row.
+
+    In shadow mode (``sink`` given) the write is recorded and the MES-side status
+    mutations are rolled back by ``_shadow_item``'s savepoint, exactly like the
+    run flow; the resolution row then shows ``shadow`` only inside the rolled-back
+    savepoint (the recorded action is preserved in odoo_shadow_log).
+    """
+    resolution = session.get(models.QuarantineResolution, item.aggregate_id)
+    mo_id = payload.get("mo_id")
+    if not mo_id:
+        raise OdooError("quarantine release payload missing mo_id")
+    boxes = int(payload.get("boxes") or 0)
+    reference = str(payload.get("reference") or "")
+    move_id = client.call_args(
+        "mrp.production", "mes_quarantine_release", [int(mo_id), boxes, reference]
+    )
+    if sink is not None:
+        actions = list(getattr(client, "actions", []))
+        sink.append({
+            "run_id": None,
+            "odoo_mo_id": int(mo_id),
+            "link_only": False,
+            "actions": actions,
+        })
+        if hasattr(client, "actions"):
+            client.actions.clear()
+        return
+    item.odoo_model = "stock.move"
+    item.odoo_id = int(move_id) if move_id else None
+    if resolution is not None:
+        resolution.odoo_sync_status = "synced"
+        resolution.odoo_model = "stock.move"
+        resolution.odoo_id = int(move_id) if move_id else None
 
 
 def _attach_shift_certificate(session: Session, client: OdooClient, payload: Dict[str, Any]) -> None:

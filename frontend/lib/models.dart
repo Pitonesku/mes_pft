@@ -15,6 +15,7 @@ class User {
   UserRole role;
   bool canModifyPO;
   bool isInactive; // Новая галочка: Не активен
+  bool canManageQuality; // create/close NCRs, scrap & release quarantine boxes
 
   User({
     this.id,
@@ -24,6 +25,7 @@ class User {
     required this.role,
     this.canModifyPO = false,
     this.isInactive = false,
+    this.canManageQuality = false,
   });
 
   factory User.fromJson(Map<String, dynamic> json) {
@@ -40,6 +42,7 @@ class User {
       role: parsedRole,
       canModifyPO: json['role_id'] == 1 || json['role_id'] == 2,
       isInactive: json['is_inactive'] ?? false,
+      canManageQuality: json['can_manage_quality'] ?? false,
     );
   }
 
@@ -315,6 +318,8 @@ class MaterialItem {
   final TextEditingController stop;
   double used;
 
+
+
   MaterialItem({String defaultType = ""})
       : type = TextEditingController(text: defaultType),
         batch = TextEditingController(),
@@ -356,4 +361,155 @@ class MaterialItem {
     start.dispose();
     stop.dispose();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Quality management (NCR + quarantine)
+// ---------------------------------------------------------------------------
+
+class Ncr {
+  final int id;
+  final String? ncrNumber;
+  final int poId;
+  final String? moRef;
+  final int? machineId;
+  final String? machineName;
+  final String description;
+  final String? correctiveAction;
+  final String severity;
+  final String status;
+  final DateTime? createdAt;
+  final int? closedBy;
+  final DateTime? closedAt;
+  final String? closingRemarks;
+  final List<Map<String, dynamic>> history;
+
+  Ncr({
+    required this.id, this.ncrNumber, required this.poId, this.moRef,
+    this.machineId, this.machineName, required this.description,
+    this.correctiveAction, this.severity = 'MINOR', this.status = 'OPEN',
+    this.createdAt, this.closedBy, this.closedAt, this.closingRemarks,
+    this.history = const [],
+  });
+
+  bool get isOpen => status == 'OPEN' || status == 'IN_PROGRESS';
+  bool get isCritical => severity == 'CRITICAL';
+
+  factory Ncr.fromJson(Map<String, dynamic> json) => Ncr(
+    id: json['id'],
+    ncrNumber: json['ncr_number'],
+    poId: json['po_id'],
+    moRef: json['mo_ref'],
+    machineId: json['machine_id'],
+    machineName: json['machine_name'],
+    description: json['description'] ?? '',
+    correctiveAction: json['corrective_action'],
+    severity: json['severity'] ?? 'MINOR',
+    status: json['status'] ?? 'OPEN',
+    createdAt: json['created_at'] != null ? DateTime.tryParse(json['created_at']) : null,
+    closedBy: json['closed_by'],
+    closedAt: json['closed_at'] != null ? DateTime.tryParse(json['closed_at']) : null,
+    closingRemarks: json['closing_remarks'],
+    history: (json['history'] as List<dynamic>? ?? []).cast<Map<String, dynamic>>(),
+  );
+}
+
+class QuarantineResolution {
+  final int id;
+  final String? docNumber;
+  final int poId;
+  final String? moRef;
+  final String kind; // scrap | release
+  final int boxes;
+  final double? dryWeightKg;
+  final String? reasonCode;
+  final String? notes;
+  final int? ncrId;
+  final String odooSyncStatus;
+  final DateTime? createdAt;
+  final DateTime? voidedAt;
+
+  QuarantineResolution({
+    required this.id, this.docNumber, required this.poId, this.moRef,
+    required this.kind, required this.boxes, this.dryWeightKg,
+    this.reasonCode, this.notes, this.ncrId,
+    this.odooSyncStatus = 'local', this.createdAt, this.voidedAt,
+  });
+
+  bool get isScrap => kind == 'scrap';
+  bool get isVoided => voidedAt != null;
+
+  factory QuarantineResolution.fromJson(Map<String, dynamic> json) =>
+      QuarantineResolution(
+        id: json['id'],
+        docNumber: json['doc_number'],
+        poId: json['po_id'],
+        moRef: json['mo_ref'],
+        kind: json['kind'] ?? '',
+        boxes: json['boxes'] ?? 0,
+        dryWeightKg: (json['dry_weight_kg'] as num?)?.toDouble(),
+        reasonCode: json['reason_code'],
+        notes: json['notes'],
+        ncrId: json['ncr_id'],
+        odooSyncStatus: json['odoo_sync_status'] ?? 'local',
+        createdAt: json['created_at'] != null ? DateTime.tryParse(json['created_at']) : null,
+        voidedAt: json['voided_at'] != null ? DateTime.tryParse(json['voided_at']) : null,
+      );
+}
+
+class QuarantineSummary {
+  final int totalQuarantineBoxes;
+  final int resolvedBoxes;
+  final int scrapBoxes;
+  final int releasedBoxes;
+  final double scrapKg;
+  final int remainingBoxes;
+  final List<QuarantineResolution> resolutions;
+
+  QuarantineSummary({
+    this.totalQuarantineBoxes = 0, this.resolvedBoxes = 0,
+    this.scrapBoxes = 0, this.releasedBoxes = 0, this.scrapKg = 0,
+    this.remainingBoxes = 0, this.resolutions = const [],
+  });
+
+  factory QuarantineSummary.fromJson(Map<String, dynamic> json) =>
+      QuarantineSummary(
+        totalQuarantineBoxes: json['total_quarantine_boxes'] ?? 0,
+        resolvedBoxes: json['resolved_boxes'] ?? 0,
+        scrapBoxes: json['scrap_boxes'] ?? 0,
+        releasedBoxes: json['released_boxes'] ?? 0,
+        scrapKg: (json['scrap_kg'] ?? 0).toDouble(),
+        remainingBoxes: json['remaining_boxes'] ?? 0,
+        resolutions: (json['resolutions'] as List<dynamic>? ?? [])
+            .map((e) => QuarantineResolution.fromJson(e as Map<String, dynamic>))
+            .toList(),
+      );
+}
+
+class OrderQualityFlag {
+  final int poId;
+  final int openNcrCount;
+  final bool criticalOpenNcr;
+  final int totalNcrCount;
+  final int totalQuarantineBoxes;
+  final int resolvedBoxes;
+  final int remainingQuarantineBoxes;
+  final double scrapKg;
+
+  OrderQualityFlag({
+    required this.poId, this.openNcrCount = 0, this.criticalOpenNcr = false,
+    this.totalNcrCount = 0, this.totalQuarantineBoxes = 0,
+    this.resolvedBoxes = 0, this.remainingQuarantineBoxes = 0, this.scrapKg = 0,
+  });
+
+  factory OrderQualityFlag.fromJson(Map<String, dynamic> json) => OrderQualityFlag(
+    poId: json['po_id'],
+    openNcrCount: json['open_ncr_count'] ?? 0,
+    criticalOpenNcr: json['critical_open_ncr'] ?? false,
+    totalNcrCount: json['total_ncr_count'] ?? 0,
+    totalQuarantineBoxes: json['total_quarantine_boxes'] ?? 0,
+    resolvedBoxes: json['resolved_boxes'] ?? 0,
+    remainingQuarantineBoxes: json['remaining_quarantine_boxes'] ?? 0,
+    scrapKg: (json['scrap_kg'] ?? 0).toDouble(),
+  );
 }

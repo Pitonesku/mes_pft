@@ -55,7 +55,7 @@ class DbTestCase(unittest.TestCase):
     def make_report(self, shift, po, machine=None, run_id=None, **extra):
         rep = models.ProductionReport(
             report_date="2026-10-10", shift_name="Shift 1", machine_name=(machine or self.m1).name,
-            operator_name="t", po_number=po.po_number, boxes_produced=1, waste_kg=0,
+            operator_name="t", mo_number=po.mo_number, boxes_produced=1, waste_kg=0,
             shift_id=shift.id, run_id=run_id, **extra)
         self.db.add(rep)
         self.db.flush()

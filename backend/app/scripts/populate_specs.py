@@ -70,7 +70,7 @@ def main():
                     .first()
                 )
                 if existing is None:
-                    would_create.append((po.po_number, spec["parameter"], spec["nominal"]))
+                    would_create.append((po.mo_number, spec["parameter"], spec["nominal"]))
                     if not args.dry_run:
                         session.add(models.QualitySpec(**spec))
                     created += 1

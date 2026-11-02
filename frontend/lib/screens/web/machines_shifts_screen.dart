@@ -56,13 +56,10 @@ class _MachinesTab extends StatefulWidget {
 }
 
 class _MachinesTabState extends State<_MachinesTab> {
-  bool _loading = false;
-
+  bool _saving = false;
   Future<void> _save() async {
-    setState(() => _loading = true);
     await AppData.saveMachinesCache();
     await AppData.syncPendingSetupChanges();
-    setState(() => _loading = false);
   }
 
   Future<void> _editMachine(Machine? m) async {
@@ -70,11 +67,10 @@ class _MachinesTabState extends State<_MachinesTab> {
     final remC  = TextEditingController(text: m?.remarks ?? '');
     bool inactive = m?.isInactive ?? false;
 
-    final ok = await showDialog<bool>(
+    await showDialog<bool>(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
-        bool _saving = false;
         return AlertDialog(
         title: Text(m == null ? 'Add Machine' : 'Edit Machine'),
         content: SizedBox(width: 380, child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -92,10 +88,14 @@ class _MachinesTabState extends State<_MachinesTab> {
         ])),
         actions: [
           TextButton(
-            onPressed: _saving ? null : () => Navigator.pop(ctx, false),
+            onPressed: () {
+              if (_saving) return;
+              Navigator.pop(ctx, false);
+            },
             child: const Text('CANCEL')),
           FilledButton(
-            onPressed: _saving ? null : () async {
+            onPressed: () async {
+              if (_saving) return;
               if (nameC.text.trim().isEmpty) return;
               setD(() => _saving = true);
               try {
@@ -133,8 +133,7 @@ class _MachinesTabState extends State<_MachinesTab> {
   }
 
   Future<void> _deleteMachine(Machine m) async {
-    bool _saving = false;
-    final ok = await showDialog<bool>(context: context,
+    await showDialog<bool>(context: context,
       builder: (ctx) => StatefulBuilder(builder: (ctx, setD) => AlertDialog(
         title: const Text('Delete Machine?'),
         content: Text('Delete "${m.name}"?'),
@@ -246,13 +245,10 @@ class _ShiftsTab extends StatefulWidget {
 }
 
 class _ShiftsTabState extends State<_ShiftsTab> {
-  bool _loading = false;
-
+  bool _saving = false;
   Future<void> _save() async {
-    setState(() => _loading = true);
     await AppData.saveShiftsCache();
     await AppData.syncPendingSetupChanges();
-    setState(() => _loading = false);
   }
 
   Future<void> _editShift(Shift? s) async {
@@ -260,11 +256,10 @@ class _ShiftsTabState extends State<_ShiftsTab> {
     final startC = TextEditingController(text: s?.start ?? '');
     final endC   = TextEditingController(text: s?.end ?? '');
 
-    final ok = await showDialog<bool>(
+    await showDialog<bool>(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
-        bool _saving = false;
         return AlertDialog(
         title: Text(s == null ? 'Add Shift' : 'Edit Shift'),
         content: SizedBox(width: 380, child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -281,10 +276,14 @@ class _ShiftsTabState extends State<_ShiftsTab> {
         ])),
         actions: [
           TextButton(
-            onPressed: _saving ? null : () => Navigator.pop(ctx, false),
+            onPressed: () {
+              if (_saving) return;
+              Navigator.pop(ctx, false);
+            },
             child: const Text('CANCEL')),
           FilledButton(
-            onPressed: _saving ? null : () async {
+            onPressed: () async {
+              if (_saving) return;
               if (nameC.text.trim().isEmpty) return;
               setD(() => _saving = true);
               try {
@@ -322,8 +321,7 @@ class _ShiftsTabState extends State<_ShiftsTab> {
   }
 
   Future<void> _deleteShift(Shift s) async {
-    bool _saving = false;
-    final ok = await showDialog<bool>(context: context,
+    await showDialog<bool>(context: context,
       builder: (ctx) => StatefulBuilder(builder: (ctx, setD) => AlertDialog(
         title: const Text('Delete Shift?'),
         content: Text('Delete "${s.name}"?'),

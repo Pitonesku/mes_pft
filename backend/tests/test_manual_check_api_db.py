@@ -115,7 +115,7 @@ class ManualCheckApiTests(DbTestCase):
                     triacetin_wet_mg=720.0, triacetin_dry_mg=660.0, triacetin_rods=10)
         out = v2.machine_manual_tests(self.m1.id, db=self.db)
         self.assertEqual(out["run_id"], self.opened["run"]["id"])
-        self.assertEqual(out["mo_ref"], self.po_a.po_number)
+        self.assertEqual(out["mo_ref"], self.po_a.mo_number)
         self.assertEqual(len(out["config"]["parameters"]), 7)
         self.assertEqual(len(out["checks"]), 1)
         row = out["checks"][0]

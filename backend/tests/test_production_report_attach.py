@@ -14,7 +14,7 @@ from app.services.odoo.client import OdooClient
 def _report(**over):
     base = dict(
         id=185, report_date="2026-08-04", shift_name="Shift 1", machine_name="M1",
-        operator_name="Szilard", po_number="G080", lot_number="040826M1",
+        operator_name="Szilard", mo_number="G080", lot_number="040826M1",
         shift_time_range="06:00 - 14:00", box_type=10, diameter=7.72, length=108,
         pd=325, cu=0, weight=0.663, boxes_produced=1, produced_rods=921200,
         machine_counter=0, difference=0, diff_percent="0%", waste_kg=0,

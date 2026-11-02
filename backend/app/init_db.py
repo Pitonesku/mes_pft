@@ -55,9 +55,9 @@ def init_db():
     try:
         conn = get_conn()
         cursor = conn.cursor()
-        print(f"--- Подключение к PostgreSQL: {DB_NAME} ---")
+        print(f"--- Connected to PostgreSQL: {DB_NAME} ---")
 
-        # 1. ПЕРЕСОЗДАЕМ ТАБЛИЦУ РОЛЕЙ
+        # 1. RECREATE THE ROLES TABLE
         cursor.execute("DROP TABLE IF EXISTS roles CASCADE")
         cursor.execute('''
             CREATE TABLE roles (
@@ -72,9 +72,9 @@ def init_db():
                 "INSERT INTO roles (id, name) VALUES (%s, %s)",
                 (role_id, role_name)
             )
-        print("✅ Таблица ролей пересоздана и заполнена.")
+        print("✅ Roles table recreated and populated.")
 
-        # 2. ПРОВЕРЯЕМ/СОЗДАЕМ ТАБЛИЦУ ПОЛЬЗОВАТЕЛЕЙ
+        # 2. CHECK/CREATE THE USERS TABLE
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
@@ -85,7 +85,7 @@ def init_db():
             )
         ''')
 
-        # 3. ДОБАВЛЯЕМ СУПЕРАДМИНА
+        # 3. ADD THE SUPERADMIN
         cursor.execute("SELECT id FROM users WHERE username = %s", ("superadmin",))
         if not cursor.fetchone():
             superadmin_hash = bcrypt.hashpw(b"123", bcrypt.gensalt()).decode("utf-8")
@@ -93,17 +93,17 @@ def init_db():
                 INSERT INTO users (username, password_hash, email, role_id)
                 VALUES (%s, %s, %s, %s)
             ''', ("superadmin", superadmin_hash, "admin@factory.com", 1))
-            print("✅ Юзер 'superadmin' успешно добавлен.")
+            print("✅ User 'superadmin' added successfully.")
         else:
-            print("ℹ️ 'superadmin' уже существует.")
+            print("ℹ️ 'superadmin' already exists.")
 
         conn.commit()
         cursor.close()
         conn.close()
-        print("--- Инициализация завершена успешно ---")
+        print("--- Initialization completed successfully ---")
 
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
+        print(f"❌ Error: {e}")
 
 
 def ensure_ai_user():

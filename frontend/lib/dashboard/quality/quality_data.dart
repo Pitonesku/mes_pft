@@ -17,4 +17,8 @@ class QualityMonitorData {
     final e = parameters[key];
     return e is Map<String, dynamic> ? e : null;
   }
+
+  /// Triacetin summary from the live payload (overall/last/last_at/status/...).
+  Map<String, dynamic>? get triacetin =>
+      live?['triacetin'] as Map<String, dynamic>?;
 }

@@ -50,7 +50,7 @@ def _resolve_po(session: Session, mo_ref: Optional[str], mo_id: Optional[int]) -
     if mo_ref:
         po = session.query(models.PurchaseOrder).filter(
             (models.PurchaseOrder.odoo_mo_name == mo_ref)
-            | (models.PurchaseOrder.po_number == mo_ref)
+            | (models.PurchaseOrder.mo_number == mo_ref)
         ).first()
         if po is not None:
             return po

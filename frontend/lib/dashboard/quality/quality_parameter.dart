@@ -58,6 +58,13 @@ const List<QualityParameter> qualityParameters = [
       unit: 'mm',
       decimals: 0,
       color: Colors.green),
+  QualityParameter(
+      key: 'triacetin',
+      label: 'Triacetin',
+      short: 'TRI',
+      unit: '%',
+      decimals: 2,
+      color: Colors.deepPurple),
 ];
 
 QualityParameter qualityParameterByKey(String key) => qualityParameters.firstWhere(
@@ -100,6 +107,8 @@ QualityDisplay qualityDisplayFor(String key, {String? weightUnit}) {
       final mg = weightUnit == 'mg';
       return QualityDisplay(
           scale: mg ? 1000 : 1, unit: mg ? 'mg' : 'g', decimals: mg ? 0 : 3);
+    case 'triacetin':
+      return const QualityDisplay(scale: 1, unit: '%', decimals: 2);
     default:
       return const QualityDisplay(scale: 1, unit: '', decimals: 2);
   }

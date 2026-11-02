@@ -8,6 +8,7 @@ class MachineShiftSetupScreen extends StatefulWidget {
 }
 
 class _MachineShiftSetupScreenState extends State<MachineShiftSetupScreen> {
+  bool _saving = false;
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
@@ -79,7 +80,6 @@ class _MachineShiftSetupScreenState extends State<MachineShiftSetupScreen> {
     bool inactive = m?.isInactive ?? false;
 
     showDialog(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setS) {
-      bool _saving = false;
       return AlertDialog(
       title: Text(m == null ? "Add Machine" : "Edit Machine"),
       content: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -90,7 +90,8 @@ class _MachineShiftSetupScreenState extends State<MachineShiftSetupScreen> {
       actions: [
         TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("CANCEL")),
         ElevatedButton(
-          onPressed: _saving ? null : () async {
+          onPressed: () async {
+            if (_saving) return;
             if (nameC.text.isEmpty) return;
             setS(() => _saving = true);
             try {
@@ -191,7 +192,6 @@ class _MachineShiftSetupScreenState extends State<MachineShiftSetupScreen> {
     final endC = TextEditingController(text: s?.end ?? "00:00");
 
     showDialog(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setS) {
-      bool _saving = false;
       return AlertDialog(
       title: Text(s == null ? "Add Shift" : "Edit Shift"),
       content: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -202,7 +202,8 @@ class _MachineShiftSetupScreenState extends State<MachineShiftSetupScreen> {
       actions: [
         TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("CANCEL")),
         ElevatedButton(
-          onPressed: _saving ? null : () async {
+          onPressed: () async {
+            if (_saving) return;
             if (nameC.text.isEmpty) return;
 
             if (_checkOverlap(startC.text, endC.text, s)) {

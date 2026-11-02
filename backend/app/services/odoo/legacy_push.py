@@ -199,7 +199,7 @@ def plan_order(session: Session, client, po: models.PurchaseOrder, windows_by_sh
     root = client.read("mrp.production", [int(po.odoo_mo_id)], ["procurement_group_id"])
     group = _id_ref(root[0].get("procurement_group_id")) if root else None
     if not group:
-        return {"po": po.po_number, "error": "no procurement group on root MO"}
+        return {"po": po.mo_number, "error": "no procurement group on root MO"}
     mos_raw = client.search_read(
         "mrp.production", [["procurement_group_id", "=", group]],
         ["id", "name", "state", "product_qty", "product_uom_id", "backorder_sequence"],
@@ -213,7 +213,7 @@ def plan_order(session: Session, client, po: models.PurchaseOrder, windows_by_sh
            for m in mos_raw]
     reports = (
         session.query(models.ProductionReport)
-        .filter(models.ProductionReport.po_number == po.po_number,
+        .filter(models.ProductionReport.mo_number == po.mo_number,
                 models.ProductionReport.status != "obsolete",
                 (models.ProductionReport.is_deleted.is_(None))
                 | (models.ProductionReport.is_deleted.is_(False)))
@@ -224,7 +224,7 @@ def plan_order(session: Session, client, po: models.PurchaseOrder, windows_by_sh
                "date": str(r.report_date), "machine": r.machine_name,
                "shift": r.shift_name} for r in reports]
     match = lm.match_reports_to_mos(rep_in, mos)
-    return {"po": po.po_number, "match": match, "mos": mos, "reports": rep_in}
+    return {"po": po.mo_number, "match": match, "mos": mos, "reports": rep_in}
 
 
 def run_order(session: Session, client, po: models.PurchaseOrder, windows_by_shift,
@@ -278,7 +278,7 @@ def run_order(session: Session, client, po: models.PurchaseOrder, windows_by_shi
         session.commit()
     m = plan["match"]
     return {
-        "po": po.po_number, "dry_run": dry_run, "results": results,
+        "po": po.mo_number, "dry_run": dry_run, "results": results,
         "ambiguous": m["ambiguous"],
         "unmatched_reports": [r["id"] for r in m["unmatched_reports"]],
         "unmatched_mos": [x["name"] for x in m["unmatched_mos"]],

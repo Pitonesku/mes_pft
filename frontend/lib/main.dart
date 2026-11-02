@@ -45,6 +45,10 @@ void main() async {
   // Load the persisted UI theme (preset + mode) before first frame.
   await ThemeController.instance.init();
 
+  // Dead-man's switch: timezone + notification channel setup (best-effort,
+  // non-blocking — a permission prompt must never blank/delay app startup).
+  unawaited(DeadManSwitch.instance.configure());
+
   // Any 401 from a protected endpoint (stale/expired token) kicks the user back
   // to the login screen with a clean session instead of showing raw errors.
   ApiService.onUnauthorized = () {

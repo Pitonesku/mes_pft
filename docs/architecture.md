@@ -36,10 +36,10 @@ Quantum Neo CSV/XML
         └─ QuantumCsvParser -> ParsedSample
              └─ shift_resolver (machine -> shift -> run)
                   └─ quality_samples + quality_measurements  (shift_id NULLable)
-                       ├─ Grafana reads Postgres views (v_quality_rods, v_run_stats)
+                       ├─ BI/reporting tools read Postgres views (v_quality_rods, v_run_stats)
                        └─ aggregation.quality_stats -> shift_quality_stats
                             └─ shift_summaries (versioned JSON)
-                                 └─ odoo_outbox (future Odoo sync)
+                                 └─ odoo_outbox (Odoo sync, see docs/odoo-integration.md)
 ```
 
 Files are processed transactionally: parse → resolve → insert → record
@@ -54,14 +54,14 @@ Implemented in `app/quality_stats.py` (pure, unit-tested) and orchestrated by
   (asymmetric allowed; either bound may be NULL, e.g. hardness has only a lower
   limit). The customer certificate confirms pressure drop is 310..350 around 325
   (−15/+25), so a single `±tol` is not sufficient.
-- **Rod rejection** (from the Grafana dashboard): a rod outside
+- **Rod rejection** (from the plant's legacy quality dashboard): a rod outside
   `nominal − m×(nominal−lower) .. nominal + m×(upper−nominal)` with `m=3` is
   rejected and excluded from every statistic; rejected rods are only counted.
 - **Out-of-spec** (outside `[lower, upper]` but inside the rejection band) rods
   remain in mean/SD and lower the pass rate.
 - **Standard deviation** is reported as **sample SD (n−1)** by default, matching
-  the instrument and the certificate; population SD is also stored. The old
-  Grafana panel used population SD (≈0.5% difference at n=100).
+  the instrument and the certificate; population SD is also stored. The legacy
+  dashboard panel used population SD (≈0.5% difference at n=100).
 - **Weight** is measured per rod but certified per 100 rods (`report_scale=100`).
 - **Hardness and length are not measured** by the station and are entered manually
   per MO; `certificate_rows` uses a manual value only when nothing was measured.
@@ -77,10 +77,13 @@ at shift close from `aggregation.certificate_rows`, re-issued with a new version
 if late-linked measurements make the summary stale, and rendered via
 `pdf_generator.py` (reusing the existing Telegram + Google Drive delivery path).
 
-## Odoo sync (future)
+## Odoo sync
 
 `odoo_outbox` is the idempotent outbound queue. Community 18 uses the XML-RPC
 `/xmlrpc/2` endpoint with an API key, behind a transport adapter so moving to
 JSON-2 (Odoo 19+) is a swap. Each run maps to an `mrp.production`; the shift maps
-to `mrp.workorder` records. Quality data needs a small custom addon in Community
-(`quality.check` is Enterprise-only).
+to `mrp.workorder` records. Quality data uses a small custom addon in Community
+(`quality.check` is Enterprise-only). The connector is implemented
+(`services/odoo/`): inbound order linking, outbound dispatch with shadow mode,
+background reconciliation, MO recall guardrails and quarantine-release inventory
+adjustments — see `docs/odoo-integration.md`.

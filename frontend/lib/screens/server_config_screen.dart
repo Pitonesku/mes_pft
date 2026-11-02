@@ -99,6 +99,29 @@ class _ServerConfigScreenState extends State<ServerConfigScreen> {
     );
   }
 
+  Future<void> _testConnection() async {
+    final ip = _ipController.text.trim();
+    final port = _portController.text.trim();
+    if (ip.isEmpty || port.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Enter IP and port first.'),
+        backgroundColor: Colors.orange,
+      ));
+      return;
+    }
+    final baseUrl = 'http://$ip:$port/api';
+    setState(() => _isSaving = true);
+    final ok = await ApiService.testConnectionUrl(baseUrl);
+    if (!mounted) return;
+    setState(() => _isSaving = false);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(ok
+          ? 'Connection OK: $baseUrl'
+          : 'Could not reach $baseUrl - check IP, port and network.'),
+      backgroundColor: ok ? Colors.green : Colors.redAccent,
+    ));
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -215,7 +238,7 @@ class _ServerConfigScreenState extends State<ServerConfigScreen> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
             decoration: BoxDecoration(
-              color: Colors.deepPurple.withOpacity(0.06),
+              color: Colors.deepPurple.withValues(alpha: 0.06),
               borderRadius: BorderRadius.circular(8),
             ),
             child: Row(
@@ -236,6 +259,18 @@ class _ServerConfigScreenState extends State<ServerConfigScreen> {
             ),
           ),
           const SizedBox(height: 28),
+
+          // Test connection (edit mode / before saving)
+          SizedBox(
+            width: double.infinity,
+            height: 44,
+            child: OutlinedButton.icon(
+              icon: const Icon(Icons.wifi_tethering),
+              label: const Text('TEST CONNECTION'),
+              onPressed: _testConnection,
+            ),
+          ),
+          const SizedBox(height: 10),
 
           // Save button
           SizedBox(

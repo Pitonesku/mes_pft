@@ -27,7 +27,7 @@ def chain_client(*states_qty):
 
 def order(**kw):
     base = dict(
-        id=1, po_number="PO-1", odoo_mo_id=1, odoo_current_mo_id=None,
+        id=1, mo_number="PO-1", odoo_mo_id=1, odoo_current_mo_id=None,
         odoo_state=None, odoo_synced_at=None, odoo_qty_drift=None,
         sync_mode="full", target_qty=10,
     )
@@ -178,7 +178,7 @@ class ChainMatcherTests(unittest.TestCase):
         out = []
         for i, (num, dia, ln, pd) in enumerate(specs, start=1):
             out.append(SimpleNamespace(
-                id=i, po_number=num, target_qty=10000000, diameter=dia, length=ln, pd=pd,
+                id=i, mo_number=num, target_qty=10000000, diameter=dia, length=ln, pd=pd,
                 odoo_mo_id=None, odoo_state=None, odoo_current_mo_id=None,
                 sync_mode="link_only", odoo_mo_name=None, odoo_linked_at=None,
                 odoo_synced_at=None, odoo_qty_drift=None, source="local",

@@ -10,7 +10,7 @@ from tests.db_support import DbTestCase
 
 def _fresh_po(db):
     po = models.PurchaseOrder(
-        po_number=f"TEST-{uuid.uuid4().hex[:10]}",
+        mo_number=f"TEST-{uuid.uuid4().hex[:10]}",
         diameter=7.72, length=108, pd=325, cu=0, weight=66.0, box_type=4700,
         target_qty=1_000_000, produced_qty=0, source="local",
         acetate_type="", paper_type="", pva_glue_type="", hm_glue_type="", triacetin_type="",

@@ -10,14 +10,14 @@ the NOT NULL constraint on ``purchase_orders.sync_mode``.
 import unittest
 
 from app import models, schemas
-from app.main import update_po
+from app.legacy_routes import update_po
 from tests.db_support import DbTestCase
 
 
 class PoPartialUpdateTests(DbTestCase):
     def _po(self):
         po = models.PurchaseOrder(
-            po_number="PO-PARTIAL-UPDATE",
+            mo_number="PO-PARTIAL-UPDATE",
             diameter=7.72, length=108, pd=325, cu=0, weight=66.0, box_type=4700,
             acetate_type="", paper_type="", pva_glue_type="", hm_glue_type="",
             triacetin_type="", target_qty=1000, produced_qty=0,
@@ -31,7 +31,7 @@ class PoPartialUpdateTests(DbTestCase):
         # What the web console sends: spec fields + the archive flag, but no
         # sync/odoo fields (they are server-managed and never part of toJson()).
         data = dict(
-            po_number="PO-PARTIAL-UPDATE",
+            mo_number="PO-PARTIAL-UPDATE",
             diameter=7.72, length=108, pd=325, cu=0, weight=66.0, box_type=4700,
             acetate_type="", paper_type="", pva_glue_type="", hm_glue_type="",
             triacetin_type="", target_qty=1000, is_archived=True,

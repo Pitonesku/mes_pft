@@ -10,20 +10,21 @@ if __package__:
 else:
     from database import Base
 
-# --- ПРАВА И ПОЛЬЗОВАТЕЛИ ---
+# --- ROLES AND USERS ---
 
 class Role(Base):
     __tablename__ = "roles"
     id = Column(Integer, primary_key=True, index=True)
     role_name = Column(String(50), unique=True, nullable=False)
     
-    # Гибкие права доступа (те самые галочки в будущем)
+    # Flexible permission flags
     can_create_po = Column(Boolean, default=False)
     can_edit_po = Column(Boolean, default=False)
     can_edit_report = Column(Boolean, default=False)
     can_manage_users = Column(Boolean, default=False)
     can_setup_machines = Column(Boolean, default=False)
     can_view_all_reports = Column(Boolean, default=False)
+    can_manage_quality = Column(Boolean, default=False)  # create/close NCRs, post quarantine resolutions
 
     users = relationship("User", back_populates="role")
 
@@ -47,11 +48,12 @@ class User(Base):
     can_edit_report = Column(Boolean, default=False)  # can edit/delete submitted reports
     can_create_po = Column(Boolean, default=False)     # per-user override: can create purchase orders
     can_edit_po = Column(Boolean, default=False)       # per-user override: can edit/delete purchase orders
+    can_manage_quality = Column(Boolean, default=False)  # per-user override: quality management
 
     role = relationship("Role", back_populates="users")
 
 
-# --- СПРАВОЧНИКИ (МАТЕРИАЛЫ, СТАНКИ, СМЕНЫ) ---
+# --- REFERENCE DATA (MATERIALS, MACHINES, SHIFTS) ---
 
 class MaterialDictionary(Base):
     __tablename__ = "material_dictionary"
@@ -90,7 +92,7 @@ class Shift(Base):
     __tablename__ = "shifts"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(50), nullable=False)
-    start_time = Column("start_time", String(10), nullable=False)  # Существующая колонка БД
+    start_time = Column("start_time", String(10), nullable=False)  # existing DB column
     end_time = Column("end_time", String(10), nullable=False)
 
     @property
@@ -120,14 +122,14 @@ class Shift(Base):
             self.end_time = value
 
 
-# --- ПРОИЗВОДСТВО ---
+# --- PRODUCTION ---
 
 class PurchaseOrder(Base):
     __tablename__ = "purchase_orders"
     id = Column(Integer, primary_key=True, index=True)
-    po_number = Column(String(50), unique=True, nullable=False)
+    mo_number = Column("mo_number", String(50), unique=True, nullable=False)
     
-    # Технические параметры фильтра
+    # Filter technical parameters
     diameter = Column(Numeric(5, 2))
     length = Column(Numeric(5, 2))
     pd = Column(Numeric(6, 2))
@@ -137,7 +139,7 @@ class PurchaseOrder(Base):
     triacetin = Column(Numeric(6, 3), nullable=True)           # target triacetin content (%)
     triacetin_tolerance = Column(Numeric(6, 3), nullable=True)  # +/- tolerance (percentage points)
 
-    # Состав материалов
+    # Material composition
     acetate_type = Column(String(100))
     paper_type = Column(String(100))
     pva_glue_type = Column(String(100))
@@ -181,6 +183,10 @@ class PurchaseOrder(Base):
     final_waste_kg = Column(Numeric, nullable=True)
     final_materials = Column(JSONB, nullable=True)  # {acetate, paper, pva, hm, triacetin}
     final_quality = Column(JSONB, nullable=True)    # consolidated quality matrix + tested/rejected
+    # Quarantine snapshot at finalize (frozen; post-close resolutions never mutate it).
+    final_quarantine_boxes = Column(BigInteger, nullable=True)
+    final_scrap_boxes = Column(BigInteger, nullable=True)
+    final_scrap_kg = Column(Numeric, nullable=True)
     odoo_summary_attachment_id = Column(Integer, nullable=True)
     # Flutter-generated consolidated Order Summary PDF (primary source). The
     # ReportLab render_order_summary_pdf() remains only as a fallback when this
@@ -191,15 +197,15 @@ class PurchaseOrder(Base):
     # Data origin: 'odoo' (synced MO) or 'local' (manually created MO).
     source = Column(String(20), nullable=False, default="local")
 
-    # --- Manufacturing Order terminology (legacy DB column is po_number) -----
+    # --- Legacy alias: po_number (old API/tablet surface kept for compatibility) -
     @property
-    def mo_number(self) -> str:
-        """Manufacturing Order number (alias of the legacy ``po_number`` column)."""
-        return self.po_number
+    def po_number(self) -> str:
+        """Legacy alias of the ``mo_number`` column (old APKs/API keys)."""
+        return self.mo_number
 
-    @mo_number.setter
-    def mo_number(self, value: str) -> None:
-        self.po_number = value
+    @po_number.setter
+    def po_number(self, value: str) -> None:
+        self.mo_number = value
 
 class ProductionReport(Base):
     __tablename__ = "production_reports"
@@ -209,8 +215,18 @@ class ProductionReport(Base):
     shift_name = Column(String)
     machine_name = Column(String)
     operator_name = Column(String)
-    po_number = Column(String)
+    mo_number = Column("mo_number", String)
+
+    # Legacy alias kept for old tablet payloads and the legacy report schemas.
+    @property
+    def po_number(self) -> str:
+        return self.mo_number
+
+    @po_number.setter
+    def po_number(self, value: str) -> None:
+        self.mo_number = value
     boxes_produced = Column(Integer)
+    quarantine_boxes = Column(Integer, nullable=False, default=0)  # finished boxes pending engineering inspection
     waste_kg = Column(Float)
 
     acetate_type = Column(String(100), default="")
@@ -224,7 +240,7 @@ class ProductionReport(Base):
     triacetin_type = Column(String(100), default="")
     tri_batch = Column(String(100), default="No Batch")
     
-    # --- ЭТИ ПОЛЯ НУЖНО ДОБАВИТЬ ---
+    # --- additional report fields ---
     shift_time_range = Column(String, default="")
     
     box_type = Column(Integer, default=0)
@@ -262,7 +278,7 @@ class ProductionReport(Base):
     deleted_by = Column(String(50), nullable=True)
     deleted_at = Column(DateTime, nullable=True)
 
-    # Версионирование (Audit Trail)
+    # Versioning (Audit Trail)
     status = Column(String(20), default="original") # original, edited, obsolete
     parent_report_id = Column(Integer, ForeignKey("production_reports.id"))
     edited_by = Column(String(50))
@@ -651,6 +667,89 @@ class ScrapLog(Base):
     reason_code = Column(String(50), nullable=False, default="UNSPECIFIED")
     qty_kg = Column(Numeric(12, 3), nullable=False, default=0)
     recorded_at = Column(DateTime(timezone=True), nullable=True)
+
+
+# ---------------------------------------------------------------------------
+# QUALITY MANAGEMENT (NCR lifecycle + quarantine resolutions)
+# ---------------------------------------------------------------------------
+
+class NonConformityReport(Base):
+    """Non-conformity report for one Manufacturing Order (purchase_orders)."""
+    __tablename__ = "non_conformity_reports"
+    id = Column(BigInteger, primary_key=True, index=True)
+    ncr_number = Column(String(50), unique=True, nullable=True)   # auto: NCR-{MO}-{seq:04d}
+    po_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=False, index=True)
+    mo_ref = Column(String(100), nullable=True)        # snapshot of po_number at creation
+    doc_seq = Column(Integer, nullable=False)          # UNIQUE (po_id, doc_seq) - per-order sequence
+    run_id = Column(BigInteger, ForeignKey("production_runs.id"), nullable=True, index=True)
+    machine_id = Column(Integer, ForeignKey("machines.id"), nullable=True, index=True)
+
+    description = Column(Text, nullable=False)          # problem description
+    corrective_action = Column(Text, nullable=True)     # CAPA
+    severity = Column(String(20), nullable=False, default="MINOR")  # MINOR | MAJOR | CRITICAL
+
+    status = Column(String(20), nullable=False, default="OPEN", index=True)  # OPEN | IN_PROGRESS | CLOSED
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    closed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    closed_at = Column(DateTime(timezone=True), nullable=True)
+    closing_remarks = Column(Text, nullable=True)
+
+    status_logs = relationship("NcrStatusLog", back_populates="ncr",
+                               order_by="NcrStatusLog.id")
+    resolutions = relationship("QuarantineResolution", back_populates="ncr")
+
+
+class NcrStatusLog(Base):
+    """Immutable lifecycle audit trail for every NCR status transition."""
+    __tablename__ = "ncr_status_logs"
+    id = Column(BigInteger, primary_key=True, index=True)
+    ncr_id = Column(BigInteger, ForeignKey("non_conformity_reports.id"),
+                    nullable=False, index=True)
+    from_status = Column(String(20), nullable=True)
+    to_status = Column(String(20), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    username = Column(String(100), nullable=False)      # denormalized (same pattern as ReportAuditLog)
+    remarks = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    ncr = relationship("NonConformityReport", back_populates="status_logs")
+
+
+class QuarantineResolution(Base):
+    """Async resolution of the quarantine balance for one MO. Never deleted - voided.
+
+    kind=SCRAP converts quarantine boxes into waste (local ledger only).
+    kind=RELEASE converts quarantine boxes into good stock and enqueues an Odoo
+    inventory adjustment (odoo_outbox, aggregate_type='quarantine_release').
+    """
+    __tablename__ = "quarantine_resolutions"
+    id = Column(BigInteger, primary_key=True, index=True)
+    doc_number = Column(String(50), unique=True, nullable=True)   # SCR-/REL-{MO}-{seq:04d}
+    po_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=False, index=True)
+    mo_ref = Column(String(100), nullable=True)        # snapshot at creation
+    doc_seq = Column(Integer, nullable=False)          # UNIQUE (po_id, doc_seq)
+    kind = Column(String(10), nullable=False)          # SCRAP | RELEASE
+    boxes = Column(Integer, nullable=False)
+    dry_weight_kg = Column(Numeric(12, 3), nullable=True)  # SCRAP only
+    reason_code = Column(String(50), nullable=True)    # e.g. ENGINEERING_REJECT | SALVAGED
+    notes = Column(Text, nullable=True)
+    ncr_id = Column(BigInteger, ForeignKey("non_conformity_reports.id"), nullable=True, index=True)
+
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Odoo sync (RELEASE only; informational mirror of the outbox row).
+    odoo_sync_status = Column(String(20), nullable=False, default="local")  # local | pending | synced | error | shadow
+    odoo_model = Column(String(100), nullable=True)
+    odoo_id = Column(Integer, nullable=True)
+
+    # Void (never delete)
+    voided_at = Column(DateTime(timezone=True), nullable=True)
+    voided_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    void_reason = Column(Text, nullable=True)
+
+    ncr = relationship("NonConformityReport", back_populates="resolutions")
 
 
 class IngestionFile(Base):

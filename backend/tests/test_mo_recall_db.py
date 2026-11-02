@@ -17,7 +17,7 @@ def _now():
 class MoRecallTests(DbTestCase):
     def _fresh_po(self):
         po = models.PurchaseOrder(
-            po_number=f"PO-{MO}", odoo_mo_name=MO, odoo_mo_id=None,
+            mo_number=f"PO-{MO}", odoo_mo_name=MO, odoo_mo_id=None,
             target_qty=1000, produced_qty=0, source="odoo", sync_mode="full",
             diameter=7.72, length=108, pd=325, cu=0, weight=66.0, box_type=4700,
             acetate_type="", paper_type="", pva_glue_type="", hm_glue_type="",

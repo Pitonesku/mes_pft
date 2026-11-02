@@ -50,7 +50,7 @@ def sync_open_mos(session: Session, client: OdooClient) -> Dict[str, int]:
         if origin:
             po = (
                 session.query(models.PurchaseOrder)
-                .filter(models.PurchaseOrder.po_number == origin)
+                .filter(models.PurchaseOrder.mo_number == origin)
                 .first()
             )
             if po is not None and po.odoo_id is None:
@@ -159,7 +159,7 @@ def handle_mo_event(
     if po is None:
         po = (
             session.query(models.PurchaseOrder)
-            .filter(models.PurchaseOrder.po_number == po_number)
+            .filter(models.PurchaseOrder.mo_number == po_number)
             .first()
         )
         if po is not None and po.odoo_mo_id not in (None, effective_root_id):
@@ -169,7 +169,7 @@ def handle_mo_event(
     created = po is None
     if created:
         po = models.PurchaseOrder(
-            po_number=po_number,
+            mo_number=po_number,
             diameter=0.0, length=0.0, pd=0.0, cu=0, weight=0.0, box_type=0,
             acetate_type="", paper_type="", pva_glue_type="", hm_glue_type="",
             triacetin_type="", target_qty=0, produced_qty=0,
@@ -229,7 +229,7 @@ def handle_mo_event(
     return {
         "mo_id": mo_id,
         "po_id": po.id,
-        "po_number": po.po_number,
+        "po_number": po.mo_number,
         "created": created,
         "sync_mode": po.sync_mode,
         "components": len(event.get("bom") or []),
@@ -595,11 +595,11 @@ def sync_orders(
         po = None
         if name:
             po = session.query(models.PurchaseOrder).filter(
-                models.PurchaseOrder.po_number == name
+                models.PurchaseOrder.mo_number == name
             ).first()
         if po is None and origin:
             po = session.query(models.PurchaseOrder).filter(
-                models.PurchaseOrder.po_number == origin
+                models.PurchaseOrder.mo_number == origin
             ).first()
 
         if po is not None:
@@ -717,7 +717,7 @@ def link_order(
     else:
         po_number = origin or name or f"MO-{root_id}"
         po = models.PurchaseOrder(
-            po_number=po_number,
+            mo_number=po_number,
             diameter=0.0, length=0.0, pd=0.0, cu=0, weight=0.0, box_type=0,
             acetate_type="", paper_type="", pva_glue_type="", hm_glue_type="",
             triacetin_type="", target_qty=int(float(mo.get("product_qty") or 0)),
@@ -757,7 +757,7 @@ def link_order(
     return {
         "odoo_mo_id": root_id,
         "local_mo_id": po.id,
-        "mo_number": po.po_number,
+        "mo_number": po.mo_number,
         "odoo_mo_name": root_name,
         "odoo_state": state,
         "sync_mode": po.sync_mode,

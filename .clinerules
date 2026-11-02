@@ -1,10 +1,45 @@
 # Project: mes_pft — Cigarette Filter MES (Manufacturing Execution System)
 
 ## Stack
-- Backend: FastAPI (`backend/app`), served by uvicorn on port 8000.
+- Backend: FastAPI (`backend/app`), served by uvicorn.
 - Database: PostgreSQL, migrations via Alembic (`backend/alembic/versions/`).
 - Frontend: Flutter (tablet + web console); the web build is served by FastAPI at `/`.
 - ERP: Odoo 18 Community via XML-RPC (`backend/app/services/odoo/`).
+
+## Environments (dev vs production)
+- **DEV MES server:** uvicorn on port **8001** (`uvicorn app.main:app --reload --port 8001`).
+- **DEV Odoo server:** `http://127.0.0.1:8070` (dev database `test`). Never 8069 on dev.
+- **Custom Odoo addons** live at `C:\Odoodev` (especially `mes_integration`). The dev
+  Odoo config `C:\OdooDev\odoo-dev.conf` (port 8070, db `test`) loads them via
+  `C:\OdooDev\odoo_my_addons` — the two paths resolve to the same files. May be read
+  and edited for reference and development.
+- **Addon changes** need more than a restart when the manifest version or data files
+  change: run the module upgrade
+  `odoo-bin -c C:\OdooDev\odoo-dev.conf -d test -u mes_integration --stop-after-init`
+  (see `docs/odoo-integration.md`).
+- **PRODUCTION MES:** installed at `C:\mes_system` (Windows task `MES_Server`). **Never edit
+  production files directly** — changes go through dev first, then are pushed/copied via
+  `scripts/update_server.ps1` (or the documented procedure).
+- **PRODUCTION Odoo addons:** inside Program Files (Odoo server addons). **Never edit
+  production Odoo addons** — develop in `C:\Odoodev` and deploy the tested addon.
+- **Workflow:** implement → test on dev (MES 8001 + Odoo 8070) → push/copy to production.
+  After each modification, restart the dev MES server and/or the dev Odoo server if needed
+  (`uvicorn --reload` picks up backend Python changes, but Odoo addon changes require
+  restarting the Odoo dev service).
+- Dev smoke tests in `backend/scripts/` (e.g. `smoke_test_quarantine_release.py`) target the
+  **DEV** Odoo (127.0.0.1:8070). Never run them against production.
+
+## Releases / versioning
+- The software version lives in TWO places and must be bumped together:
+  `frontend/pubspec.yaml` (version name + build number) and
+  `backend/app/version.py` (`SOFTWARE_VERSION`). Then rebuild the APK and the
+  web console and copy the APK into `apk_releases/` for the auto-update flow.
+- The backend also exposes a counts-based DATA version (`/api/version` ->
+  `version` / `data_version`) - it changes when records change, not on releases.
+
+## Roadmap
+- Consult **ROADMAP.md** (repo root) for open questions, technical-debt backlog and decided
+  items before starting a task. Update it whenever an item is resolved or a new gap is found.
 
 ## Key directories
 - backend/app/models.py          — SQLAlchemy models (single source of truth)
@@ -17,7 +52,7 @@
 - frontend/lib/screens/web/      — web console screens
 
 ## Commands
-- Run backend:  cd backend && uvicorn app.main:app --reload --port 8000
+- Run backend (dev):  cd backend && uvicorn app.main:app --reload --port 8001
 - Run tests:    cd backend && python -m unittest discover -s tests -t .
 - Migrate:      cd backend && .venv\Scripts\python.exe -m alembic upgrade head
 - Build web:    cd frontend && flutter build web --release
@@ -35,6 +70,8 @@
    and reusable by the Odoo payload builder.
 6. Web/non-web platform splits use conditional exports
    (`export 'stub.dart' if (dart.library.html) 'web.dart'`) — never import dart:html in non-web builds.
+7. Dev/prod separation: never edit production MES files in `C:\mes_system` or production Odoo
+   addons in Program Files directly. Change on dev first, test, then push/copy to production.
 
 ## Quality methodology (reference)
 - Rod rejection: a value outside nominal ± 3×(nominal−limit) is rejected and excluded from all stats.

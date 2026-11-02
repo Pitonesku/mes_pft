@@ -59,10 +59,12 @@ def seed_initial_admin() -> None:
                 INSERT INTO roles (
                     role_name,
                     can_create_po, can_edit_po, can_edit_report,
-                    can_manage_users, can_setup_machines, can_view_all_reports
+                    can_manage_users, can_setup_machines, can_view_all_reports,
+                    can_manage_quality
                 ) VALUES (
                     'admin',
-                    TRUE, TRUE, TRUE, TRUE, TRUE, TRUE
+                    TRUE, TRUE, TRUE, TRUE, TRUE, TRUE,
+                    TRUE
                 )
             """))
             db.flush()
@@ -157,7 +159,7 @@ def seed_telegram_admin() -> None:
 
     try:
         # Take only the first whitespace-delimited token to handle inline comments
-        # Example: "365768473 <-- комментарий" → 365768473
+        # Example: "365768473 <-- comment" → 365768473
         tg_id = int(tg_id_raw.split()[0].strip())
     except (ValueError, TypeError):
         print(f"⚠️  INIT_ADMIN_TG_ID '{tg_id_raw}' is not a valid integer. Skipping.")
@@ -201,6 +203,34 @@ def seed_telegram_admin() -> None:
         db.rollback()
         print(f"err [Seed] Telegram admin seeding failed: {exc}")
         # Do NOT raise — seeding failure must not crash the server
+    finally:
+        db.close()
+
+
+
+def seed_quality_roles() -> None:
+    """Grant ``can_manage_quality`` to the Chief Engineer / Quality Manager roles.
+
+    Idempotent and additive: only flips the single boolean for roles whose name
+    matches a quality/engineering profile; never touches other permissions.
+    """
+    db = SessionLocal()
+    try:
+        result = db.execute(text("""
+            UPDATE roles
+            SET can_manage_quality = TRUE
+            WHERE LOWER(role_name) LIKE '%quality%'
+               OR LOWER(role_name) LIKE '%engineer%'
+               -- Russian role names stored in the legacy DB (do not "translate"):
+               OR LOWER(role_name) LIKE '%качество%'
+               OR LOWER(role_name) LIKE '%инженер%'
+        """))
+        db.commit()
+        if result.rowcount:
+            print(f"ok [Seed] can_manage_quality granted to {result.rowcount} role(s).")
+    except Exception as exc:  # noqa: BLE001 - seeding must never crash the server
+        db.rollback()
+        print(f"err [Seed] quality-role grant failed: {exc}")
     finally:
         db.close()
 

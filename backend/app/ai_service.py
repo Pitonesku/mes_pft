@@ -59,14 +59,14 @@ _DB_SCHEMA = """## Database Schema (PostgreSQL)
 
 ### production_reports
 - id (INTEGER PK), report_date (TEXT), shift_name (TEXT), machine_name (TEXT),
-  operator_name (TEXT), po_number (TEXT), boxes_produced (INTEGER),
+  operator_name (TEXT), mo_number (TEXT), boxes_produced (INTEGER),
   produced_rods (INTEGER), waste_kg (FLOAT), machine_efficiency (FLOAT),
   machine_counter (INTEGER), difference (FLOAT), diff_percent (TEXT),
   status (TEXT: original/edited/obsolete), is_archived (BOOLEAN),
   sync_at (TIMESTAMP)
 
 ### purchase_orders
-- id (INTEGER PK), po_number (TEXT UNIQUE), diameter (NUMERIC),
+- id (INTEGER PK), mo_number (TEXT UNIQUE), diameter (NUMERIC),
   length (NUMERIC), pd (NUMERIC), cu (INTEGER), weight (NUMERIC),
   box_type (INTEGER), target_qty (INTEGER), produced_qty (INTEGER),
   is_archived (BOOLEAN), is_hidden (BOOLEAN), created_at (TIMESTAMP)
@@ -278,7 +278,7 @@ def build_db_context(db: Session, days: int = 30) -> str:
             for po in active_pos:
                 pct = (po.produced_qty / po.target_qty * 100) if po.target_qty else 0
                 parts.append(
-                    f"- {po.po_number}: {int(po.produced_qty or 0):,}/{int(po.target_qty or 0):,} "
+                    f"- {po.mo_number}: {int(po.produced_qty or 0):,}/{int(po.target_qty or 0):,} "
                     f"({pct:.1f}%) | Ø{po.diameter}×{po.length}mm"
                 )
 

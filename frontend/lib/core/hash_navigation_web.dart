@@ -1,6 +1,6 @@
 // lib/core/hash_navigation_web.dart
 // Web implementation using the browser's hashchange event.
-// ignore_for_file: deprecated_member_use
+// ignore_for_file: deprecated_member_use, avoid_web_libraries_in_flutter
 import 'dart:html' as html;
 
 void listenToHashChange(void Function(String fragment) callback) {
@@ -8,7 +8,7 @@ void listenToHashChange(void Function(String fragment) callback) {
 }
 
 String currentHash() {
-  var h = html.window.location.hash ?? '';
+  var h = html.window.location.hash;
   if (h.startsWith('#')) h = h.substring(1);
   return h;
 }

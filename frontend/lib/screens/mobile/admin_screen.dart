@@ -50,6 +50,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
             onPressed: () async {
               await ApiService.clearSession();
               if (!mounted) return;
+              // ignore: use_build_context_synchronously
               Navigator.pushAndRemoveUntil(
                 context,
                 MaterialPageRoute(builder: (context) => const LoginScreen()),
@@ -173,6 +174,7 @@ class POListScreen extends StatefulWidget {
 }
 
 class _POListScreenState extends State<POListScreen> {
+  bool _saving = false;
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -268,16 +270,19 @@ class _POListScreenState extends State<POListScreen> {
 
   void _confirmDelete(PurchaseOrder po) {
     showDialog(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
-      bool _saving = false;
       return AlertDialog(
       title: const Text("Delete Order?"),
       content: Text("Delete ${po.poNumber} permanently?"),
       actions: [
         TextButton(
-          onPressed: _saving ? null : () => Navigator.pop(ctx),
+          onPressed: () {
+            if (_saving) return;
+            Navigator.pop(ctx);
+          },
           child: const Text("CANCEL")),
         TextButton(
-          onPressed: _saving ? null : () async {
+          onPressed: () async {
+            if (_saving) return;
             setD(() => _saving = true);
             try {
               Navigator.pop(ctx);
@@ -292,14 +297,15 @@ class _POListScreenState extends State<POListScreen> {
               }
 
               bool deleted = await ApiService.deletePurchaseOrder(po.id!);
+              if (!mounted) return;
               if (deleted) {
                 setState(() => AppData.activePOs.remove(po));
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                ScaffoldMessenger.of(this.context).showSnackBar(const SnackBar(
                   content: Text("Order deleted successfully."),
                   backgroundColor: Colors.green,
                 ));
               } else {
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                ScaffoldMessenger.of(this.context).showSnackBar(const SnackBar(
                   content: Text("Failed to delete order on server."),
                   backgroundColor: Colors.red,
                 ));
@@ -749,7 +755,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
             try {
               setState(() { widget.user.name = _name.text; widget.user.email = _email.text; widget.user.password = _pass.text; });
               await ApiService.updateUser(widget.user);
-              if (mounted) Navigator.pop(context);
+              if (!mounted) return;
+              // ignore: use_build_context_synchronously
+              Navigator.pop(context);
             } finally {
               if (mounted) setState(() => _saving = false);
             }

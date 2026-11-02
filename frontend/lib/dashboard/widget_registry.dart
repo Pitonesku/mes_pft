@@ -6,6 +6,7 @@ import 'widgets/active_orders_widget.dart';
 import 'widgets/kpi_tile_widget.dart';
 import 'widgets/machine_widget.dart';
 import 'widgets/recent_reports_widget.dart';
+import 'widgets/triacetin_machines_widget.dart';
 
 class DashboardWidgetMeta {
   final String type;
@@ -62,5 +63,14 @@ final Map<String, DashboardWidgetMeta> dashboardWidgetRegistry = {
     defaultW: 24,
     defaultH: 3,
     builder: (ctx, cfg, data) => RecentReportsWidget(reports: data.recentReports),
+  ),
+  'triacetin': DashboardWidgetMeta(
+    type: 'triacetin',
+    title: 'Triacetin',
+    icon: Icons.water_drop,
+    defaultW: 6,
+    defaultH: 2,
+    configurable: false,
+    builder: (ctx, cfg, data) => TriacetinMachinesWidget(data: data),
   ),
 };

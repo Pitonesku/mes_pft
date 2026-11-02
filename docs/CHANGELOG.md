@@ -5,7 +5,118 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.2.0] - 2026-11-02 (build 53) - po->mo rename, Odoo guardrails, A3-A9, web Runs & Audit
+
+### Web console update banner fixed (2026-11-02)
+- Fixed the stuck "New version available on the server - reload to update." banner: it compared the running web build against the newest **APK** on the server, so any APK-only release (b54/b55) made it appear forever - pressing Reload re-downloaded the same stale web bundle and nothing changed.
+- The banner now compares the running web build against the **served web bundle** (`/version.json`, same origin, new `ApiService.fetchServedWebVersion()`). It only appears when the server's web bundle is genuinely newer, so Reload always actually updates. APK-only releases no longer trigger it; the APK build number stays visible on the About card (`latestBuild`).
+- Rebuilt the web console to 2.2.0+55 (it had been stuck on b53), so the served bundle now matches the current release.
+
+### "Copy from previous report" restored (2026-11-02, build 55)
+- Restored the lost feature: after a shift starts on a machine (or the MO switches), the operator is offered the previous shift's report ("Previous Report Found") and can copy the PO + lot plus the last bale of each material with **stop -> start** (acetate, paper, PVA glue, HM glue, triacetin). Draft restore takes priority and suppresses the offer.
+- Fixed a backend bug this exposed: `/api/reports/last-by-machine` was shadowed by the dynamic `/api/reports/{report_id}` route (422) - the static route is now registered first. Verified live on dev (returns `materials_json` lists with `start`/`stop`).
+- Tablet APK rebuilt as `prod_log_v2.2.0_b55.apk` (b54 was already published in this working tree, so the build number was bumped to keep the auto-update chain intact).
+
+### Tablet APK rebuild with offline login (2026-11-02, build 54)
+- Rebuilt the Android APK (`prod_log_v2.2.0_b54.apk`, published to `apk_releases/`) so the tablet build ships the offline-login flow and the new server-settings entry points. Version stays `2.2.0`; the build number was bumped (53 -> 54) so already-updated tablets receive the new APK via the auto-update flow.
+
+### Server settings always reachable (2026-11-02)
+- New "Server Settings" icon on the login screen (next to About/Force-Update) opens `ServerConfigScreen(editMode: true)` - wrong server addresses are no longer a lockout.
+- Login failures with an unreachable server show a "Server" action button; tapping the login logo 5 times opens the same screen as a hidden escape hatch. The config screen gained a **Test Connection** button.
+
+### Offline login + offline history (2026-11-02)
+- **Device-bound offline login** (`core/offline_auth.dart`): every successful online login stores a PBKDF2-HMAC-SHA256 verifier of the password (random salt, 10k iterations) plus the profile. When the server is unreachable, login verifies the password locally and enters the app with the orange OFFLINE banner - no hardcoded/passwordless fallback, only users who logged in on that device.
+- **Offline history**: the Server tab caches the last fetched reports (`cache_server_reports`) and shows them with an "Offline - showing cached reports" badge when the server is down; new reports/QC checks keep queueing via SyncManager as before.
+- `ApiService` gained `isServerReachable()` / `testConnectionUrl()`. New dependency: `crypto`.
+
+### Version visibility (web console + backend)
+- `GET /api/version` now returns `app_version` (backend software version, single source `backend/app/version.py`) and `data_version` alongside the legacy counts-based `version` key.
+- Web console shows the running build in the sidebar footer ("Web 2.2.0+53 · API 2.2.0"), a full About/Versions card on the Profile screen (web, backend, data version, server URL) and an orange "New version available — Reload" banner when the server publishes a newer build (reload via the new `core/reload_app` conditional export). Android keeps its existing install-based update flow.
+
+### po_number -> mo_number DB rename (migration 0030, build 53)
+- Renamed `purchase_orders.po_number` and `production_reports.po_number` to `mo_number` (migration 0030); the BI views `v_quality_rods` / `v_run_stats` were recreated against the new column.
+- Every code/tests reference swept to `.mo_number`; legacy API output keeps `po_number` keys and the ORM keeps a compat `po_number` property, so old tablet APKs keep working until they auto-update to 2.2.0+53.
+
+### A5: legacy `/api/*` routes extracted from main.py (2026-10-29)
+- `main.py` shrank from ~2700 to ~510 lines: the whole legacy compatibility surface (users, login, reports CRUD, purchase orders, materials/machines/shifts, PDF upload, APK endpoints, PO audit) moved into the new `app/legacy_routes.py` (decorators keep their `/api` paths), together with its `_is_admin_user`, login-throttle helpers and `shift_lifecycle_svc_link`.
+- `main.py` now only holds the app factory concerns: env/paths, lifespan (seed, watcher, Telegram bot, workers), CORS/auth-reads middleware, SQLAdmin, router registration and the Flutter SPA mount. Dead imports removed. `test_po_partial_update` now imports from `app.legacy_routes`.
+- 393 tests green; dev MES verified serving legacy + v2 endpoints from the split modules.
+
+### A7: stale-shift-summary recompute worker (2026-10-29)
+- `services/aggregation.py` now owns the summary builders (`build_shift_summary`, `manual_check_dict`, `manual_checks_summary`, `overall_verdict` — moved out of `v2_routes`, which delegates) and adds `recompute_stale_summaries(db)`: rebuilds every summary flagged stale (e.g. after a run reassign) as a NEW version, clears the flags and returns the fresh rows.
+- New `shift_summary_recompute_worker` (7th background worker) rebuilds stale summaries every 5 minutes and re-enqueues their Odoo sync, so the ERP always converges after supervisor corrections.
+
+### A9: tablet naive timestamps are plant-local (2026-10-29)
+- Naive `started_at`/`ended_at` from tablets were stored as UTC, shifting every shift interval by the plant offset. New `_naive_as_plant_local` interprets naive datetimes in the shift's `plant_tz` (Europe/Budapest default) on `open_shift` and `close_shift`; aware datetimes pass through. 5 new tests in `backend/tests/test_shift_tz_and_summary_recompute_db.py`.
+
+### Flutter analyzer cleanup (2026-10-29)
+- **0 errors / 0 warnings** on `lib/` (from 8 warnings + 5 deprecations): fixed dead-code `_saving ? null :` patterns (dialogs now guard inside the handlers, `_saving` moved to State fields), unused `ok`/`_loading` locals, dead null-aware expressions, `Table.fromTextArray` → `TableHelper.fromTextArray`, null-aware map elements, dangling library comments, and suppressed the intentional web-only `dart:html` lints. 44 info-level lints remain (pre-existing `use_build_context_synchronously` style).
+
+### Duplicate runtime dirs consolidated (2026-10-29)
+- `resolve_universal_path` now resolves relative env values against the app dir (no more CWD-dependent `.\pdf_archive`); `.env` points `LOCAL_PDF_ARCHIVE_PATH` at `backend/pdf_archive` absolutely.
+- Kept one canonical `apk_releases` (repo root, 22 APKs) and one `pdf_archive` (`backend/pdf_archive`); the stale `backend/apk_releases`, `backend/app/apk_releases`, `pdf_archive/` and `backend/app/pdf_archive/` copies are removed.
+
+### po→mo rename: compatibility step complete (2026-10-29)
+- Verified the API accepts BOTH `mo_number` and `po_number` on input and serializes `mo_number` (Pydantic `populate_by_name` + alias); the Flutter `PurchaseOrder` reads `mo_number ?? po_number` and has a `moNumber` getter. The DB column rename (`purchase_orders`/`production_reports` `po_number` → `mo_number`) stays scheduled for the next major version per the roadmap plan (schema intact until then).
+
+### Production Odoo addon deployment (2026-10-29)
+- New `scripts/deploy_odoo_addon_prod.ps1` (run ON the production server, elevated): copies the tested `mes_integration` from `C:\Odoodev` into the production addons folder, runs `-u mes_integration --stop-after-init` with a service stop/start around it, and prints the follow-up steps (`ODOO_WEBHOOK_REQUIRE_TIMESTAMP=true` in `C:\mes_system\.env` + restart `MES_Server`; later `REQUIRE_AUTH_READS=true`). Production is never touched from the dev machine.
+
+### Odoo addon: MO recall guardrails + timestamp-signed webhooks (2026-10-29, addon 18.0.1.4.0)
+- **`unlink()` blocked** for MOs already sent to MES (`mes_sync_status in (synced, error)`) — "Cannot delete: ... Use 'Cancel / Recall from MES' instead." An MO the MES references can no longer be deleted out from under it.
+- **`action_cancel()` guarded** the same way; a direct cancel of a synced MO is refused.
+- **New "Cancel / Recall from MES" button + `action_recall_from_mes()`**: HMAC-signed `POST /api/v2/odoo/mo-recall`; a MES `409` (MO open on a machine / has production data) surfaces the reason in a `UserError` and aborts the cancel; on `200` the MO is marked `mes_sync_status='recalled'` (new selection value) and cancelled normally.
+- **Recalled MOs can never be re-pushed**: `_push_to_mes` / `_schedule_mes_push` / `button_mark_done` skip `recalled` MOs.
+- **Timestamp-signed webhooks**: all addon → MES calls send `X-Odoo-Timestamp` + `HMAC(secret, "<ts>.<body>")`; the MES verifier rejects stamps older than 300 s. `.env.example` now defaults `ODOO_WEBHOOK_REQUIRE_TIMESTAMP=true` (enable in production once the addon is deployed there).
+- Dev smoke test `backend/scripts/smoke_test_mo_recall_guardrails.py` verifies version/selection/unlink/cancel guards against the DEV Odoo (127.0.0.1:8070) — never 8069.
+
+### MO_MISMATCH relink UI (2026-10-29)
+- New admin endpoint `GET /api/v2/quality/unlinked-samples`: samples with no shift plus `MO_MISMATCH` rows (machine, MO, link status, rod count) for review; `POST /api/v2/quality/relink` now enforces superadmin.
+- Web console Quality Control gains an admin-only **"Unlinked / mismatched samples"** card with a **Relink now** button (`fetchUnlinkedSamples` / `relinkUnlinkedSamples` in `ApiService`).
+
+### Optional read-endpoint auth (`REQUIRE_AUTH_READS`, 2026-10-29)
+- New `app/require_auth_reads.py` middleware: when `REQUIRE_AUTH_READS=true`, every API request needs a valid bearer token or station key (401 otherwise) — legacy unauthenticated reads are closed in one switch. Public: non-API paths, `/api/auth/login`, `/api/version`, and the self-authenticating endpoints (Odoo webhooks, order-summary PDF, station ingest). Off by default for old tablet APK compatibility; enable once field APKs are retired. 9 new tests in `backend/tests/test_require_auth_reads.py`.
+
+### Runs & Audit web screen (2026-10-29)
+- New web console section **"Runs & Audit"** (`#/runs`, `screens/web/runs_screen.dart`): shift timeline with Active/Auto-closed/Closed filters, per-shift run list (MO, machine, counters, timestamps), per-run change/audit log (`run_change_log`), per-run manual QC checks and a supervisor **Reassign** dialog (reason mandatory) backed by `POST /api/v2/runs/{id}/reassign`.
+- `ApiService` gained `fetchV2Shifts`, `fetchRunChanges`, `fetchRunManualChecks` and `reassignRun`.
+
+### A4: background workers as a standalone process (2026-10-29)
+- The six polling workers (Telegram queue/outbox, GDrive upload, Odoo dispatcher + reconciler, shift auto-close) moved out of `main.py` import-time threads into `backend/app/workers.py`.
+- The web process starts them in its lifespan unless `MES_RUN_BACKGROUND_WORKERS=0`; `python -m app.workers` runs only the workers in a dedicated process (pair with the env flag on the web service). The station watcher and interactive Telegram bot stay in the web process.
+
+### A3: Alembic-only schema management at startup (2026-10-29, migration 0029)
+- Removed `models.Base.metadata.create_all()` (import time) and the lifespan calls to the frozen `migrate_db.migrate_roles_and_users` / `migrate_report_idempotency`; both effects moved into Alembic migration `0029_startup_legacy_migrations.py` (raw SQL, idempotent).
+- Deliberate change: the legacy startup auto-reset of plain-text passwords to `1111` was NOT replicated — plain-text hashes are rejected by the bcrypt-only verifier and remediation stays with the explicit `app/scripts/fix_plaintext_passwords.py`.
+- Fresh databases are now created with `alembic upgrade head`; `migrate_db.py` remains frozen but is never executed.
+
+### S1: shift ownership on close/stop (2026-10-29)
+- **Close/stop are no longer open to any authenticated user**: `POST /api/v2/shifts/{id}/close` and `POST /api/v2/shifts/{id}/stop` now require the shift's own operator (`shift_sessions.operator_id`) or a supervisor/admin (`_require_shift_operator_or_supervisor`) and return `403` otherwise — closing/stopping another operator's shift used to corrupt its runs, summary and certificate.
+- The already-`CLOSED` idempotent replay of `close` stays ungated, so offline retries from any device still return the stored summary instead of erroring.
+- **Resume transfers ownership**: re-opening (resuming) an `AUTO_CLOSED` shift sets `operator_id` to the resuming operator, so the new operator can close/stop their own resumed shift (the previous operator is locked out).
+- Covered by 9 new tests in `backend/tests/test_shift_ownership_db.py` (owner/supervisor/manager close+stop, 403 for others, idempotent replay, resume ownership).
+
+### Quality management: NCR + quarantine ledger (2026-10-28, build 52, migration 0028)
+- **Quarantine boxes** (`production_reports.quarantine_boxes`): finished boxes isolated pending engineering inspection; excluded from `boxes_produced` and `waste_kg` until resolved.
+- **Quarantine resolutions** (`quarantine_resolutions`, `services/quarantine.py`): SCRAP or RELEASE against one order's quarantine balance (`boxes <= remaining balance`, 422 otherwise). RELEASE on an Odoo-linked order enqueues an inventory-adjustment task in `odoo_outbox` (`aggregate_type='quarantine_release'`) — the closed MO is never touched. Admin soft-void; a RELEASE already synced to Odoo cannot be voided (409).
+- **Non-conformity reports** (`non_conformity_reports` + `ncr_status_logs`): lifecycle OPEN → IN_PROGRESS → CLOSED with an immutable audit trail, auto numbering `NCR-{MO}-{seq:04d}`, mandatory `closing_remarks` on close.
+- **RBAC**: `roles.users.can_manage_quality` (+ per-user override); all write endpoints under `/api/v2/quality/*` require the grant (admins always pass).
+- **Order finalize** writes immutable `final_quarantine_boxes` / `final_scrap_boxes` / `final_scrap_kg` snapshots; post-close resolutions never mutate them.
+- **Web console**: new "Quality Management" screen (`screens/web/quality/quality_management_screen.dart`) with NCR list/create/close and quarantine resolution.
+
+### Odoo addon `mes_quarantine_release` (2026-10-28)
+- `mes_integration` gains `mrp.production.mes_quarantine_release(boxes, reference)`: creates an `is_inventory` stock move that recovers the released boxes into stock without changing the closed MO state; rejects `boxes <= 0` and tracks `x_quarantine_released_boxes`.
+- Dev smoke test `backend/scripts/smoke_test_quarantine_release.py` verifies the method against the **DEV** Odoo (127.0.0.1:8070, db `test`) — never 8069.
+
+### Dead-man's switch manual QC reminders (2026-10-28, builds 50–51, migrations 0026–0027)
+- Per-machine **manual test config** (migration 0026): visibility/required flags per manual QC parameter (weight, length, hardness, glue seam, cut quality, visual cleanness, triacetin) + operator manual triacetin fallback columns (wet/dry weight, rods, computed %).
+- Per-machine **reminder interval** (migration 0027, `machines.reminder_interval_minutes`): the tablet raises a loud "dead man's switch" alarm when a manual QC test is due.
+- Flutter `DeadManSwitch`: foreground full-screen overlay with looping alarm sound + haptics, and an exact OS-scheduled notification (`flutter_local_notifications` / AlarmManager) for backgrounded/killed apps. New deps: `audioplayers`, `flutter_local_notifications`, `timezone`; asset `assets/sounds/alarm_beep.wav`.
+
+### Development / production environment split (2026-10-28)
+- Development now uses a dedicated environment: **MES dev on port 8001**, **Odoo dev on 8070** (db `test`), custom addons at `C:\Odoodev` (esp. `mes_integration`). Production remains MES `C:\mes_system` (port 8000) and Odoo on 8069. Never edit production files or production Odoo addons directly — test on dev first, then push.
+- Docs housekeeping: Grafana references removed from README/architecture/data-lifecycle (the Postgres views are now documented as BI/reporting/export); "Odoo (future)" sections rewritten as implemented; `.clinerules` and `ROADMAP.md` refreshed; `.env.example` production paths updated to `C:\mes_system`.
+
 ### Session/logout security fix + offline-data banner (2026-10-27, build 49)
 - **Logout now actually clears the session**: the tablet logout buttons (operator + admin) previously only navigated to the login screen, leaving the bearer token and saved user in `SharedPreferences`; killing and reopening the app silently restored the session without credentials. Both handlers now call `ApiService.clearSession()` (removes `auth_token` + `auth_user`) before navigating.
 - **Session restore re-validates + syncs**: `SessionGate._restore()` now runs `AppData.loadDataFromServer()` on a restored session and only re-enters the shell if the token survives server re-validation (a 401 clears the session and returns to login). This also fixes the stale fallback/demo data (`PO-2026-001`, demo users) previously shown after auto-login.

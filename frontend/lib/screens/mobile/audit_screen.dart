@@ -61,7 +61,7 @@ class _AuditPageState extends State<AuditPage> {
     if (data == null) {
       AppLog.d('AuditPage: falling back to local DB for PO ${po.poNumber}');
       final reportRows = await LocalDB.instance.getReportsByPoNumber(
-        po.poNumber ?? '',
+        po.poNumber,
       );
       AppLog.d(
         'AuditPage: found ${reportRows.length} report rows for PO ${po.poNumber} locally',
@@ -650,7 +650,7 @@ class _AuditPageState extends State<AuditPage> {
               ),
               pw.Divider(),
               pw.SizedBox(height: 6),
-              pw.Table.fromTextArray(
+              pw.TableHelper.fromTextArray(
                 headers: reportTable.first,
                 data: reportTable.sublist(1),
                 headerStyle: pw.TextStyle(

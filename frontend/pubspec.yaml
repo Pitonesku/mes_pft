@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 2.1.1+49
+version: 2.2.0+55
 
 environment:
   sdk: ^3.11.5
@@ -44,9 +44,15 @@ dependencies:
   pdf: ^3.11.0
   path_provider: ^2.0.0
   package_info_plus: ^8.0.0
+  crypto: ^3.0.3           # PBKDF2 verifier for device-bound offline login
   url_launcher: ^6.3.0
   open_filex: ^4.5.0
   install_plugin: ^2.1.0
+
+  # Dead-man's switch alarm (foreground looping audio + background notification)
+  audioplayers: ^6.1.0
+  flutter_local_notifications: ^17.2.4
+  timezone: ^0.9.4
 
   # Web/desktop UI — charts and large data tables (work on all platforms):
   fl_chart: ^0.70.2
@@ -77,6 +83,9 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  assets:
+    - assets/sounds/alarm_beep.wav
 
   # To add assets to your application, add an assets section, like this:
   # assets:

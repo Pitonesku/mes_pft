@@ -331,7 +331,7 @@ class PdfLayoutService {
   }
 
   pw.Widget _buildPoDetailsTable(PurchaseOrder po) {
-    return pw.Table.fromTextArray(
+    return pw.TableHelper.fromTextArray(
       border: pw.TableBorder.all(color: PdfColors.grey300, width: 0.5),
       headerStyle: pw.TextStyle(
         fontWeight: pw.FontWeight.bold,

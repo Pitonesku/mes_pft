@@ -223,7 +223,7 @@ def build_digital_report_text(report: models.ProductionReport, po: models.Purcha
     cu_val = getattr(report, 'cu', 0) or 0
 
     text += (
-        f"PO #: {report.po_number}\n"
+        f"PO #: {report.mo_number}\n"
         f"Lot #: {report.lot_number or ''}\n"
         f"Box type: {report.box_type}\n"
         f"Diameter (mm): {report.diameter}\n"
@@ -1135,7 +1135,7 @@ async def cb_orders_paginated(callback: CallbackQuery, offset: int = 0, filter_m
                 qty_label = f"{pcs_per_1000:.1f}k pcs"
 
             label = (
-                f"{po.po_number} — {dia}*{length} PD {pd_val} CU {cu_val} — {qty_label}"
+                f"{po.mo_number} — {dia}*{length} PD {pd_val} CU {cu_val} — {qty_label}"
             )
             buttons.append(
                 [InlineKeyboardButton(text=label, callback_data=f"order_{po.id}")]
@@ -1223,7 +1223,7 @@ async def cb_order_detail(callback: CallbackQuery):
 
         report_count = (
             db.query(models.ProductionReport)
-            .filter(models.ProductionReport.po_number == po.po_number)
+            .filter(models.ProductionReport.mo_number == po.mo_number)
             .count()
         )
 
@@ -1233,7 +1233,7 @@ async def cb_order_detail(callback: CallbackQuery):
         cu_val = int(po.cu or 0)
 
         detail_text = (
-            f"📦 *Order {po.po_number}*\n\n"
+            f"📦 *Order {po.mo_number}*\n\n"
             f"Specification: {dia}×{length} PD {pd_val} CU {cu_val}\n\n"
             f"Target qty: {po.target_qty} pcs\n"
             f"Produced: {po.produced_qty} pcs\n"
@@ -1292,7 +1292,7 @@ async def cb_po_stats(callback: CallbackQuery):
 
         reports = (
             db.query(models.ProductionReport)
-            .filter(models.ProductionReport.po_number == po.po_number)
+            .filter(models.ProductionReport.mo_number == po.mo_number)
             .order_by(models.ProductionReport.id.asc())
             .all()
         )
@@ -1336,7 +1336,7 @@ async def cb_po_stats(callback: CallbackQuery):
         cu_val = int(po.cu or 0)
 
         stats_text = (
-            f"*Statistic {po.po_number}*\n"
+            f"*Statistic {po.mo_number}*\n"
             f"Specification: {dia}×{length} PD {pd_val} CU {cu_val}\n\n"
             f"Target rods: {po.target_qty}\n"
             f"Rods produced: {total_rods}\n"
@@ -1421,7 +1421,7 @@ async def cb_audit_pdf(callback: CallbackQuery, bot: Bot):
         await bot.send_document(
             chat_id=callback.message.chat.id,
             document=document,
-            caption=f"Audit: {po.po_number}",
+            caption=f"Audit: {po.mo_number}",
         )
 
         db_user = {}
@@ -1456,7 +1456,7 @@ async def cb_po_reports(callback: CallbackQuery):
 
         reports = (
             db.query(models.ProductionReport)
-            .filter(models.ProductionReport.po_number == po.po_number)
+            .filter(models.ProductionReport.mo_number == po.mo_number)
             .order_by(models.ProductionReport.id.desc())
             .limit(15)
             .all()
@@ -1464,7 +1464,7 @@ async def cb_po_reports(callback: CallbackQuery):
 
         if not reports:
             await callback.message.edit_text(
-                f"No reports for order {po.po_number}.",
+                f"No reports for order {po.mo_number}.",
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
                         [InlineKeyboardButton(text="⬅ Back to Order", callback_data=f"order_{po.id}")]
@@ -1488,7 +1488,7 @@ async def cb_po_reports(callback: CallbackQuery):
         )
 
         await callback.message.edit_text(
-            f"*Reports for order {po.po_number}:*\n"
+            f"*Reports for order {po.mo_number}:*\n"
             "Tap a report to choose format (Digital / PDF):",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
@@ -1671,7 +1671,7 @@ async def cb_digital_report(callback: CallbackQuery):
             return
 
         po = db.query(models.PurchaseOrder).filter(
-            models.PurchaseOrder.po_number == report.po_number
+            models.PurchaseOrder.mo_number == report.mo_number
         ).first()
 
         text = build_digital_report_text(report, po)
@@ -1716,7 +1716,7 @@ async def cb_generate_pdf(callback: CallbackQuery, bot: Bot):
             "shift_name": report.shift_name or "",
             "machine_name": report.machine_name or "",
             "operator_name": report.operator_name or "",
-            "po_number": report.po_number or "",
+            "po_number": report.mo_number or "",
             "lot_number": report.lot_number or "",
             "shift_time_range": report.shift_time_range or "",
             "box_type": report.box_type or 0,

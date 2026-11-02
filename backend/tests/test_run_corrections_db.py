@@ -32,8 +32,8 @@ class ReassignTests(DbTestCase):
         res = self._reassign(run, machine_id=self.m2.id)
         self.assertEqual((run.po_id, run.machine_id), (self.po_b.id, self.m2.id))
         self.assertEqual((check.po_id, check.mo_ref, check.machine_id),
-                         (self.po_b.id, self.po_b.po_number, self.m2.id))
-        self.assertEqual((report.po_number, report.machine_name), (self.po_b.po_number, self.m2.name))
+                         (self.po_b.id, self.po_b.mo_number, self.m2.id))
+        self.assertEqual((report.mo_number, report.machine_name), (self.po_b.mo_number, self.m2.name))
         self.assertEqual(report.verification_status, "pending")    # must be re-approved
         self.assertEqual((res["checks_updated"], res["reports_updated"]), (1, 1))
         log = self.db.query(models.RunChangeLog).filter_by(run_id=run.id).one()

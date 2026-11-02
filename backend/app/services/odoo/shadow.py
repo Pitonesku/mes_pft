@@ -65,6 +65,16 @@ class ShadowClient:
         })
         return 0
 
+    def call(self, model: str, method: str, ids: List[int]) -> Any:
+        """Record a generic ORM method call (e.g. mrp.production.mes_quarantine_release)."""
+        self.actions.append({"action": "call", "model": model, "method": method, "args": list(ids)})
+        return 0
+
+    def call_args(self, model: str, method: str, args: List[Any]) -> Any:
+        """Record an ``@api.model`` method call with explicit positional args."""
+        self.actions.append({"action": "call", "model": model, "method": method, "args": list(args)})
+        return 0
+
     def post_completion(self, mo_id: int, qty_rods: float, consumption: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         plan = self._real.plan_completion(mo_id, qty_rods)
         if plan.get("skipped"):

@@ -107,7 +107,7 @@ class OrderSummaryPdfService {
           totalScrap.toStringAsFixed(2),
         ]);
 
-        rows.add(pw.Table.fromTextArray(
+        rows.add(pw.TableHelper.fromTextArray(
           headers: ['Date', 'Time', 'Operator', 'Rods Produced', 'Machine Counter', 'Difference', 'Scrap'],
           data: tableData,
           headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 8),

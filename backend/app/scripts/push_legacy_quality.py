@@ -47,17 +47,17 @@ def main():
             models.PurchaseOrder.sync_mode == "link_only",
         )
         if args.po:
-            q = q.filter(models.PurchaseOrder.po_number == args.po)
-        orders = q.order_by(models.PurchaseOrder.po_number).all()
+            q = q.filter(models.PurchaseOrder.mo_number == args.po)
+        orders = q.order_by(models.PurchaseOrder.mo_number).all()
         windows = build_shift_windows(session)
         print(f"orders: {len(orders)}  mode: {'APPLY' if args.apply else 'DRY RUN'}")
         for po in orders:
             out = legacy_push.run_order(session, client, po, windows, dry_run=not args.apply)
             if "error" in out:
-                print(f"{po.po_number}: ERROR {out['error']}")
+                print(f"{po.mo_number}: ERROR {out['error']}")
                 continue
             ok = [r for r in out["results"] if "skipped" not in r]
-            print(f"{po.po_number}: pushed={len(ok)} skipped={len(out['results']) - len(ok)} "
+            print(f"{po.mo_number}: pushed={len(ok)} skipped={len(out['results']) - len(ok)} "
                   f"ambiguous={len(out['ambiguous'])} unmatched_reports={out['unmatched_reports']} "
                   f"unmatched_mos={out['unmatched_mos']}")
             for r in out["results"]:

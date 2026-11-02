@@ -42,7 +42,8 @@ RunChangeLog = audit of every MO switch / machine change / supervisor correction
 
 ### Still open (not done in this pass)
 
-* **S1** any authenticated user can still stop/close another operator's shift.
+* **S1** ~~any authenticated user can still stop/close another operator's shift~~ → **fixed 2026-10-29**
+  (close/stop now require the shift's operator or a supervisor; resume transfers ownership).
 * **A3** `create_all()` + frozen `migrate_db.py` still run at startup (invariant 3).
 * **A4** background workers are threads in the web process (duplicate with `--workers > 1`).
 * **A5** `main.py` / `v2_routes.py` monoliths. **A7** summary recompute job. **A9** tablet time zone.
@@ -54,7 +55,8 @@ RunChangeLog = audit of every MO switch / machine change / supervisor correction
 
 ## 3. MO Deletion / Cancellation Guardrails (Odoo ↔ MES)
 
-**Status: backend recall route IMPLEMENTED; Odoo addon override OUTLINED (to implement later).**
+**Status: IMPLEMENTED end-to-end (2026-10-29) — backend recall route + Odoo addon
+override, verified by `backend/scripts/smoke_test_mo_recall_guardrails.py`.**
 
 ### Problem
 An MO can be pushed to MES, then deleted/cancelled in Odoo after an operator started
@@ -68,16 +70,15 @@ working on it → orphaned records, tablet UI crashes, data corruption.
   2. `409` — production data exists (`end_counter > 0`, `manual_quality_checks`, or `quality_measurements`).
   3. `200` — archive/hide the unstarted order (`is_archived`, `is_hidden`, `odoo_state='recalled'`, `sync_mode='link_only'`) — **never delete** (invariant #2).
 
-### Odoo addon override (OUTLINED — `mes_integration/models/mrp_production.py`)
-1. **Block unlink** — override `unlink()` on `mrp.production`:
-   - If `mes_sync_status in ('synced', 'error')` (i.e. already sent to MES) → raise `UserError`
-     ("Cannot delete: this MO was sent to MES. Use 'Cancel / Recall from MES' instead.").
-   - Never delete an MO that the MES may still reference.
-2. **"Cancel / Recall from MES" action** — a button/action that `POST`s `{mo_ref}` to
-   `/api/v2/odoo/mo-recall` with the same HMAC signature as `_push_to_mes`:
-   - `200` → set `mes_sync_status = 'recalled'` (new selection value) and proceed with
-     the normal `action_cancel()`.
-   - `409` → surface the MES rejection reason (the `detail` string) to the office user via
-     `UserError` / chatter, and **abort** the cancellation.
-3. Add `'recalled'` to the `mes_sync_status` selection, and guard `action_cancel()` /
-   `button_mark_done()` so a recalled MO cannot be re-pushed to MES.
+### Odoo addon override (IMPLEMENTED 2026-10-29 — addon 18.0.1.4.0, verified by
+`backend/scripts/smoke_test_mo_recall_guardrails.py` against the dev Odoo 8070)
+1. **Block unlink** — override `unlink()` on `mrp.production`: `mes_sync_status in
+   ('synced', 'error')` (i.e. already sent to MES) → raise `UserError`
+   ("Cannot delete: this MO was sent to MES. Use 'Cancel / Recall from MES' instead.").
+2. **"Cancel / Recall from MES" action** — `action_recall_from_mes()` POSTs
+   `{mo_ref}` to `/api/v2/odoo/mo-recall` with the same HMAC+timestamp signature as
+   `_push_to_mes`: `200` → `mes_sync_status='recalled'` + normal `action_cancel()`;
+   `409` → the MES reason is surfaced as a `UserError` and the cancel aborts.
+3. **`'recalled'` added** to the `mes_sync_status` selection; `action_cancel()` is
+   guarded for synced/error MOs and `_push_to_mes` / `_schedule_mes_push` /
+   `button_mark_done` never re-push a recalled MO.

@@ -10,7 +10,7 @@ from tests.db_support import DbTestCase
 class OrderSummaryGrandMeanTests(DbTestCase):
     def _run(self, shift, po, machine):
         run = models.ProductionRun(
-            shift_id=shift.id, seq=1, po_id=po.id, mo_ref=po.po_number,
+            shift_id=shift.id, seq=1, po_id=po.id, mo_ref=po.mo_number,
             machine_id=machine.id, started_at=lc.utcnow(), ended_at=lc.utcnow(),
             status="CLOSED",
         )
@@ -34,11 +34,11 @@ class OrderSummaryGrandMeanTests(DbTestCase):
         for h in (50.0, 60.0, 70.0):
             self.db.add(models.ManualQualityCheck(
                 shift_id=s1.id, mo_id=r1.id, machine_id=r1.machine_id,
-                po_id=po.id, mo_ref=po.po_number, operator_id=self.user.id,
+                po_id=po.id, mo_ref=po.mo_number, operator_id=self.user.id,
                 sample_rods=10, hardness=h))
         self.db.add(models.ManualQualityCheck(
             shift_id=s2.id, mo_id=r2.id, machine_id=r2.machine_id,
-            po_id=po.id, mo_ref=po.po_number, operator_id=self.user.id,
+            po_id=po.id, mo_ref=po.mo_number, operator_id=self.user.id,
             sample_rods=10, hardness=100.0))
         self.db.flush()
 

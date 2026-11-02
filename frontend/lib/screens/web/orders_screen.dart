@@ -27,6 +27,10 @@ class _OrdersScreenState extends State<OrdersScreen> {
   bool _showArchived = false;
   final Set<int> _checkedIds = {};
   bool _batchArchiving = false;
+  Map<int, OrderQualityFlag> _qualityFlags = {};
+
+  OrderQualityFlag? _flagFor(PurchaseOrder p) =>
+      p.id == null ? null : _qualityFlags[p.id];
 
   @override
   void initState() {
@@ -112,6 +116,12 @@ class _OrdersScreenState extends State<OrdersScreen> {
   Future<void> _refresh() async {
     setState(() { _loading = true; _selected = null; _checkedIds.clear(); });
     await AppData.loadDataFromServer(forceSync: true);
+    final flags = await ApiService.fetchOrderQualityFlags();
+    if (mounted && flags != null) {
+      setState(() {
+        _qualityFlags = {for (final f in flags) f.poId: f};
+      });
+    }
     setState(() => _loading = false);
   }
 
@@ -368,6 +378,44 @@ class _OrdersScreenState extends State<OrdersScreen> {
                                 visualDensity: VisualDensity.compact,
                                 materialTapTargetSize: MaterialTapTargetSize.shrinkWrap),
                             ],
+                            // NCR flag: quality issue indicator for this MO.
+                            Builder(builder: (_) {
+                              final flag = _flagFor(po);
+                              if (flag == null || flag.openNcrCount == 0) {
+                                return const SizedBox.shrink();
+                              }
+                              return Padding(
+                                padding: const EdgeInsets.only(left: 4),
+                                child: Tooltip(
+                                  message: '${flag.openNcrCount} open NCR(s)',
+                                  child: Icon(
+                                    Icons.warning_amber,
+                                    size: 16,
+                                    color: flag.criticalOpenNcr
+                                        ? Colors.red.shade700
+                                        : Colors.orange.shade800,
+                                  ),
+                                ),
+                              );
+                            }),
+                            // Quarantine chip: boxes still pending resolution.
+                            Builder(builder: (_) {
+                              final flag = _flagFor(po);
+                              if (flag == null || flag.remainingQuarantineBoxes == 0) {
+                                return const SizedBox.shrink();
+                              }
+                              return Padding(
+                                padding: const EdgeInsets.only(left: 4),
+                                child: Chip(
+                                  label: Text('Q: ${flag.remainingQuarantineBoxes}',
+                                      style: const TextStyle(fontSize: 9, color: Colors.white)),
+                                  backgroundColor: Colors.amber.shade800,
+                                  padding: EdgeInsets.zero,
+                                  visualDensity: VisualDensity.compact,
+                                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                ),
+                              );
+                            }),
                           ])),
                           DataCell(Text('${po.diameter} mm',
                             style: const TextStyle(fontSize: 13))),

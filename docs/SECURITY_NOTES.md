@@ -1,13 +1,47 @@
-# Security Notes — Action Required
+# Security Notes
 
-These notes document known credential-exposure risks in this deployment and the
-steps to remediate them.
+Current security posture of this deployment plus the incident history that led
+to it. See also `AUTHENTICATION.md` for the auth implementation.
 
-## 1. Rotate the exposed secrets (urgent)
+## Current posture (implemented & hardened)
 
-The following were previously present in plaintext files in this directory tree
-(some have already been removed). Because they may have been copied or shared,
-treat them as compromised and rotate them immediately:
+- **Token-based authentication** (`AUTHENTICATION.md`): `POST /api/auth/login`
+  issues HMAC-SHA256-signed bearer tokens; report-submission, admin, AI and Odoo
+  admin endpoints require `Authorization: Bearer <token>`. The legacy spoofable
+  `X-User-Id` mechanism has been removed.
+- **bcrypt-only password verification** (`app/password_utils.py`): plain-text and
+  empty `password_hash` values are never accepted (no plain-text fallback); the
+  legacy passwordless `POST /api/users/create-with-auth` endpoint is removed.
+- **Login throttling**: 5 failures per username within 5 minutes → HTTP 429
+  (in-memory, per process — see roadmap A4 re: multi-worker deployments).
+- **Station push agent keys**: long-lived keys are stored only as SHA-256 hashes
+  (`station_keys`), scoped exclusively to `POST /api/v2/quality/ingest`.
+- **Odoo webhooks** (`mo-event`, `mo-recall`) are HMAC-verified against
+  `ODOO_WEBHOOK_SECRET`; enabling `ODOO_WEBHOOK_REQUIRE_TIMESTAMP` additionally
+  rejects unsigned/old timestamps (recommended once the addon is upgraded).
+- **AI Text-to-SQL agent** runs with a separate SELECT-only database user
+  (`AI_DB_USER`/`AI_DB_PASSWORD`, created by `init_db.ensure_ai_user`).
+- **CORS** is an explicit allowlist (`CORS_ALLOWED_ORIGINS` + localhost + public
+  base URL) with `allow_credentials=False`.
+- **Production hardening** (`ENV=production`): missing/placeholder `SECRET_KEY`
+  or default admin password refuse startup; OpenAPI/docs endpoints disabled;
+  superadmin/authorization checks are role-based.
+
+## Known exposure (legacy read endpoints)
+
+Several read-only endpoints remain unauthenticated for compatibility with old
+tablet APKs: `GET /api/reports`, `GET /api/purchase-orders`, `GET /api/materials`,
+`GET /api/machines`, `GET /api/shifts`, and the v2 shift/quality/dashboard reads.
+The fix ships as an opt-in switch: set `REQUIRE_AUTH_READS=true`
+(`app/require_auth_reads.py` middleware, tracked in `ROADMAP.md`) to require a
+bearer token or station key on every API request — enable it once every field
+APK is retired. Webhooks, station ingest and login keep their own auth.
+
+## Incident history (rotations already applied or still due)
+
+The following were at some point present in plaintext files in this directory
+tree. Treat them as compromised and rotate them immediately if you have not yet
+done so:
 
 - **Telegram bot token** (`TELEGRAM_BOT_TOKEN`) — revoke via @BotFather and issue a new token.
 - **Database password** (`DB_PASSWORD`) — change the PostgreSQL password and update `.env`.
@@ -16,7 +50,7 @@ treat them as compromised and rotate them immediately:
 
 After rotating, update `.env` (never commit `.env`).
 
-## 2. Files that must never be committed
+## Files that must never be committed
 
 The following are runtime secrets and must stay out of version control
 (already covered by `.gitignore`):
@@ -27,37 +61,14 @@ The following are runtime secrets and must stay out of version control
 - `nohup.out`
 - `.venv/`, `__pycache__/`
 
-## 3. Authentication (implemented & hardened)
+## Data-fix scripts
 
-Token-based authentication is in place — see `AUTHENTICATION.md`:
+If any users were stored with plain-text or empty `password_hash` values, run:
 
-- `POST /api/auth/login` issues a signed bearer token.
-- Report-submission, admin, and AI endpoints require `Authorization: Bearer <token>`.
-- The legacy spoofable `X-User-Id` mechanism has been removed.
+```bash
+cd backend
+.venv\Scripts\python.exe -m app.scripts.fix_plaintext_passwords
+```
 
-Additional hardening applied:
-
-- **bcrypt-only password verification** (`app/password_utils.py`): plain-text and
-  empty `password_hash` values are no longer accepted (no plain-text fallback).
-- The legacy **passwordless** `POST /api/users/create-with-auth` endpoint has been
-  removed.
-- Login is throttled (brute-force lockout).
-- The Flutter client no longer falls back to a hardcoded local `superadmin`
-  (empty password) on offline login.
-- Superadmin/authorization checks are role-based, not username-string checks.
-
-Remaining actions:
-
-1. Set a strong `SECRET_KEY` in `.env` (this key signs the tokens and SQLAdmin
-   cookies). In development a random per-process key is used; in production a
-   missing/placeholder key is a startup error.
-2. Run the data-fix script against your database to re-hash/lock any users still
-   stored with plain-text or empty passwords:
-
-   ```bash
-   cd backend
-   .venv\Scripts\python.exe -m app.scripts.fix_plaintext_passwords
-   ```
-
-3. Change any account whose password was previously stored in plaintext
-   (e.g. the legacy `superadmin` seeded with `123`).
+to re-hash (or lock) those accounts. Change any account whose password was
+previously stored in plaintext (e.g. the legacy `superadmin` seeded with `123`).

@@ -1,6 +1,6 @@
 // lib/core/open_new_tab_web.dart
 // Web implementation: window.open(url, '_blank').
-// ignore_for_file: deprecated_member_use
+// ignore_for_file: deprecated_member_use, avoid_web_libraries_in_flutter
 import 'dart:html' as html;
 
 void openInNewTab(String url) {

@@ -33,7 +33,7 @@ def report_to_dict(report) -> dict:
         "shift_name": report.shift_name or "",
         "machine_name": report.machine_name or "",
         "operator_name": report.operator_name or "",
-        "po_number": report.po_number or "",
+        "po_number": report.mo_number or "",
         "lot_number": report.lot_number or "",
         "shift_time_range": report.shift_time_range or "",
         "box_type": report.box_type or 0,
@@ -390,10 +390,10 @@ def render_shift_quality_pdf(data: dict) -> bytes:
 
     # --- Triacetin ---
     story.append(Paragraph("Triacetin", section_style))
-    tr_header = ["#", "Time", "Triacetin %", "Regular wt (g)", "Dry wt (g)", "Rods"]
+    tr_header = ["#", "Time", "Triacetin %", "Regular wt (g)", "Dry wt (g)", "Rods", "Source"]
     tr_rows = [tr_header]
     if not triacetin:
-        tr_rows.append(["", "No triacetin measurements recorded for this shift", "", "", "", ""])
+        tr_rows.append(["", "No triacetin measurements recorded for this shift", "", "", "", "", ""])
     else:
         for idx, t in enumerate(triacetin, start=1):
             tr_rows.append([
@@ -403,8 +403,9 @@ def render_shift_quality_pdf(data: dict) -> bytes:
                 _fmt_num(t.get("regular_weight")),
                 _fmt_num(t.get("dry_weight")),
                 str(t.get("n") or ""),
+                "Manual" if t.get("source") == "manual" else "Auto",
             ])
-    trtbl = Table(tr_rows, repeatRows=1, colWidths=[8 * mm, 20 * mm, 20 * mm, 24 * mm, 24 * mm, 16 * mm])
+    trtbl = Table(tr_rows, repeatRows=1, colWidths=[8 * mm, 16 * mm, 18 * mm, 20 * mm, 20 * mm, 12 * mm, 14 * mm])
     trtbl.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#333333")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -817,7 +818,7 @@ class PDFReportGenerator:
         reports: list of ProductionReport model instances
         """
         try:
-            pdf_path, filename = self._get_audit_pdf_path(po.po_number)
+            pdf_path, filename = self._get_audit_pdf_path(po.mo_number)
 
             doc = SimpleDocTemplate(pdf_path, pagesize=A4,
                                     leftMargin=0.5*inch, rightMargin=0.5*inch,
@@ -831,7 +832,7 @@ class PDFReportGenerator:
             ))
             story.append(Spacer(1, 0.1*inch))
             story.append(Paragraph(
-                f"<b>PO Number:</b> {po.po_number}",
+                f"<b>PO Number:</b> {po.mo_number}",
                 self.styles['CellNormal']
             ))
             story.append(Paragraph(

@@ -206,7 +206,7 @@ def _skip_report(r):
         return True
     if (r.shift_name or "") not in _SHIFT_TEMPLATE:
         return True
-    po = (r.po_number or "").upper()
+    po = (r.mo_number or "").upper()
     return po.startswith("PO-DIAG") or po.startswith("TEST")
 
 
@@ -243,15 +243,15 @@ def derive_shifts_and_runs(session):
         run_seqs[shift.id] += 1
         po = (
             session.query(models.PurchaseOrder)
-            .filter_by(po_number=r.po_number)
+            .filter_by(po_number=r.mo_number)
             .first()
-            if r.po_number else None
+            if r.mo_number else None
         )
         session.add(models.ProductionRun(
             shift_id=shift.id,
             seq=run_seqs[shift.id],
             po_id=po.id if po else None,
-            mo_ref=r.po_number or None,
+            mo_ref=r.mo_number or None,
             started_at=shift.started_at,
             ended_at=shift.ended_at,
             status="CLOSED",

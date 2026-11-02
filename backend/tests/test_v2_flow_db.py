@@ -22,22 +22,22 @@ class OperatorFlowTests(DbTestCase):
         opened = self._open(self.m1, self.po_a)
         shift_id, run1 = opened["id"], opened["run"]
         self.assertEqual((run1["seq"], run1["machine_id"], run1["mo_ref"]),
-                         (1, self.m1.id, self.po_a.po_number))
+                         (1, self.m1.id, self.po_a.mo_number))
 
         # the server binds the check to the open run, whatever mo_id the client sends
         c1 = self._check(shift_id, mo_id=999999, glue_seam_ok=True, notes="ok")
         self.assertEqual((c1["run_id"], c1["mo_ref"], c1["machine_id"]),
-                         (run1["id"], self.po_a.po_number, self.m1.id))
+                         (run1["id"], self.po_a.mo_number, self.m1.id))
 
         sw = v2.switch_mo(shift_id, v2.SwitchMoPayload(po_id=self.po_b.id, end_counter=5000),
                           db=self.db, current_user=self.user)
-        self.assertEqual((sw["seq"], sw["mo_ref"], sw["changed"]), (2, self.po_b.po_number, True))
+        self.assertEqual((sw["seq"], sw["mo_ref"], sw["changed"]), (2, self.po_b.mo_number, True))
         c2 = self._check(shift_id, cut_quality_ok=False)
-        self.assertEqual((c2["mo_ref"], c2["overall_status"]), (self.po_b.po_number, "FAIL"))
+        self.assertEqual((c2["mo_ref"], c2["overall_status"]), (self.po_b.mo_number, "FAIL"))
 
         # the whole shift timeline stays visible, grouped by MO
         allc = v2.list_manual_checks(shift_id=shift_id, db=self.db, current_user=self.user)
-        self.assertEqual({c["mo_ref"] for c in allc}, {self.po_a.po_number, self.po_b.po_number})
+        self.assertEqual({c["mo_ref"] for c in allc}, {self.po_a.mo_number, self.po_b.mo_number})
 
         moved = v2.change_machine(shift_id, v2.ChangeMachinePayload(machine_id=self.m2.id, end_counter=900),
                                   db=self.db, current_user=self.user)
@@ -49,7 +49,7 @@ class OperatorFlowTests(DbTestCase):
                                  idempotency_key=None)
         runs = summary["runs"]
         self.assertEqual([r["mo_ref"] for r in runs],
-                         [self.po_a.po_number, self.po_b.po_number, self.po_b.po_number])
+                         [self.po_a.mo_number, self.po_b.mo_number, self.po_b.mo_number])
         self.assertEqual([r["machine_id"] for r in runs], [self.m1.id, self.m1.id, self.m2.id])
         self.assertEqual([r["manual_checks"]["count"] for r in runs], [1, 1, 1])
         self.assertEqual(runs[1]["manual_checks"]["failed"], 1)

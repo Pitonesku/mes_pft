@@ -10,15 +10,19 @@ WSL / Linux, typically on the production server. Run PowerShell scripts with:
 powershell -ExecutionPolicy Bypass -File scripts\<script>.ps1 [args]
 ```
 
+> **Dev smoke tests** live in `backend/scripts/` (e.g.
+> `smoke_test_quarantine_release.py`). They target the **development** Odoo on
+> `127.0.0.1:8070` (db `test`) — never run them against production (8069).
+
 ---
 
 ## Deployment (production server)
 
 ### `install_server.ps1`
-The **installer**. Copies the project to `C:\MES_System`, creates a fresh Python
+The **installer**. Copies the project to `C:\mes_system`, creates a fresh Python
 virtual environment, installs `backend/requirements.txt`, and registers a
 boot-time Windows Scheduled Task (`MES_Server`) that runs uvicorn as `SYSTEM`
-(hidden, output routed to `C:\MES_System\logs\server.log`). Seeds `.env` from
+(hidden, output routed to `C:\mes_system\logs\server.log`). Seeds `.env` from
 the source (or `.env.example`) only if one does not already exist, and ships the
 Flutter web console (`frontend\build\web`) if it is present.
 
@@ -27,7 +31,7 @@ Flutter web console (`frontend\build\web`) if it is present.
 
 | Parameter | Default | Description |
 | --- | --- | --- |
-| `-TargetDir` | `C:\MES_System` | Production install directory. |
+| `-TargetDir` | `C:\mes_system` | Production install directory. |
 | `-TaskName` | `MES_Server` | Scheduled Task name. |
 | `-Port` | `8000` | HTTP port the server listens on. |
 | `-Python` | `python` | Base interpreter used to create the venv. |
@@ -48,13 +52,39 @@ migrations (on by default) and restarts the service.
 
 | Parameter | Default | Description |
 | --- | --- | --- |
-| `-TargetDir` | `C:\MES_System` | Production install directory. |
+| `-TargetDir` | `C:\mes_system` | Production install directory. |
 | `-TaskName` | `MES_Server` | Scheduled Task name. |
 | `-SkipMigrations` | off | Skip `alembic upgrade head`. |
 
 ```
 powershell -ExecutionPolicy Bypass -File scripts\update_server.ps1
 ```
+
+---
+
+## Odoo addon (production server)
+
+### `deploy_odoo_addon_prod.ps1`
+Deploys the **tested** `mes_integration` addon to the production Odoo: copies it
+from `C:\Odoodev\odoo_my_addons\mes_integration` into the production addons
+folder (Program Files — the only allowed way to touch it), stops the Odoo
+service, runs `odoo-bin -u mes_integration --stop-after-init`, and starts the
+service again. Prints the follow-up steps.
+
+- **Requires:** elevated PowerShell **on the production Odoo server**; adjust
+  `-Conf`, `-Db`, `-ServiceName`, `-OdooHome` to the installation.
+- **Never** run this from the development machine against a remote production
+  install without adjusting paths explicitly.
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\deploy_odoo_addon_prod.ps1
+```
+
+After deploying the addon, on the production MES:
+1. Set `ODOO_WEBHOOK_REQUIRE_TIMESTAMP=true` in `C:\mes_system\.env`
+   (the addon signs webhooks with timestamps) and restart `MES_Server`.
+2. Later, once every old tablet APK is retired, set `REQUIRE_AUTH_READS=true`
+   and restart `MES_Server`.
 
 ---
 

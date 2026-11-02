@@ -57,7 +57,7 @@ def build_shift_windows(session):
     )).fetchall()
     runs = defaultdict(list)
     for r in session.execute(text(
-        "SELECT r.id, r.shift_id, COALESCE(p.po_number, r.mo_ref) "
+        "SELECT r.id, r.shift_id, COALESCE(p.mo_number, r.mo_ref) "
         "FROM production_runs r LEFT JOIN purchase_orders p ON p.id = r.po_id "
         "ORDER BY r.shift_id, r.seq"
     )):

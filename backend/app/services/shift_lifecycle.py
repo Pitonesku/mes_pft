@@ -50,7 +50,7 @@ def resolve_po(db: Session, po_id: Optional[int], mo_ref: Optional[str]) -> Opti
     if po_id is not None:
         return db.get(models.PurchaseOrder, po_id)
     if mo_ref:
-        return db.query(models.PurchaseOrder).filter(models.PurchaseOrder.po_number == mo_ref).first()
+        return db.query(models.PurchaseOrder).filter(models.PurchaseOrder.mo_number == mo_ref).first()
     return None
 
 
@@ -177,7 +177,7 @@ def open_run(
         seq=next_seq(db, shift.id),
         machine_id=machine_id,
         po_id=po.id if po is not None else None,
-        mo_ref=po.po_number if po is not None else mo_ref,
+        mo_ref=po.mo_number if po is not None else mo_ref,
         started_at=started_at,
         status=RUN_OPEN,
         spec_snapshot=build_spec_snapshot(db, po),
@@ -325,7 +325,7 @@ def link_report_to_run(db: Session, report: models.ProductionReport) -> Optional
     found from the parent report, or from the shift's runs by MO number + machine.
     Sets ``report.run_id`` / ``report.shift_id`` and ``run.report_id`` (the link the
     Odoo dispatcher uses first). Returns the run, or None when nothing matches."""
-    po_number = (report.po_number or "").strip()
+    po_number = (report.mo_number or "").strip()
     run: Optional[models.ProductionRun] = None
 
     if report.run_id is not None:

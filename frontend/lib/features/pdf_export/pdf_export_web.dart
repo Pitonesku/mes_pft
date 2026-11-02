@@ -5,7 +5,7 @@
 // for the native browser print dialog.
 // This file is ONLY compiled on Web — never on Android.
 
-// ignore: avoid_web_libraries_in_flutter
+// ignore_for_file: avoid_web_libraries_in_flutter, deprecated_member_use
 import 'dart:html' as html;
 import 'dart:typed_data';
 

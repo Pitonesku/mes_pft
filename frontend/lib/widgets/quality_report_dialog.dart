@@ -330,7 +330,7 @@ class _QualityReportDialogState extends State<QualityReportDialog> {
 
     final triacetinTableRows = <TableRow>[
       TableRow(children: [
-        for (final c in ['#', 'Time', 'Triacetin %', 'Regular wt (g)', 'Dry wt (g)', 'Rods'])
+        for (final c in ['#', 'Time', 'Triacetin %', 'Regular wt (g)', 'Dry wt (g)', 'Rods', 'Source'])
           _th(c)
       ]),
     ];
@@ -340,6 +340,7 @@ class _QualityReportDialogState extends State<QualityReportDialog> {
       triacetinTableRows.add(TableRow(children: [
         _td('$k'), _td(_fmtTime(t['time'])), _td(_f(t['triacetin_pct'])),
         _td(_f(t['regular_weight'])), _td(_f(t['dry_weight'])), _td(_s(t['n'], '')),
+        _td(t['source'] == 'manual' ? 'Manual' : 'Auto'),
       ]));
     }
 

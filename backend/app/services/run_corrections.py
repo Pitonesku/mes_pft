@@ -22,13 +22,13 @@ def recompute_po_produced(db: Session, po_number: Optional[str]) -> None:
     """Recompute ``purchase_orders.produced_qty`` exactly like report submission does."""
     if not po_number:
         return
-    po = db.query(models.PurchaseOrder).filter(models.PurchaseOrder.po_number == po_number).first()
+    po = db.query(models.PurchaseOrder).filter(models.PurchaseOrder.mo_number == po_number).first()
     if po is None:
         return
     total = (
         db.query(func.sum(models.ProductionReport.produced_rods))
         .filter(
-            models.ProductionReport.po_number == po_number,
+            models.ProductionReport.mo_number == po_number,
             (models.ProductionReport.is_deleted.is_(False)) | (models.ProductionReport.is_deleted.is_(None)),
         )
         .scalar()
@@ -44,9 +44,9 @@ def _cascade_reports(
     for rep in reports:
         before: Dict[str, Any] = {}
         after: Dict[str, Any] = {}
-        if changed_po and rep.po_number != run.mo_ref:
-            before["po_number"], after["po_number"] = rep.po_number, run.mo_ref
-            rep.po_number = run.mo_ref
+        if changed_po and rep.mo_number != run.mo_ref:
+            before["po_number"], after["po_number"] = rep.mo_number, run.mo_ref
+            rep.mo_number = run.mo_ref
         if changed_machine and machine is not None and rep.machine_name != machine.name:
             before["machine_name"], after["machine_name"] = rep.machine_name, machine.name
             rep.machine_name = machine.name
@@ -100,7 +100,7 @@ def reassign_run(
     old_po_number = run.mo_ref
     if changed_po:
         run.po_id = po.id
-        run.mo_ref = po.po_number
+        run.mo_ref = po.mo_number
         run.spec_snapshot = build_spec_snapshot(db, po)
     if changed_machine:
         run.machine_id = machine.id

@@ -4,6 +4,8 @@ import '../../models.dart';
 import '../../api_service.dart';
 import '../../core/app_navigation.dart';
 import '../../core/hash_navigation.dart';
+import '../../core/app_version_info.dart';
+import '../../core/reload_app.dart';
 import '../../widgets/dev_banner.dart';
 import 'dashboard_screen.dart';
 import 'orders_screen.dart';
@@ -16,6 +18,8 @@ import 'machines_shifts_screen.dart';
 import 'settings_screen.dart';
 import 'profile_screen.dart';
 import 'ai_analysis_screen.dart';
+import 'quality/quality_management_screen.dart';
+import 'runs_screen.dart';
 import '../auth_screen.dart';
 
 enum _Section {
@@ -24,6 +28,8 @@ enum _Section {
   reports,
   materials,
   quality,
+  qualityManagement,
+  runs,
   users,
   machinesShifts,
   settings,
@@ -48,6 +54,9 @@ class _WebShellState extends State<WebShell> {
   @override
   void initState() {
     super.initState();
+    AppVersionInfo.load().then((_) {
+      if (mounted) setState(() {});
+    });
     AppNavigation.qualityRequest.addListener(_onQualityRequest);
     AppNavigation.reportRequest.addListener(_onReportRequest);
     AppNavigation.orderRequest.addListener(_onOrderRequest);
@@ -145,6 +154,8 @@ class _WebShellState extends State<WebShell> {
         _Section.reports => '#/reports',
         _Section.materials => '#/materials',
         _Section.quality => '#/quality',
+        _Section.qualityManagement => '#/quality-management',
+        _Section.runs => '#/runs',
         _Section.users => '#/users',
         _Section.machinesShifts => '#/machines',
         _Section.settings => '#/settings',
@@ -158,6 +169,8 @@ class _WebShellState extends State<WebShell> {
         '/reports' => _Section.reports,
         '/materials' => _Section.materials,
         '/quality' => _Section.quality,
+        '/quality-management' => _Section.qualityManagement,
+        '/runs' => _Section.runs,
         '/users' => _Section.users,
         '/machines' => _Section.machinesShifts,
         '/settings' => _Section.settings,
@@ -190,6 +203,8 @@ class _WebShellState extends State<WebShell> {
     (_Section.reports,        Icons.bar_chart_outlined,         Icons.bar_chart,              'Reports'),
     (_Section.materials,      Icons.inventory_2_outlined,       Icons.inventory_2,            'Materials'),
     (_Section.quality,        Icons.biotech_outlined,           Icons.biotech,                'Quality Control'),
+    (_Section.qualityManagement, Icons.fact_check_outlined,     Icons.fact_check,             'Quality Management'),
+    (_Section.runs,           Icons.timeline_outlined,          Icons.timeline,               'Runs & Audit'),
     if (_isSuperAdmin) ...[
       (_Section.users,        Icons.people_outline,             Icons.people,                 'Users'),
       (_Section.machinesShifts, Icons.precision_manufacturing_outlined, Icons.precision_manufacturing, 'Machines & Shifts'),
@@ -205,7 +220,9 @@ class _WebShellState extends State<WebShell> {
     _Section.orders         => OrdersScreen(key: ValueKey('orders-$_orderFilter'), user: widget.currentUser, initialFilter: _orderFilter),
     _Section.reports        => ReportsScreen(user: widget.currentUser),
     _Section.materials      => MaterialsScreen(user: widget.currentUser),
-    _Section.quality       => QualityControlScreen(initial: _qualityRequest),
+    _Section.quality       => QualityControlScreen(initial: _qualityRequest, user: widget.currentUser),
+    _Section.qualityManagement => QualityManagementScreen(user: widget.currentUser),
+    _Section.runs           => RunsScreen(user: widget.currentUser),
     _Section.users          => UsersScreen(currentUser: widget.currentUser),
     _Section.machinesShifts => MachinesShiftsScreen(user: widget.currentUser),
     _Section.settings      => const SettingsScreen(),
@@ -224,6 +241,14 @@ class _WebShellState extends State<WebShell> {
               if (wide) ...[
                 const SizedBox(height: 4),
                 const Text('ProdLog', style: TextStyle(color: Colors.deepPurpleAccent, fontWeight: FontWeight.bold, fontSize: 14)),
+                if (AppVersionInfo.webVersion.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text('Web ${AppVersionInfo.webVersionLabel}',
+                      style: const TextStyle(color: Colors.white38, fontSize: 10)),
+                  if (AppVersionInfo.backendVersion.isNotEmpty)
+                    Text('API ${AppVersionInfo.backendVersion}',
+                        style: const TextStyle(color: Colors.white38, fontSize: 10)),
+                ],
               ],
             ]),
           ),
@@ -303,6 +328,22 @@ class _WebShellState extends State<WebShell> {
               ),
               const Divider(height: 1, thickness: 1),
               const DevBannerBar(),
+              if (AppVersionInfo.updateAvailable)
+                Container(
+                  width: double.infinity,
+                  color: Colors.orange.shade100,
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+                  child: Row(children: [
+                    const Icon(Icons.system_update_alt, color: Colors.orange, size: 18),
+                    const SizedBox(width: 8),
+                    Expanded(child: Text('New version available on the server - reload to update.',
+                        style: TextStyle(color: Colors.orange.shade900, fontSize: 13))),
+                    FilledButton(
+                      onPressed: reloadApp,
+                      child: const Text('Reload'),
+                    ),
+                  ]),
+                ),
               Expanded(child: _reportId == null
                   ? _buildBody()
                   : ReportFullScreen(

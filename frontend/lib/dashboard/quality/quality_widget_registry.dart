@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'quality_chart_widget.dart';
 import 'quality_data.dart';
 import 'quality_kpi_widget.dart';
+import 'triacetin_kpi_widget.dart';
 
 class QualityWidgetMeta {
   final String type;
@@ -46,5 +47,14 @@ final Map<String, QualityWidgetMeta> qualityWidgetRegistry = {
     defaultH: 4,
     configurable: true,
     builder: (ctx, cfg, data) => QualityChartWidget(config: cfg, data: data),
+  ),
+  'triacetin': QualityWidgetMeta(
+    type: 'triacetin',
+    title: 'Triacetin',
+    icon: Icons.water_drop,
+    defaultW: 6,
+    defaultH: 2,
+    configurable: false,
+    builder: (ctx, cfg, data) => TriacetinKpiWidget(config: cfg, data: data),
   ),
 };

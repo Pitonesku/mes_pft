@@ -49,7 +49,7 @@ def _summary_reports(session: Session, po: models.PurchaseOrder) -> list:
     return (
         session.query(models.ProductionReport)
         .filter(
-            models.ProductionReport.po_number == po.po_number,
+            models.ProductionReport.mo_number == po.mo_number,
             models.ProductionReport.status != "obsolete",
             (models.ProductionReport.is_deleted.is_(False))
             | (models.ProductionReport.is_deleted.is_(None)),
@@ -114,7 +114,7 @@ def push_order_summary(
         client = OdooClient(cfg)
         client.connect()
         filename = po.order_summary_pdf_filename or (
-            f"Order_Summary_{_safe_name(po.po_number)}.pdf")
+            f"Order_Summary_{_safe_name(po.mo_number)}.pdf")
         root_id = int(po.odoo_mo_id)
         backorder_id = int(po.odoo_current_mo_id) if po.odoo_current_mo_id else None
         # attach_file REPLACES by name+record, so re-pushing never stacks
@@ -168,6 +168,11 @@ def finalize_order(
     po.final_waste_kg = production["total_waste_kg"]
     po.final_materials = production["materials"]
     po.final_quality = final_quality
+    # Quarantine snapshot at close: frozen. Post-close resolutions never mutate it.
+    quarantine = production.get("quarantine") or {}
+    po.final_quarantine_boxes = quarantine.get("total_quarantine_boxes")
+    po.final_scrap_boxes = quarantine.get("scrap_boxes")
+    po.final_scrap_kg = quarantine.get("scrap_kg")
     po.completion_status = COMPLETED
     po.completed_at = datetime.now(timezone.utc)
     po.completed_by = actor
@@ -177,7 +182,7 @@ def finalize_order(
 
     result: Dict[str, Any] = {
         "po_id": po.id,
-        "po_number": po.po_number,
+        "po_number": po.mo_number,
         "completion_status": po.completion_status,
         "production": production,
         "quality": final_quality,

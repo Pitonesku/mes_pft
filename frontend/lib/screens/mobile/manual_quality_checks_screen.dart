@@ -40,6 +40,9 @@ class _ManualQualityChecksScreenState extends State<ManualQualityChecksScreen> {
 
   List<dynamic> _checks = [];
 
+  // Auto (station-paired) triacetin summary for the shift's open run.
+  Map<String, dynamic>? _triAuto;
+
   @override
   void initState() {
     super.initState();
@@ -79,6 +82,13 @@ class _ManualQualityChecksScreenState extends State<ManualQualityChecksScreen> {
     final checks = await ApiService.fetchManualChecks(shiftId: ctx.shiftId);
     final queued = (await ApiService.pendingManualChecks()).length;
     final machineId = open?['machine_id'];
+    Map<String, dynamic>? triAuto;
+    final machineName = ctx.machineName;
+    if (machineName != null && machineName.isNotEmpty) {
+      final live = await ApiService.fetchLiveQuality(machineName,
+          windowType: 'rods', windowValue: 50);
+      triAuto = live?['triacetin'] as Map<String, dynamic>?;
+    }
     Map<String, Map<String, bool>> cfg = {};
     if (machineId != null) {
       final c = await ApiService.fetchMachineManualTestConfig((machineId as num).toInt());
@@ -97,6 +107,7 @@ class _ManualQualityChecksScreenState extends State<ManualQualityChecksScreen> {
       _checks = checks ?? [];
       _queued = queued;
       _cfg = cfg;
+      _triAuto = triAuto;
       _loading = false;
     });
   }
@@ -145,6 +156,34 @@ class _ManualQualityChecksScreenState extends State<ManualQualityChecksScreen> {
     final dry = double.tryParse(_triDryCtrl.text.trim().replaceAll(',', '.'));
     if (wet == null || dry == null || dry <= 0) return null;
     return (wet - dry) / dry * 100.0;
+  }
+
+  /// Auto (station) triacetin summary line for the open run.
+  String _triAutoText() {
+    final t = _triAuto;
+    if (t == null) return '';
+    final overall = t['overall'];
+    final last = t['last'];
+    final at = t['last_at']?.toString();
+    final status = t['status']?.toString() ?? '';
+    final parts = <String>[];
+    if (overall != null) parts.add('Overall: ${_fmtPct(overall)} %');
+    if (last != null) parts.add('Last: ${_fmtPct(last)} %');
+    if (at != null && at.isNotEmpty) parts.add(_fmtClock(at));
+    if (status.isNotEmpty) parts.add(status);
+    return parts.join('  \u00b7  ');
+  }
+
+  String _fmtPct(dynamic v) => v is num
+      ? v.toStringAsFixed(2)
+      : (double.tryParse('$v') ?? 0).toStringAsFixed(2);
+
+  String _fmtClock(String iso) {
+    final t = DateTime.tryParse(iso);
+    if (t == null) return '';
+    final l = t.toLocal();
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(l.hour)}:${two(l.minute)}';
   }
 
   String? _firstMissingRequired(double? weight, double? length, double? hardness,
@@ -387,6 +426,17 @@ class _ManualQualityChecksScreenState extends State<ManualQualityChecksScreen> {
         if (_visible('visual_cleanness'))
           _triState('Visual Cleanness', _visual, (v) => setState(() => _visual = v)),
         if (_visible('triacetin')) ...[
+          if (_triAutoText().isNotEmpty) ...[
+            const SizedBox(height: 16),
+            const Text('Triacetin (auto)',
+                style: TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 4),
+            Text(_triAutoText(),
+                style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    color: Colors.deepPurple)),
+          ],
           const SizedBox(height: 16),
           const Text('Triacetin (manual fallback)',
               style: TextStyle(fontWeight: FontWeight.bold)),

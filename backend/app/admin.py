@@ -136,7 +136,7 @@ class RoleAdmin(ModelView, model=models.Role):
         models.Role.id, models.Role.role_name, models.Role.can_create_po,
         models.Role.can_edit_po, models.Role.can_edit_report,
         models.Role.can_manage_users, models.Role.can_setup_machines,
-        models.Role.can_view_all_reports,
+        models.Role.can_view_all_reports, models.Role.can_manage_quality,
     ]
     column_filters = [
         AllUniqueStringValuesFilter(models.Role.role_name, title="Role Name"),
@@ -205,18 +205,18 @@ class ShiftAdmin(ModelView, model=models.Shift):
 
 class PurchaseOrderAdmin(ModelView, model=models.PurchaseOrder):
     column_list = [
-        models.PurchaseOrder.id, models.PurchaseOrder.po_number,
+        models.PurchaseOrder.id, models.PurchaseOrder.mo_number,
         models.PurchaseOrder.target_qty, models.PurchaseOrder.produced_qty,
         models.PurchaseOrder.diameter, models.PurchaseOrder.length,
         models.PurchaseOrder.is_hidden, models.PurchaseOrder.created_at,
     ]
     column_filters = [
-        AllUniqueStringValuesFilter(models.PurchaseOrder.po_number, title="PO Number"),
+        AllUniqueStringValuesFilter(models.PurchaseOrder.mo_number, title="PO Number"),
         BooleanFilter(models.PurchaseOrder.is_hidden, title="Hidden"),
     ] if HAS_FILTERS else []
-    column_searchable_list = [models.PurchaseOrder.po_number]
+    column_searchable_list = [models.PurchaseOrder.mo_number]
     column_sortable_list = [
-        models.PurchaseOrder.po_number,
+        models.PurchaseOrder.mo_number,
         models.PurchaseOrder.created_at,
         models.PurchaseOrder.produced_qty,
     ]
@@ -228,7 +228,7 @@ class ProductionReportAdmin(ModelView, model=models.ProductionReport):
     column_list = [
         models.ProductionReport.id, models.ProductionReport.report_date,
         models.ProductionReport.shift_name, models.ProductionReport.machine_name,
-        models.ProductionReport.operator_name, models.ProductionReport.po_number,
+        models.ProductionReport.operator_name, models.ProductionReport.mo_number,
         models.ProductionReport.produced_rods, models.ProductionReport.boxes_produced,
         models.ProductionReport.waste_kg, models.ProductionReport.status,
     ]
@@ -242,7 +242,7 @@ class ProductionReportAdmin(ModelView, model=models.ProductionReport):
             values=[("original", "Original"), ("edited", "Edited"), ("obsolete", "Obsolete")],
         ),
     ] if HAS_FILTERS else []
-    column_searchable_list = [models.ProductionReport.po_number, models.ProductionReport.operator_name]
+    column_searchable_list = [models.ProductionReport.mo_number, models.ProductionReport.operator_name]
     column_sortable_list = [models.ProductionReport.report_date, models.ProductionReport.produced_rods]
     column_default_sort = [(models.ProductionReport.report_date, True)]
     name = "Production Report"
@@ -349,6 +349,59 @@ class AIAnalysisLogAdmin(ModelView, model=models.AIAnalysisLog):
     can_edit = False
 
 
+class NonConformityReportAdmin(ModelView, model=models.NonConformityReport):
+    column_list = [
+        models.NonConformityReport.id, models.NonConformityReport.ncr_number,
+        models.NonConformityReport.po_id, models.NonConformityReport.mo_ref,
+        models.NonConformityReport.machine_id, models.NonConformityReport.severity,
+        models.NonConformityReport.status, models.NonConformityReport.created_by,
+        models.NonConformityReport.created_at, models.NonConformityReport.closed_at,
+    ]
+    column_searchable_list = [models.NonConformityReport.ncr_number, models.NonConformityReport.mo_ref]
+    column_sortable_list = [models.NonConformityReport.created_at]
+    column_default_sort = [(models.NonConformityReport.created_at, True)]
+    name = "NCR"
+    name_plural = "Non-Conformity Reports"
+    icon = "fa-solid fa-triangle-exclamation"
+    can_delete = False
+
+
+class NcrStatusLogAdmin(ModelView, model=models.NcrStatusLog):
+    column_list = [
+        models.NcrStatusLog.id, models.NcrStatusLog.ncr_id,
+        models.NcrStatusLog.from_status, models.NcrStatusLog.to_status,
+        models.NcrStatusLog.username, models.NcrStatusLog.created_at,
+    ]
+    column_sortable_list = [models.NcrStatusLog.created_at]
+    column_default_sort = [(models.NcrStatusLog.created_at, True)]
+    name = "NCR Status Log"
+    name_plural = "NCR Status Logs"
+    icon = "fa-solid fa-clock-rotate-left"
+    can_delete = False
+    can_create = False
+    can_edit = False
+
+
+class QuarantineResolutionAdmin(ModelView, model=models.QuarantineResolution):
+    column_list = [
+        models.QuarantineResolution.id, models.QuarantineResolution.doc_number,
+        models.QuarantineResolution.po_id, models.QuarantineResolution.mo_ref,
+        models.QuarantineResolution.kind, models.QuarantineResolution.boxes,
+        models.QuarantineResolution.dry_weight_kg,
+        models.QuarantineResolution.odoo_sync_status,
+        models.QuarantineResolution.odoo_model, models.QuarantineResolution.odoo_id,
+        models.QuarantineResolution.created_by, models.QuarantineResolution.created_at,
+        models.QuarantineResolution.voided_at,
+    ]
+    column_searchable_list = [models.QuarantineResolution.doc_number, models.QuarantineResolution.mo_ref]
+    column_sortable_list = [models.QuarantineResolution.created_at]
+    column_default_sort = [(models.QuarantineResolution.created_at, True)]
+    name = "Quarantine Resolution"
+    name_plural = "Quarantine Resolutions"
+    icon = "fa-solid fa-box-archive"
+    can_delete = False
+
+
 def setup_admin(app):
     """Initialize SQLAdmin and mount it onto the FastAPI app."""
     auth = AdminAuthentication(secret_key=security_config.get_secret_key())
@@ -369,4 +422,7 @@ def setup_admin(app):
     admin.add_view(ReportEditLogAdmin)
     admin.add_view(ReportAuditLogAdmin)
     admin.add_view(AIAnalysisLogAdmin)
+    admin.add_view(NonConformityReportAdmin)
+    admin.add_view(NcrStatusLogAdmin)
+    admin.add_view(QuarantineResolutionAdmin)
     return admin

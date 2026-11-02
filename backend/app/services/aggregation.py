@@ -22,9 +22,13 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.quality_stats import (
+    STATUS_FAIL,
+    STATUS_NO_DATA,
     STATUS_NOT_MEASURED,
     STATUS_PASS,
+    STATUS_WARN,
     ParamSpec,
+    _num,
     certificate_rows,
     compute_run_stats,
     manual_rods,
@@ -568,12 +572,12 @@ def compute_order_production_summary(session: Session, po_id: int) -> Dict[str, 
     counter logic.
     """
     po = session.get(models.PurchaseOrder, po_id)
-    po_number = po.po_number if po else None
+    po_number = po.mo_number if po else None
 
     reports = (
         session.query(models.ProductionReport)
         .filter(
-            models.ProductionReport.po_number == po_number,
+            models.ProductionReport.mo_number == po_number,
             models.ProductionReport.status != "obsolete",
             (models.ProductionReport.is_deleted.is_(False))
             | (models.ProductionReport.is_deleted.is_(None)),
@@ -587,6 +591,13 @@ def compute_order_production_summary(session: Session, po_id: int) -> Dict[str, 
     def _sum_float(field):
         return round(sum(float(getattr(r, field) or 0.0) for r in reports), 3)
 
+    # Quarantine ledger (read-only view): resolutions never mutate the frozen
+    # final_* snapshots; they are reported alongside so the UI can show both.
+    from app.services import quarantine as quarantine_service
+    quarantine = {}
+    if po is not None:
+        quarantine = quarantine_service.quarantine_balance(session, po)
+
     return {
         "po_id": po_id,
         "po_number": po_number,
@@ -594,6 +605,7 @@ def compute_order_production_summary(session: Session, po_id: int) -> Dict[str, 
         "total_boxes": _sum_int("boxes_produced"),
         "total_rods": _sum_int("produced_rods"),
         "total_waste_kg": _sum_float("waste_kg"),
+        "quarantine": quarantine,
         "materials": {
             "acetate": _sum_float("total_acetate"),
             "paper": _sum_float("total_paper"),
@@ -619,3 +631,156 @@ def _f(value) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Shift summary building + stale recompute (A7)
+# ---------------------------------------------------------------------------
+
+def manual_check_dict(c: models.ManualQualityCheck) -> Dict[str, Any]:
+    """HTTP-ready dict for one manual QC check (was v2_routes._manual_check_dict)."""
+    return {
+        "id": c.id,
+        "shift_id": c.shift_id,
+        "mo_id": c.mo_id,
+        "run_id": c.mo_id,
+        "machine_id": c.machine_id,
+        "po_id": c.po_id,
+        "mo_ref": c.mo_ref,
+        "operator_id": c.operator_id,
+        "created_at": c.created_at.isoformat() if c.created_at else None,
+        "measured_at": c.measured_at.isoformat() if c.measured_at else None,
+        "sample_weight": _num(c.sample_weight),
+        "sample_rods": c.sample_rods,
+        "length_mm": _num(c.length_mm),
+        "hardness": _num(c.hardness),
+        "triacetin_wet_mg": _num(c.triacetin_wet_mg),
+        "triacetin_dry_mg": _num(c.triacetin_dry_mg),
+        "triacetin_rods": c.triacetin_rods,
+        "triacetin_pct": _num(c.triacetin_pct),
+        "glue_seam_ok": c.glue_seam_ok,
+        "cut_quality_ok": c.cut_quality_ok,
+        "visual_appearance_ok": c.visual_appearance_ok,
+        "notes": c.notes,
+        "verdicts": c.verdicts or {},
+        "overall_status": c.overall_status,
+        "voided": c.voided_at is not None,
+        "voided_at": c.voided_at.isoformat() if c.voided_at else None,
+        "void_reason": c.void_reason,
+    }
+
+
+def overall_verdict(statuses: List[Optional[str]]) -> str:
+    """Overall shift verdict from a list of run statuses."""
+    if STATUS_FAIL in statuses:
+        return STATUS_FAIL
+    if STATUS_WARN in statuses:
+        return STATUS_WARN
+    if STATUS_PASS in statuses:
+        return STATUS_PASS
+    return STATUS_NO_DATA
+
+
+def manual_checks_summary(db: Session, run_id: int) -> Dict[str, Any]:
+    """Per-run roll-up of non-voided manual checks for the shift summary / certificate."""
+    checks = (
+        db.query(models.ManualQualityCheck)
+        .filter(models.ManualQualityCheck.mo_id == run_id, models.ManualQualityCheck.voided_at.is_(None))
+        .order_by(models.ManualQualityCheck.id)
+        .all()
+    )
+    failed = [c for c in checks if c.overall_status == "FAIL"]
+    weights = [_num(c.sample_weight) / (c.sample_rods or 10) for c in checks if c.sample_weight is not None]
+    lengths = [_num(c.length_mm) for c in checks if c.length_mm is not None]
+    hardnesses = [_num(c.hardness) for c in checks if c.hardness is not None]
+    return {
+        "count": len(checks),
+        "failed": len(failed),
+        "status": "FAIL" if failed else ("PASS" if any(c.overall_status for c in checks) else None),
+        "mean_weight_per_rod_g": round(sum(weights) / len(weights), 5) if weights else None,
+        "mean_length_mm": round(sum(lengths) / len(lengths), 3) if lengths else None,
+        "mean_hardness": round(sum(hardnesses) / len(hardnesses), 3) if hardnesses else None,
+        "items": [manual_check_dict(c) for c in checks],
+    }
+
+
+def build_shift_summary(
+    db: Session,
+    shift: models.ShiftSession,
+    manual_quality: Optional[Dict[str, Dict[str, Optional[float]]]] = None,
+    idempotency_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build the versioned shift-summary payload (was v2_routes._build_shift_summary).
+
+    Lives here (HTTP-free) so the shift-close endpoint, the certificate renderer
+    and the A7 recompute worker share one implementation.
+    """
+    runs = (
+        db.query(models.ProductionRun)
+        .filter(models.ProductionRun.shift_id == shift.id)
+        .order_by(models.ProductionRun.seq)
+        .all()
+    )
+    run_summaries = []
+    for run in runs:
+        s = compute_run_summary(db, run, manual=manual_quality)
+        s["seq"] = run.seq
+        manual_rows = s["manual_checks"]  # individual rows (from compute_run_summary)
+        s["manual_checks"] = manual_checks_summary(db, run.id)
+        s["manual_check_rows"] = manual_rows
+        run_summaries.append(s)
+    verdict = overall_verdict([r["status"] for r in run_summaries])
+    machine = db.get(models.Machine, shift.machine_id) if shift.machine_id else None
+    return {
+        "schema_version": "1.2",
+        "idempotency_key": idempotency_key or f"mes:shift:{shift.id}:v1",
+        "shift": {
+            "machine_id": shift.machine_id,
+            "machine_name": machine.name if machine else None,
+            "shift_name": shift.shift_name,
+            "started_at": shift.started_at.isoformat() if shift.started_at else None,
+            "ended_at": shift.ended_at.isoformat() if shift.ended_at else None,
+            "operator_id": shift.operator_id,
+            "plant_tz": shift.plant_tz,
+            "verdict": verdict,
+        },
+        "runs": run_summaries,
+    }
+
+
+def recompute_stale_summaries(db: Session) -> List[Dict[str, Any]]:
+    """Rebuild every shift summary flagged stale (A7) and clear the flags.
+
+    Writes a NEW version per stale shift (never overwrites history) and returns
+    the freshly created rows as ``{"shift_id", "version", "payload"}`` dicts so
+    the caller can re-enqueue their Odoo sync. The caller commits.
+    """
+    stale = (
+        db.query(models.ShiftSummary)
+        .filter(models.ShiftSummary.is_stale.is_(True))
+        .order_by(models.ShiftSummary.id)
+        .all()
+    )
+    done: List[Dict[str, Any]] = []
+    for old in stale:
+        shift = db.get(models.ShiftSession, old.shift_id)
+        if shift is None or shift.status == "DISCARDED":
+            old.is_stale = False  # nothing to recompute
+            continue
+        prev = (
+            db.query(func.max(models.ShiftSummary.version))
+            .filter(models.ShiftSummary.shift_id == shift.id)
+            .scalar()
+        ) or 0
+        version = prev + 1
+        payload = build_shift_summary(
+            db, shift, manual_quality=None,
+            idempotency_key=f"mes:shift:{shift.id}:v{version}",
+        )
+        db.add(models.ShiftSummary(
+            shift_id=shift.id, version=version, payload=payload,
+            input_fingerprint=fingerprint(payload), is_stale=False,
+        ))
+        old.is_stale = False
+        done.append({"shift_id": shift.id, "version": version, "payload": payload})
+    return done

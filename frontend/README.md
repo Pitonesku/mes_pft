@@ -1,17 +1,36 @@
-# production_app
+# frontend — mes_pft Flutter app
 
-A new Flutter project.
+Operator tablet app + web console for the cigarette-filter MES. Single Flutter
+codebase; the web build is served by the FastAPI backend at `/`.
 
-## Getting Started
+## Structure
 
-This project is a starting point for a Flutter application.
+- `lib/main.dart`, `lib/models.dart`, `lib/api_service.dart` — app entry, shared
+  models, HTTP client (bearer-token auth).
+- `lib/core/` — hash navigation, app navigation, open_new_tab (web/stub
+  conditional exports; see `.clinerules` invariant 6).
+- `lib/dashboard/` — 24-column dashboard grid engine for the web console.
+- `lib/screens/mobile/` — tablet (operator/admin) screens.
+- `lib/screens/web/` — web console screens.
+- `lib/features/pdf_export/` — platform-conditional PDF export.
+- `lib/widgets/`, `lib/theme/`, `lib/utils/` — shared UI, theming, logging.
 
-A few resources to get you started if this is your first Flutter project:
+## Build
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+```bash
+cd frontend
+flutter pub get
+flutter build web --release      # web console (served by the backend)
+flutter build apk --release      # tablet APK (prod_log_v<version>_b<build>.apk)
+```
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## Run / analyze
+
+```bash
+flutter analyze
+flutter test
+```
+
+The app talks to the MES backend: development server on `http://127.0.0.1:8001`
+(production: 8000). See the root `README.md`, `docs/api.md` and
+`docs/AUTHENTICATION.md`.

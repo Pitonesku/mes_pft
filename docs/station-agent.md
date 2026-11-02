@@ -9,6 +9,9 @@ Measurements reach MES through two mechanisms:
   `POST /api/v2/quality/ingest`. Files are kept locally until the server ACKs, so
   a network outage never loses a measurement.
 
+> **Environment note:** on the development machine the MES server runs on
+> port **8001** (`http://127.0.0.1:8001`); production is on port 8000.
+
 The push agent authenticates with a **long-lived station API key** — no admin
 credentials are ever stored on a station PC.
 

@@ -9,6 +9,7 @@ class UserManagementScreen extends StatefulWidget {
 }
 
 class _UserManagementScreenState extends State<UserManagementScreen> {
+  bool _saving = false;
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -51,7 +52,6 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
       context: context, 
       barrierDismissible: false, // Чтобы не закрыли случайно во время отправки
       builder: (ctx) => StatefulBuilder(builder: (ctx, setStateD) {
-        bool _saving = false;
         return AlertDialog(
         title: Text(user == null ? "Add User" : "Edit User"),
         content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -78,7 +78,8 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("CANCEL")),
           ElevatedButton(
-            onPressed: _saving ? null : () async {
+            onPressed: () async {
+              if (_saving) return;
               if (nameC.text.isEmpty) return;
               setStateD(() => _saving = true);
               try {

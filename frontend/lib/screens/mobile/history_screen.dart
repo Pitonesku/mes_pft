@@ -12,6 +12,7 @@ import '../../models.dart';
 import '../../widgets/dev_banner.dart';
 import 'operator_screen.dart';
 import '../../sync_manager.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class HistoryScreen extends StatefulWidget {
   final User operator;
@@ -30,6 +31,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
     end: DateTime.now(),
   );
   int _selectedTab = 0; // 0 = Server, 1 = Local
+  bool _usingCached = false; // server reports shown from the offline cache
 
   @override
   void initState() {
@@ -42,24 +44,46 @@ class _HistoryScreenState extends State<HistoryScreen> {
 
     if (_selectedTab == 0) {
       List<dynamic>? serverData;
+      var fromCache = false;
       try {
         serverData = await ApiService.fetchReports(
           startDate: _selectedRange.start,
           endDate: _selectedRange.end,
         );
+        if (serverData != null && serverData.isNotEmpty) {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('cache_server_reports', jsonEncode(serverData));
+        }
       } catch (_) {
         serverData = null;
+      }
+
+      if (serverData == null || serverData.isEmpty) {
+        // Server unreachable: fall back to the last cached server reports so
+        // previous reports stay visible offline.
+        final prefs = await SharedPreferences.getInstance();
+        final cached = prefs.getString('cache_server_reports');
+        if (cached != null && cached.isNotEmpty) {
+          try {
+            serverData = jsonDecode(cached) as List<dynamic>;
+            fromCache = true;
+          } catch (_) {
+            serverData = null;
+          }
+        }
       }
 
       if (serverData != null && serverData.isNotEmpty) {
         setState(() {
           _reports = serverData!;
+          _usingCached = fromCache;
           _isLoading = false;
         });
       } else {
         final filtered = await _loadLocalFiltered();
         setState(() {
           _reports = filtered;
+          _usingCached = false;
           _isLoading = false;
         });
       }
@@ -213,6 +237,21 @@ class _HistoryScreenState extends State<HistoryScreen> {
               ],
             ),
           ),
+          if (_usingCached)
+            Container(
+              margin: const EdgeInsets.symmetric(horizontal: 16),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colors.orange.shade100,
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                const Icon(Icons.cloud_off, size: 14, color: Colors.orange),
+                const SizedBox(width: 6),
+                Text('Offline — showing cached reports',
+                    style: TextStyle(fontSize: 12, color: Colors.orange.shade900)),
+              ]),
+            ),
           _isLoading
               ? const Expanded(child: Center(child: CircularProgressIndicator()))
               : Expanded(
@@ -690,7 +729,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
 
             table.add(['', 'Overall Total', '', '', overall.toStringAsFixed(2)]);
 
-            rows.add(pw.Table.fromTextArray(
+            rows.add(pw.TableHelper.fromTextArray(
               headers: table.first,
               data: table.sublist(1),
               headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 9),

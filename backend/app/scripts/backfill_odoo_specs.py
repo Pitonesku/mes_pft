@@ -41,7 +41,7 @@ def _resolve_spec(db, client, po):
             product_id = recs[0].get("product_id") if recs else None
             spec, _ = client.resolve_mo_product_spec(mo_id, product_id)
         except OdooError as exc:
-            print(f"  [warn] spec read failed for PO {po.po_number}: {exc}")
+            print(f"  [warn] spec read failed for PO {po.mo_number}: {exc}")
     return inbound._fill_global_fallback(db, spec, po), product_id
 
 
@@ -103,7 +103,7 @@ def main():
             )
             spec, product_id = _resolve_spec(db, client, po)
             present = {k: v for k, v in spec.items() if v not in (None, 0.0)}
-            print(f"  PO {po.po_number} (id={po.id}, root_mo={po.odoo_mo_id}, had_specs={existing}) -> {present}")
+            print(f"  PO {po.mo_number} (id={po.id}, root_mo={po.odoo_mo_id}, had_specs={existing}) -> {present}")
             if not existing and present:
                 backfilled.add(po.id)
                 if not args.dry_run:

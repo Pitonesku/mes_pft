@@ -98,7 +98,7 @@ class _ReportVerificationCardState extends State<ReportVerificationCard> {
       // uses the ReportLab fallback since no client PDF is uploaded yet). Generate
       // + upload the Flutter Order Summary now; the dispatcher re-pushes it and
       // replaces the ReportLab render on Odoo.
-      if (action == 'approve' && result?['order_finalized'] == true) {
+      if (action == 'approve' && result['order_finalized'] == true) {
         await _maybeUploadOrderSummary();
       }
     }

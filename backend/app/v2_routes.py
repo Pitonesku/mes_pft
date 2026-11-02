@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import case, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -46,8 +46,10 @@ from app.quality_stats import (
     manual_triacetin_pct,
     merge_manual_parameters,
     merge_triacetin,
+    triacetin_status,
 )
 from app.services import aggregation, manual_check_rules, run_corrections, shift_lifecycle, shift_resolver
+from app.services import quarantine
 from app.services.manual_test_config import PARAMETERS, effective_config, sanitize_config
 from app.services.lot_number import lot_number
 from app.services.shift_lifecycle import LifecycleError
@@ -64,6 +66,21 @@ _MEASUREMENT_COLS = (
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _naive_as_plant_local(value: Optional[datetime], plant_tz: Optional[str]) -> Optional[datetime]:
+    """Interpret a NAIVE datetime as plant-local time (A9).
+
+    Tablets submit local wall-clock times without an offset; storing them as UTC
+    shifted every shift interval by the plant offset. Already-aware datetimes
+    pass through unchanged.
+    """
+    if value is None or value.tzinfo is not None:
+        return value
+    try:
+        return value.replace(tzinfo=ZoneInfo(plant_tz or ""))
+    except Exception:  # noqa: BLE001 - bad tz name -> plant default
+        return value.replace(tzinfo=get_plant_timezone())
 
 
 def _get_or_404(db: Session, model, obj_id: int):
@@ -100,6 +117,22 @@ def _is_supervisor(user: models.User) -> bool:
 def _require_supervisor(user: models.User) -> None:
     if not _is_supervisor(user):
         raise HTTPException(status_code=403, detail="Supervisor (manager/admin) only")
+
+
+def _require_shift_operator_or_supervisor(user: models.User, shift: models.ShiftSession) -> None:
+    """Only the shift's own operator (or a supervisor/admin) may close/stop it.
+
+    S1 guard: without this, any authenticated user could finalize or stop another
+    operator's shift, corrupting its runs, summary and certificate.
+    """
+    if _is_supervisor(user):
+        return
+    if shift.operator_id is not None and user.id == shift.operator_id:
+        return
+    raise HTTPException(
+        status_code=403,
+        detail="Only the shift's operator or a supervisor (manager/admin) can close/stop this shift",
+    )
 
 
 def _lifecycle(fn, *args, **kwargs):
@@ -213,13 +246,8 @@ def _rod_dict(m: models.QualityMeasurement, specs: Optional[Dict] = None) -> Dic
 
 
 def _overall_verdict(statuses: List[Optional[str]]) -> str:
-    if STATUS_FAIL in statuses:
-        return STATUS_FAIL
-    if STATUS_WARN in statuses:
-        return STATUS_WARN
-    if STATUS_PASS in statuses:
-        return STATUS_PASS
-    return STATUS_NO_DATA
+    """Shared verdict logic lives in the aggregation service (A5/A7)."""
+    return aggregation.overall_verdict(statuses)
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +417,9 @@ def open_shift(
             resumable.status = "IN_PROGRESS"
             resumable.closed_at = None
             resumable.closed_by = None
+            # S1: ownership follows whoever resumes the shift, so the resuming
+            # operator can close/stop it later.
+            resumable.operator_id = payload.operator_id or current_user.id
             if scheduled_end is not None:
                 resumable.scheduled_end_at = scheduled_end
             db.flush()
@@ -401,7 +432,7 @@ def open_shift(
     shift = models.ShiftSession(
         machine_id=payload.machine_id,
         operator_id=payload.operator_id or current_user.id,
-        started_at=payload.started_at or _utcnow(),
+        started_at=_naive_as_plant_local(payload.started_at, payload.plant_tz) or _utcnow(),
         status="IN_PROGRESS",
         plant_tz=payload.plant_tz,
         source=payload.source,
@@ -485,11 +516,17 @@ def close_shift(
             return summary.payload
         return _shift_dict(shift)
 
+    # S1: only the shift's own operator (or a supervisor/admin) may finalize it.
+    # The already-CLOSED replay above stays ungated so offline retries from any
+    # device remain idempotent.
+    _require_shift_operator_or_supervisor(current_user, shift)
+
     # Finalize IN_PROGRESS or AUTO_CLOSED -> CLOSED (late submission allowed).
     requested_end = payload.ended_at
     if requested_end is not None:
         if requested_end.tzinfo is None:
-            requested_end = requested_end.replace(tzinfo=timezone.utc)
+            # A9: naive ended_at from the tablet is plant-local, not UTC.
+            requested_end = _naive_as_plant_local(requested_end, shift.plant_tz)
         if requested_end < shift.started_at:
             raise HTTPException(status_code=422, detail="ended_at is before the shift start")
         if requested_end > _utcnow() + timedelta(minutes=10):
@@ -672,6 +709,8 @@ def stop_shift(
     finalized via a retroactive report submission.
     """
     shift = _get_or_404(db, models.ShiftSession, shift_id)
+    # S1: only the shift's own operator (or a supervisor/admin) may stop it.
+    _require_shift_operator_or_supervisor(current_user, shift)
     if shift.ended_at is not None:
         raise HTTPException(status_code=409, detail="Shift is not active")
     now = _utcnow()
@@ -742,37 +781,8 @@ def _build_shift_summary(
     manual_quality: Optional[Dict[str, Dict[str, Optional[float]]]],
     idempotency_key: Optional[str],
 ) -> Dict[str, Any]:
-    runs = (
-        db.query(models.ProductionRun)
-        .filter(models.ProductionRun.shift_id == shift.id)
-        .order_by(models.ProductionRun.seq)
-        .all()
-    )
-    run_summaries = []
-    for run in runs:
-        s = aggregation.compute_run_summary(db, run, manual=manual_quality)
-        s["seq"] = run.seq
-        manual_rows = s["manual_checks"]  # individual rows (from compute_run_summary)
-        s["manual_checks"] = _manual_checks_summary(db, run.id)
-        s["manual_check_rows"] = manual_rows
-        run_summaries.append(s)
-    verdict = _overall_verdict([r["status"] for r in run_summaries])
-    machine = db.get(models.Machine, shift.machine_id) if shift.machine_id else None
-    return {
-        "schema_version": "1.2",
-        "idempotency_key": idempotency_key or f"mes:shift:{shift.id}:v1",
-        "shift": {
-            "machine_id": shift.machine_id,
-            "machine_name": machine.name if machine else None,
-            "shift_name": shift.shift_name,
-            "started_at": shift.started_at.isoformat() if shift.started_at else None,
-            "ended_at": shift.ended_at.isoformat() if shift.ended_at else None,
-            "operator_id": shift.operator_id,
-            "plant_tz": shift.plant_tz,
-            "verdict": verdict,
-        },
-        "runs": run_summaries,
-    }
+    """HTTP-layer wrapper: the builder lives in services/aggregation.py (A5/A7)."""
+    return aggregation.build_shift_summary(db, shift, manual_quality, idempotency_key)
 
 
 # ---------------------------------------------------------------------------
@@ -900,7 +910,7 @@ def _shift_quality_report_data(db: Session, shift) -> Dict[str, Any]:
     ]
 
     header = {
-        "po_number": po.po_number if po else None,
+        "po_number": po.mo_number if po else None,
         "lot_number": lot_no,
         "spec_string": _po_spec_string(po),
         "machine": machine_name,
@@ -1179,6 +1189,7 @@ def relink_unlinked(
     current_user: models.User = Depends(get_current_user),
 ):
     """(admin) Re-run shift/run resolution over samples that are still unlinked."""
+    _require_superadmin(current_user)
     samples = (
         db.query(models.QualitySample)
         .filter(models.QualitySample.shift_id.is_(None))
@@ -1205,6 +1216,61 @@ def relink_unlinked(
             relinked += 1
     db.commit()
     return {"total_unlinked": len(samples), "relinked": relinked}
+
+
+@router.get("/quality/unlinked-samples")
+def unlinked_samples(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    limit: int = Query(default=200, ge=1, le=1000),
+):
+    """(admin) Samples still unlinked or flagged for review.
+
+    Returns rows with no shift (`UNRESOLVED_MACHINE`, `CLOCK_SKEW`, `NO_SHIFT`,
+    calibration leftovers) plus `MO_MISMATCH` rows (linked to a shift but the MO
+    conflicts with the active run). `POST /quality/relink` may fix them; the rest
+    need manual review.
+    """
+    _require_superadmin(current_user)
+    samples = (
+        db.query(models.QualitySample)
+        .filter(
+            or_(
+                models.QualitySample.shift_id.is_(None),
+                models.QualitySample.link_status == "MO_MISMATCH",
+            )
+        )
+        .order_by(models.QualitySample.produced_at.desc().nullslast())
+        .limit(limit)
+        .all()
+    )
+    machine_map = {
+        m.id: m.name
+        for m in db.query(models.Machine)
+        .filter(models.Machine.id.in_({s.machine_id for s in samples if s.machine_id}))
+        .all()
+    }
+    rod_counts = dict(
+        db.query(models.QualityMeasurement.sample_id, func.count(models.QualityMeasurement.id))
+        .filter(models.QualityMeasurement.sample_id.in_([s.id for s in samples]))
+        .group_by(models.QualityMeasurement.sample_id)
+        .all()
+    )
+    return [
+        {
+            "id": s.id,
+            "sample_id": s.sample_id,
+            "machine_id": s.machine_id,
+            "machine_name": machine_map.get(s.machine_id),
+            "produced_at": s.produced_at.isoformat() if s.produced_at else None,
+            "mo_ref": s.mo_ref,
+            "link_status": s.link_status,
+            "kind": s.kind,
+            "shift_id": s.shift_id,
+            "rods": rod_counts.get(s.id, 0),
+        }
+        for s in samples
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1255,19 +1321,19 @@ def po_certificate_pdf(po_id: int, db: Session = Depends(get_db)):
     if not summary["rods_total"]:
         raise HTTPException(status_code=404, detail="No measurements linked to this order yet")
     subtitle = (
-        f"Order: {po.po_number} | Status: {summary.get('status')} | "
+        f"Order: {po.mo_number} | Status: {summary.get('status')} | "
         f"Tested: {summary['rods_total']} | Rejected: {summary['rods_rejected']} | "
         f"Period: {(summary.get('first_measured_at') or '')[:10]} - "
         f"{(summary.get('last_measured_at') or '')[:10]}"
     )
     pdf_bytes = _render_certificate_table(
-        f"Order Quality Certificate - {po.po_number}", subtitle, summary,
+        f"Order Quality Certificate - {po.mo_number}", subtitle, summary,
         extra_rows=summary.get("runs") or [],
     )
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": f"inline; filename=order_certificate_{po.po_number}.pdf"},
+        headers={"Content-Disposition": f"inline; filename=order_certificate_{po.mo_number}.pdf"},
     )
 
 
@@ -1510,7 +1576,7 @@ def ignore_odoo_order(
     po.odoo_state = "ignored"
     po.sync_mode = "link_only"
     db.commit()
-    return {"id": po.id, "po_number": po.po_number, "odoo_state": po.odoo_state}
+    return {"id": po.id, "po_number": po.mo_number, "odoo_state": po.odoo_state}
 
 
 @router.post("/odoo/reconcile")
@@ -1797,7 +1863,7 @@ def list_odoo_orders_sync(
     payload = [
         {
             "id": o.id,
-            "po_number": o.po_number,
+            "po_number": o.mo_number,
             "odoo_mo_id": o.odoo_mo_id,
             "odoo_mo_name": o.odoo_mo_name,
             "odoo_current_mo_id": o.odoo_current_mo_id,
@@ -1847,7 +1913,7 @@ def set_order_sync_mode(
         raise HTTPException(status_code=409, detail="Order is not linked to an Odoo MO")
     po.sync_mode = mode
     db.commit()
-    return {"id": po.id, "po_number": po.po_number, "sync_mode": po.sync_mode}
+    return {"id": po.id, "po_number": po.mo_number, "sync_mode": po.sync_mode}
 
 
 @router.post("/orders/{order_id}/close")
@@ -1900,7 +1966,7 @@ def upload_order_summary_pdf(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail="Invalid base64 PDF data") from exc
     po.order_summary_pdf_base64 = pdf_base64
-    po.order_summary_pdf_filename = filename or f"Order_Summary_{po.po_number}.pdf"
+    po.order_summary_pdf_filename = filename or f"Order_Summary_{po.mo_number}.pdf"
     db.commit()
 
     # If the order was already finalized (e.g. the server-side auto-finalize used
@@ -1942,7 +2008,7 @@ def order_summary_pdf(
     return Response(
         content=pdf,
         media_type="application/pdf",
-        headers={"Content-Disposition": f"inline; filename=order_summary_{po.po_number}.pdf"},
+        headers={"Content-Disposition": f"inline; filename=order_summary_{po.mo_number}.pdf"},
     )
 
 
@@ -1956,7 +2022,7 @@ def order_summary_pdf_by_mo(
     _require_superadmin(current_user)
     po = (
         db.query(models.PurchaseOrder)
-        .filter(models.PurchaseOrder.po_number == mo_number)
+        .filter(models.PurchaseOrder.mo_number == mo_number)
         .order_by(models.PurchaseOrder.id.desc())
         .first()
     )
@@ -1971,7 +2037,7 @@ def order_summary_pdf_by_mo(
     return Response(
         content=pdf,
         media_type="application/pdf",
-        headers={"Content-Disposition": f"inline; filename=order_summary_{po.po_number}.pdf"},
+        headers={"Content-Disposition": f"inline; filename=order_summary_{po.mo_number}.pdf"},
     )
 
 
@@ -1985,7 +2051,7 @@ def odoo_order_summary_pdf(
     _verify_odoo_webhook(mo_number, x_odoo_signature)
     po = (
         db.query(models.PurchaseOrder)
-        .filter(models.PurchaseOrder.po_number == mo_number)
+        .filter(models.PurchaseOrder.mo_number == mo_number)
         .order_by(models.PurchaseOrder.id.desc())
         .first()
     )
@@ -2000,7 +2066,7 @@ def odoo_order_summary_pdf(
     return Response(
         content=pdf,
         media_type="application/pdf",
-        headers={"Content-Disposition": f"inline; filename=order_summary_{po.po_number}.pdf"},
+        headers={"Content-Disposition": f"inline; filename=order_summary_{po.mo_number}.pdf"},
     )
 
 
@@ -2439,7 +2505,88 @@ def _active_po_for_machine(db: Session, machine_id: int) -> Optional[str]:
     if po_id is None:
         return None
     po = db.get(models.PurchaseOrder, po_id)
-    return po.po_number if po is not None else None
+    return po.mo_number if po is not None else None
+
+
+def _active_run_for_machine(db: Session, machine_id: int) -> Optional[models.ProductionRun]:
+    open_shift = (
+        db.query(models.ShiftSession)
+        .filter(
+            models.ShiftSession.machine_id == machine_id,
+            (models.ShiftSession.ended_at.is_(None)) | (models.ShiftSession.status == "OPEN"),
+        )
+        .order_by(models.ShiftSession.started_at.desc())
+        .first()
+    )
+    if open_shift is None:
+        return None
+    return shift_lifecycle.active_run(db, open_shift.id)
+
+
+def _triacetin_summary(db: Session, machine_id: int, specs: Dict[str, Any]) -> Dict[str, Any]:
+    """Current run's triacetin for a machine (station + manual merged).
+
+    Returns ``overall`` (mean %), ``last`` (latest single %), ``last_at``,
+    ``status`` (PASS/FAIL vs spec), ``target``, ``tolerance`` and the raw
+    ``measurements`` (each station entry is implicitly "auto"; manual entries
+    carry ``"source": "manual"``).
+    """
+    empty: Dict[str, Any] = {
+        "overall": None, "last": None, "last_at": None, "status": None,
+        "target": None, "tolerance": None, "measurements": [],
+    }
+    run = _active_run_for_machine(db, machine_id)
+    if run is None:
+        return empty
+
+    tri = aggregation.compute_triacetin(db, run_id=run.id)
+    checks = (
+        db.query(models.ManualQualityCheck)
+        .filter(
+            models.ManualQualityCheck.mo_id == run.id,
+            models.ManualQualityCheck.voided_at.is_(None),
+        )
+        .all()
+    )
+    manual = manual_triacetin_measurements(
+        [
+            {
+                "measured_at": (c.measured_at or c.created_at),
+                "triacetin_wet_mg": c.triacetin_wet_mg,
+                "triacetin_dry_mg": c.triacetin_dry_mg,
+                "triacetin_rods": c.triacetin_rods,
+            }
+            for c in checks
+        ]
+    )
+    merged = merge_triacetin(tri, manual)
+    measurements = list(merged.get("measurements") or [])
+
+    def _t(m: Dict[str, Any]) -> Optional[datetime]:
+        v = m.get("time")
+        return v if isinstance(v, datetime) else None
+
+    measurements.sort(key=lambda m: (_t(m) is None, _t(m)))
+    overall = merged.get("overall_pct")
+    last = measurements[-1].get("triacetin_pct") if measurements else None
+    last_time = measurements[-1].get("time") if measurements else None
+
+    spec = specs.get("triacetin")
+    status = triacetin_status(overall, spec) if spec is not None else None
+    target = _num(spec.nominal) if spec is not None else None
+    tolerance = None
+    if spec is not None and spec.lower is not None and spec.upper is not None:
+        tolerance = round((_num(spec.upper) - _num(spec.lower)) / 2.0, 4)
+
+    return {
+        "overall": _num(overall),
+        "last": _num(last),
+        "last_at": last_time.isoformat() if isinstance(last_time, datetime) else last_time,
+        "status": status,
+        "target": target,
+        "tolerance": tolerance,
+        "measurements": measurements,
+    }
 
 
 @router.get("/machines/{machine_alias}/live-quality")
@@ -2468,8 +2615,11 @@ def machine_live_quality(
     if until_dt is not None:
         # Exact historical window: every rod in [since, until], chronological.
         rods = _range_rods(db, machine.id, since_dt, until_dt)
+    elif since_dt is not None:
+        # "Since X" anchor (shift start / custom since) → full range, no cap.
+        rods = _range_rods(db, machine.id, since_dt, _utcnow())
     else:
-        rods = _windowed_rods(db, machine.id, window_type, window_value, since_dt)
+        rods = _windowed_rods(db, machine.id, window_type, window_value, None)
     rod_dicts = [{k: getattr(r, k) for k in _MEASURE_PARAM_KEYS} for r in rods]
     stats = compute_run_stats(rod_dicts, specs)
     params = stats.get("parameters", {})
@@ -2503,6 +2653,7 @@ def machine_live_quality(
         "status_dia": _sd_status(sd_dia, dia_warn, dia_fail),
         "parameters": params,
         "series": _series_payload(specs, rods),
+        "triacetin": _triacetin_summary(db, machine.id, specs),
     }
 
 
@@ -2566,6 +2717,8 @@ def _dashboard_machine_payload(
         idle_since = datetime.now(timezone.utc) - timedelta(minutes=_DASHBOARD_IDLE_MINUTES)
         state = "running" if (last_measured_at is not None and last_measured_at >= idle_since) else "idle"
 
+    tri = _triacetin_summary(db, machine.id, specs)
+
     return {
         "alias": machine.name,
         "machine_id": machine.id,
@@ -2579,6 +2732,12 @@ def _dashboard_machine_payload(
         "shift_started_at": open_shift.started_at.isoformat() if (open_shift is not None and open_shift.started_at is not None) else None,
         "last_measured_at": last_measured_at.isoformat() if last_measured_at else None,
         "last_manual_test_at": last_manual_test_at.isoformat() if last_manual_test_at else None,
+        "triacetin_overall": tri["overall"],
+        "triacetin_last": tri["last"],
+        "triacetin_last_at": tri["last_at"],
+        "triacetin_status": tri["status"],
+        "triacetin_target": tri["target"],
+        "triacetin_tolerance": tri["tolerance"],
     }
 
 
@@ -2624,7 +2783,7 @@ def dashboard_summary(db: Session = Depends(get_db)):
     )
     orders = [
         {
-            "po_number": p.po_number,
+            "po_number": p.mo_number,
             "target_qty": p.target_qty or 0,
             "produced_qty": p.produced_qty or 0,
             "machine": po_machine.get(p.id),
@@ -2994,7 +3153,7 @@ def quality_filters(db: Session = Depends(get_db)):
         })
     return {
         "machines": [{"id": m.id, "name": m.name} for m in machines],
-        "pos": [{"id": p.id, "po_number": p.po_number} for p in pos],
+        "pos": [{"id": p.id, "po_number": p.mo_number} for p in pos],
         "shifts": shifts,
     }
 
@@ -3062,7 +3221,7 @@ def _quality_header(db: Session, machine, shift, po_id) -> Dict[str, Any]:
         if run is not None:
             po = db.get(models.PurchaseOrder, run.po_id)
     if po is not None:
-        header["po_number"] = po.po_number
+        header["po_number"] = po.mo_number
         header["spec"] = _po_spec_string(po)
     return header
 
@@ -3251,7 +3410,7 @@ def quality_overview(
     po_by_run = {}
     if all_run_ids:
         po_by_run = dict(
-            db.query(models.ProductionRun.id, models.PurchaseOrder.po_number)
+            db.query(models.ProductionRun.id, models.PurchaseOrder.mo_number)
             .join(models.PurchaseOrder, models.PurchaseOrder.id == models.ProductionRun.po_id)
             .filter(models.ProductionRun.id.in_(all_run_ids))
             .all()
@@ -3656,58 +3815,8 @@ class VoidCheckPayload(BaseModel):
 
 
 def _manual_check_dict(c: models.ManualQualityCheck) -> Dict[str, Any]:
-    return {
-        "id": c.id,
-        "shift_id": c.shift_id,
-        "mo_id": c.mo_id,
-        "run_id": c.mo_id,
-        "machine_id": c.machine_id,
-        "po_id": c.po_id,
-        "mo_ref": c.mo_ref,
-        "operator_id": c.operator_id,
-        "created_at": c.created_at.isoformat() if c.created_at else None,
-        "measured_at": c.measured_at.isoformat() if c.measured_at else None,
-        "sample_weight": _num(c.sample_weight),
-        "sample_rods": c.sample_rods,
-        "length_mm": _num(c.length_mm),
-        "hardness": _num(c.hardness),
-        "triacetin_wet_mg": _num(c.triacetin_wet_mg),
-        "triacetin_dry_mg": _num(c.triacetin_dry_mg),
-        "triacetin_rods": c.triacetin_rods,
-        "triacetin_pct": _num(c.triacetin_pct),
-        "glue_seam_ok": c.glue_seam_ok,
-        "cut_quality_ok": c.cut_quality_ok,
-        "visual_appearance_ok": c.visual_appearance_ok,
-        "notes": c.notes,
-        "verdicts": c.verdicts or {},
-        "overall_status": c.overall_status,
-        "voided": c.voided_at is not None,
-        "voided_at": c.voided_at.isoformat() if c.voided_at else None,
-        "void_reason": c.void_reason,
-    }
-
-
-def _manual_checks_summary(db: Session, run_id: int) -> Dict[str, Any]:
-    """Per-run roll-up of non-voided manual checks for the shift summary / certificate."""
-    checks = (
-        db.query(models.ManualQualityCheck)
-        .filter(models.ManualQualityCheck.mo_id == run_id, models.ManualQualityCheck.voided_at.is_(None))
-        .order_by(models.ManualQualityCheck.id)
-        .all()
-    )
-    failed = [c for c in checks if c.overall_status == "FAIL"]
-    weights = [_num(c.sample_weight) / (c.sample_rods or 10) for c in checks if c.sample_weight is not None]
-    lengths = [_num(c.length_mm) for c in checks if c.length_mm is not None]
-    hardnesses = [_num(c.hardness) for c in checks if c.hardness is not None]
-    return {
-        "count": len(checks),
-        "failed": len(failed),
-        "status": "FAIL" if failed else ("PASS" if any(c.overall_status for c in checks) else None),
-        "mean_weight_per_rod_g": round(sum(weights) / len(weights), 5) if weights else None,
-        "mean_length_mm": round(sum(lengths) / len(lengths), 3) if lengths else None,
-        "mean_hardness": round(sum(hardnesses) / len(hardnesses), 3) if hardnesses else None,
-        "items": [_manual_check_dict(c) for c in checks],
-    }
+    """Alias: the dict builder lives in services/aggregation.py (A5/A7)."""
+    return aggregation.manual_check_dict(c)
 
 
 def _resolve_active_shift_for_check(
@@ -3872,3 +3981,431 @@ def void_manual_check(
     db.commit()
     db.refresh(check)
     return _manual_check_dict(check)
+    check.voided_at = _utcnow()
+    check.voided_by = current_user.id
+    check.void_reason = payload.reason.strip()
+    db.commit()
+    db.refresh(check)
+    return _manual_check_dict(check)
+
+
+# ---------------------------------------------------------------------------
+# Quality management: NCR lifecycle + quarantine resolutions
+# ---------------------------------------------------------------------------
+
+def _can_manage_quality(user: models.User) -> bool:
+    role = getattr(user, "role", None)
+    return (
+        _is_admin(user)
+        or bool(getattr(user, "can_manage_quality", False))
+        or bool(role is not None and role.can_manage_quality)
+    )
+
+
+def _require_quality_manager(user: models.User) -> None:
+    if not _can_manage_quality(user):
+        raise HTTPException(status_code=403, detail="Quality manager role required")
+
+
+def _quality_error_to_http(exc: quarantine.QualityError) -> HTTPException:
+    return HTTPException(status_code=exc.status, detail=exc.detail)
+
+
+class NcrCreate(BaseModel):
+    po_id: int
+    description: str
+    corrective_action: Optional[str] = None
+    severity: str = "MINOR"
+    machine_id: Optional[int] = None
+    run_id: Optional[int] = None
+
+
+class NcrUpdate(BaseModel):
+    description: Optional[str] = None
+    corrective_action: Optional[str] = None
+    severity: Optional[str] = None
+    status: Optional[str] = None  # OPEN | IN_PROGRESS (close via /close)
+
+
+class NcrClose(BaseModel):
+    closing_remarks: str
+
+
+class StatusNote(BaseModel):
+    remarks: Optional[str] = None
+
+
+class QuarantineResolutionCreate(BaseModel):
+    po_id: int
+    kind: str  # scrap | release
+    boxes: int
+    dry_weight_kg: Optional[float] = None
+    reason_code: Optional[str] = None
+    notes: Optional[str] = None
+    ncr_id: Optional[int] = None
+
+
+class ResolutionVoid(BaseModel):
+    reason: Optional[str] = None
+
+
+def _ncr_payload(db: Session, ncr: models.NonConformityReport) -> Dict[str, Any]:
+    out = quarantine.ncr_dict(ncr)
+    out["history"] = [
+        {
+            "id": h.id,
+            "from_status": h.from_status,
+            "to_status": h.to_status,
+            "user_id": h.user_id,
+            "username": h.username,
+            "remarks": h.remarks,
+            "created_at": h.created_at.isoformat() if h.created_at else None,
+        }
+        for h in quarantine.ncr_history(db, ncr.id)
+    ]
+    return out
+
+
+@router.post("/quality/ncrs")
+def create_ncr(
+    payload: NcrCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    _require_quality_manager(current_user)
+    po = _get_or_404(db, models.PurchaseOrder, payload.po_id)
+    if payload.machine_id is not None:
+        _get_or_404(db, models.Machine, payload.machine_id)
+    if payload.run_id is not None:
+        _get_or_404(db, models.ProductionRun, payload.run_id)
+    try:
+        ncr = quarantine.create_ncr(
+            db, po, current_user,
+            description=payload.description,
+            corrective_action=payload.corrective_action,
+            severity=payload.severity,
+            machine_id=payload.machine_id,
+            run_id=payload.run_id,
+        )
+        db.commit()
+    except quarantine.QualityError as exc:
+        db.rollback()
+        raise _quality_error_to_http(exc) from exc
+    db.refresh(ncr)
+    return _ncr_payload(db, ncr)
+
+
+@router.get("/quality/ncrs")
+def list_ncrs(
+    po_id: Optional[int] = None,
+    status: Optional[str] = None,
+    machine_id: Optional[int] = None,
+    open_only: bool = False,
+    limit: int = 200,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    q = db.query(models.NonConformityReport).order_by(
+        models.NonConformityReport.created_at.desc(), models.NonConformityReport.id.desc()
+    )
+    if po_id is not None:
+        q = q.filter(models.NonConformityReport.po_id == po_id)
+    if status:
+        q = q.filter(models.NonConformityReport.status == status.upper())
+    if machine_id is not None:
+        q = q.filter(models.NonConformityReport.machine_id == machine_id)
+    if open_only:
+        q = q.filter(models.NonConformityReport.status.in_(["OPEN", "IN_PROGRESS"]))
+    return [_ncr_payload(db, n) for n in q.limit(max(1, min(int(limit), 1000))).all()]
+
+
+@router.get("/quality/ncrs/{ncr_id}")
+def get_ncr(
+    ncr_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    ncr = _get_or_404(db, models.NonConformityReport, ncr_id)
+    return _ncr_payload(db, ncr)
+
+
+@router.patch("/quality/ncrs/{ncr_id}")
+def update_ncr(
+    ncr_id: int,
+    payload: NcrUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    _require_quality_manager(current_user)
+    ncr = _get_or_404(db, models.NonConformityReport, ncr_id)
+    try:
+        if payload.description is not None:
+            if not payload.description.strip():
+                raise quarantine.QualityError(422, "description cannot be empty")
+            ncr.description = payload.description.strip()
+        if payload.corrective_action is not None:
+            ncr.corrective_action = payload.corrective_action
+        if payload.severity is not None:
+            if payload.severity not in quarantine.NCR_SEVERITIES:
+                raise quarantine.QualityError(
+                    422, f"severity must be one of {list(quarantine.NCR_SEVERITIES)}"
+                )
+            ncr.severity = payload.severity
+        if payload.status is not None:
+            quarantine.set_ncr_status(db, ncr, payload.status.upper(), current_user)
+        db.commit()
+    except quarantine.QualityError as exc:
+        db.rollback()
+        raise _quality_error_to_http(exc) from exc
+    db.refresh(ncr)
+    return _ncr_payload(db, ncr)
+
+
+@router.post("/quality/ncrs/{ncr_id}/close")
+def close_ncr(
+    ncr_id: int,
+    payload: NcrClose,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    _require_quality_manager(current_user)
+    ncr = _get_or_404(db, models.NonConformityReport, ncr_id)
+    try:
+        quarantine.set_ncr_status(
+            db, ncr, quarantine.NCR_CLOSED, current_user,
+            remarks=(payload.closing_remarks or "").strip(),
+        )
+        db.commit()
+    except quarantine.QualityError as exc:
+        db.rollback()
+        raise _quality_error_to_http(exc) from exc
+    db.refresh(ncr)
+    return _ncr_payload(db, ncr)
+
+
+@router.post("/quality/ncrs/{ncr_id}/reopen")
+def reopen_ncr(
+    ncr_id: int,
+    payload: StatusNote,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    _require_quality_manager(current_user)
+    ncr = _get_or_404(db, models.NonConformityReport, ncr_id)
+    try:
+        quarantine.set_ncr_status(
+            db, ncr, quarantine.NCR_IN_PROGRESS, current_user,
+            remarks=payload.remarks or "reopened",
+        )
+        db.commit()
+    except quarantine.QualityError as exc:
+        db.rollback()
+        raise _quality_error_to_http(exc) from exc
+    db.refresh(ncr)
+    return _ncr_payload(db, ncr)
+
+
+@router.get("/quality/ncrs/{ncr_id}/history")
+def ncr_status_history(
+    ncr_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    ncr = _get_or_404(db, models.NonConformityReport, ncr_id)
+    return _ncr_payload(db, ncr)["history"]
+
+
+@router.post("/quality/quarantine-resolutions")
+def create_quarantine_resolution(
+    payload: QuarantineResolutionCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Resolve quarantine boxes for one order.
+
+    kind=scrap: converts boxes into waste (local ledger only).
+    kind=release: converts boxes into good stock; when the order is linked to an
+    Odoo MO an inventory-adjustment task is queued in ``odoo_outbox``
+    (aggregate_type='quarantine_release') - the closed MO is never touched.
+    """
+    _require_quality_manager(current_user)
+    po = _get_or_404(db, models.PurchaseOrder, payload.po_id)
+    if payload.ncr_id is not None:
+        _get_or_404(db, models.NonConformityReport, payload.ncr_id)
+    try:
+        resolution = quarantine.create_resolution(
+            db, po, payload.kind, payload.boxes, current_user,
+            dry_weight_kg=payload.dry_weight_kg,
+            reason_code=payload.reason_code,
+            notes=payload.notes,
+            ncr_id=payload.ncr_id,
+        )
+        if payload.kind == quarantine.KIND_RELEASE:
+            reference = (
+                f"Recovered from Quarantine, orig. MO: {po.odoo_mo_name or po.mo_number} "
+                f"({resolution.doc_number})"
+            )
+            item = odoo_outbound.enqueue_quarantine_release(
+                db, resolution.id, po, resolution.boxes, reference
+            )
+            if item is not None:
+                resolution.odoo_sync_status = quarantine.SYNC_PENDING
+            elif po.odoo_mo_id:
+                resolution.odoo_sync_status = quarantine.SYNC_ERROR
+        db.commit()
+    except quarantine.QualityError as exc:
+        db.rollback()
+        raise _quality_error_to_http(exc) from exc
+    db.refresh(resolution)
+    return {
+        **quarantine.resolution_dict(resolution),
+        "balance": quarantine.quarantine_balance(db, po),
+    }
+
+
+@router.get("/quality/quarantine-resolutions")
+def list_quarantine_resolutions(
+    po_id: Optional[int] = None,
+    kind: Optional[str] = None,
+    include_voided: bool = False,
+    limit: int = 200,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    q = db.query(models.QuarantineResolution).order_by(models.QuarantineResolution.id.desc())
+    if po_id is not None:
+        q = q.filter(models.QuarantineResolution.po_id == po_id)
+    if kind:
+        q = q.filter(models.QuarantineResolution.kind == kind.lower())
+    if not include_voided:
+        q = q.filter(models.QuarantineResolution.voided_at.is_(None))
+    return [quarantine.resolution_dict(r) for r in q.limit(max(1, min(int(limit), 1000))).all()]
+
+
+@router.post("/quality/quarantine-resolutions/{resolution_id}/void")
+def void_quarantine_resolution(
+    resolution_id: int,
+    payload: ResolutionVoid,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    _is_admin_guard = _is_admin(current_user)
+    if not _is_admin_guard:
+        raise HTTPException(status_code=403, detail="Admin only")
+    resolution = _get_or_404(db, models.QuarantineResolution, resolution_id)
+    try:
+        out = quarantine.void_resolution(db, resolution, current_user, payload.reason)
+        db.commit()
+    except quarantine.QualityError as exc:
+        db.rollback()
+        raise _quality_error_to_http(exc) from exc
+    return out
+
+
+@router.get("/orders/{order_id}/quarantine")
+def order_quarantine(
+    order_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    po = _get_or_404(db, models.PurchaseOrder, order_id)
+    return quarantine.order_quarantine_summary(db, po)
+
+
+@router.get("/orders/quality-flags")
+def order_quality_flags(
+    po_ids: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Batch NCR + quarantine flags for the orders list (avoids N+1 in the UI).
+
+    ``po_ids`` is a comma-separated list; omitted = the latest 200 active orders.
+    """
+    ids = [int(x) for x in (po_ids or "").split(",") if x.strip().lstrip("-").isdigit()]
+    q = db.query(models.PurchaseOrder)
+    if ids:
+        q = q.filter(models.PurchaseOrder.id.in_(ids))
+    else:
+        q = (q.filter(models.PurchaseOrder.is_archived.is_(False))
+             .order_by(models.PurchaseOrder.id.desc()).limit(200))
+    pos = q.all()
+    if not pos:
+        return []
+    po_id_list = [p.id for p in pos]
+    po_numbers = [p.mo_number for p in pos]
+
+    # NCR counts: open, critical-open, total per order.
+    open_expr = case((models.NonConformityReport.status == "OPEN", 1),
+                     (models.NonConformityReport.status == "IN_PROGRESS", 1), else_=0)
+    critical_expr = case(
+        ((models.NonConformityReport.status == "OPEN")
+         & (models.NonConformityReport.severity == "CRITICAL"), 1), else_=0
+    )
+    ncr_rows = (
+        db.query(
+            models.NonConformityReport.po_id,
+            func.count(models.NonConformityReport.id),
+            func.coalesce(func.sum(open_expr), 0),
+            func.coalesce(func.sum(critical_expr), 0),
+        )
+        .filter(models.NonConformityReport.po_id.in_(po_id_list))
+        .group_by(models.NonConformityReport.po_id)
+        .all()
+    )
+    ncr_by_po = {int(r[0]): {"total": int(r[1]), "open": int(r[2]), "critical": int(r[3])}
+                 for r in ncr_rows}
+
+    # Quarantine balance: reported boxes per order number, resolved per order.
+    q_reported = (
+        db.query(models.ProductionReport.mo_number,
+                 func.coalesce(func.sum(models.ProductionReport.quarantine_boxes), 0))
+        .filter(
+            models.ProductionReport.mo_number.in_(po_numbers),
+            models.ProductionReport.status != "obsolete",
+            (models.ProductionReport.is_deleted.is_(False))
+            | (models.ProductionReport.is_deleted.is_(None)),
+        )
+        .group_by(models.ProductionReport.mo_number)
+        .all()
+    )
+    reported_by_number = {str(r[0]): int(r[1]) for r in q_reported}
+
+    scrap_kg_expr = case(
+        (models.QuarantineResolution.kind == "scrap",
+         models.QuarantineResolution.dry_weight_kg), else_=0
+    )
+    q_resolved = (
+        db.query(
+            models.QuarantineResolution.po_id,
+            func.coalesce(func.sum(models.QuarantineResolution.boxes), 0),
+            func.coalesce(func.sum(scrap_kg_expr), 0),
+        )
+        .filter(
+            models.QuarantineResolution.po_id.in_(po_id_list),
+            models.QuarantineResolution.voided_at.is_(None),
+        )
+        .group_by(models.QuarantineResolution.po_id)
+        .all()
+    )
+    resolved_by_po = {int(r[0]): {"boxes": int(r[1]), "scrap_kg": round(float(r[2]), 3)}
+                      for r in q_resolved}
+
+    flags = []
+    for p in pos:
+        total_q = reported_by_number.get(p.mo_number, 0)
+        res = resolved_by_po.get(p.id, {"boxes": 0, "scrap_kg": 0})
+        ncr = ncr_by_po.get(p.id, {"total": 0, "open": 0, "critical": 0})
+        flags.append({
+            "po_id": p.id,
+            "po_number": p.mo_number,
+            "open_ncr_count": ncr["open"],
+            "critical_open_ncr": ncr["critical"] > 0,
+            "total_ncr_count": ncr["total"],
+            "total_quarantine_boxes": total_q,
+            "resolved_boxes": res["boxes"],
+            "remaining_quarantine_boxes": max(0, total_q - res["boxes"]),
+            "scrap_kg": res["scrap_kg"],
+        })
+    return flags
+

@@ -226,6 +226,11 @@ class OdooClient:
     def call(self, model: str, method: str, ids: List[int]) -> Any:
         return self._call(model, method, [ids])
 
+    def call_args(self, model: str, method: str, args: List[Any]) -> Any:
+        """Invoke an ``@api.model`` method with explicit positional arguments
+        (e.g. ``mrp.production.mes_quarantine_release(mo_id, boxes, reference)``)."""
+        return self._call(model, method, list(args))
+
     def attach_pdf(self, name: str, res_model: str, res_id: int, pdf_bytes: bytes) -> int:
         """Attach a PDF as ``ir.attachment`` linked to ``res_model``/``res_id``."""
         return self.create("ir.attachment", {

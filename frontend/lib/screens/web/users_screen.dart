@@ -12,6 +12,7 @@ class UsersScreen extends StatefulWidget {
 }
 
 class _UsersScreenState extends State<UsersScreen> {
+  bool _saving = false;
   bool _loading = false;
   String _filter = '';
 
@@ -34,11 +35,10 @@ class _UsersScreenState extends State<UsersScreen> {
     bool canModify = existing?.canModifyPO ?? false;
     bool inactive  = existing?.isInactive ?? false;
 
-    final ok = await showDialog<bool>(
+    await showDialog<bool>(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
-        bool _saving = false;
         return AlertDialog(
         title: Text(existing == null ? 'Add User' : 'Edit User'),
         content: SizedBox(width: 440, child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -74,10 +74,14 @@ class _UsersScreenState extends State<UsersScreen> {
         ])),
         actions: [
           TextButton(
-            onPressed: _saving ? null : () => Navigator.pop(ctx, false),
+            onPressed: () {
+              if (_saving) return;
+              Navigator.pop(ctx, false);
+            },
             child: const Text('CANCEL')),
           FilledButton(
-            onPressed: _saving ? null : () async {
+            onPressed: () async {
+              if (_saving) return;
               if (nameC.text.trim().isEmpty) return;
               setD(() => _saving = true);
               try {

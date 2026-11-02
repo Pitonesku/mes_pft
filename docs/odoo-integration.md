@@ -70,11 +70,55 @@ ODOO_URL=http://localhost:8069
 ODOO_DB=odoo
 ODOO_USER=mes_integration
 ODOO_API_KEY=...
+ODOO_WEBHOOK_SECRET=...
+ODOO_SHADOW_MODE=true
+ODOO_WEBHOOK_REQUIRE_TIMESTAMP=true   # requires addon >= 18.0.1.4.0
 ```
+
+> **Environments:** production Odoo runs on `8069`. The **development** Odoo runs
+> on `127.0.0.1:8070` with database `test` (use `ODOO_URL=http://127.0.0.1:8070`,
+> `ODOO_DB=test` in the dev `.env`). Custom addons are developed in `C:\Odoodev`
+> (especially `mes_integration`; the dev Odoo config `C:\OdooDev\odoo-dev.conf`
+> loads the same addons via `C:\OdooDev\odoo_my_addons` — the two paths are the
+> same location) — never edit the production addons in Program Files directly.
 
 The connector stays fully inert until `ODOO_ENABLED=true` and the other values
 are set. Admin endpoints: `POST /api/v2/odoo/sync-inbound` and
 `POST /api/v2/odoo/dispatch`.
+
+## Webhook authentication
+
+Every addon → MES call (`mo-event`, `mo-recall`, the order-summary PDF proxy)
+is HMAC-signed. The addon (>= 18.0.1.4.0) signs `"<unix_timestamp>.<exact body>"`
+with `mes_pft.webhook_secret` and sends it in `X-Odoo-Signature` plus the
+timestamp in `X-Odoo-Timestamp`; the MES verifier rejects stale stamps (300 s).
+With `ODOO_WEBHOOK_REQUIRE_TIMESTAMP=true` unsigned (legacy) calls are refused.
+
+## MO recall guardrails (addon >= 18.0.1.4.0)
+
+- `unlink()` and `action_cancel()` are blocked for MOs with
+  `mes_sync_status in (synced, error)` — an MO the MES references can never be
+  deleted or cancelled behind the MES's back.
+- The **"Cancel / Recall from MES"** button runs `action_recall_from_mes()`:
+  signed `POST /api/v2/odoo/mo-recall`. A MES `409` (MO open on a machine or with
+  production data) surfaces the reason and aborts; `200` marks the MO `recalled`
+  and cancels it normally. Recalled MOs are never re-pushed.
+
+## Addon development workflow
+
+Edit the addon under `C:\Odoodev\odoo_my_addons\mes_integration`, then on the dev
+Odoo:
+
+```
+# restart picks up Python changes; version/data changes need a module upgrade:
+& "C:\Program Files\Odoo 18.0.20260217\python\python.exe" \
+  "C:\Program Files\Odoo 18.0.20260217\server\odoo-bin" \
+  -c C:\OdooDev\odoo-dev.conf -d test -u mes_integration --stop-after-init
+# then start the dev server again (port 8070)
+```
+
+Smoke tests live in `backend/scripts/` (`smoke_test_mo_recall_guardrails.py`,
+`smoke_test_quarantine_release.py`) and target the dev Odoo only.
 
 ## Migration
 

@@ -5,7 +5,7 @@ Pure Python, no database and no framework imports, so it can be unit-tested in
 isolation and reused by the shift-close aggregation, the certificate renderer and
 the Odoo payload builder.
 
-Rules implemented (taken from the Grafana quality dashboard and the customer
+Rules implemented (taken from the plant's legacy quality dashboard and the customer
 certificates E050 / H087):
 
 * Limits are a nominal plus a lower and an upper limit. They may be asymmetric

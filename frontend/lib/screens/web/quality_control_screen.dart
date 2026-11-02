@@ -6,12 +6,14 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../api_service.dart';
 import '../../core/app_navigation.dart';
+import '../../models.dart';
 import '../../widgets/quality_control_chart.dart';
 import '../../widgets/quality_report_dialog.dart';
 
 class QualityControlScreen extends StatefulWidget {
   final QualityRequest? initial;
-  const QualityControlScreen({super.key, this.initial});
+  final User user;
+  const QualityControlScreen({super.key, this.initial, required this.user});
   @override
   State<QualityControlScreen> createState() => _QualityControlScreenState();
 }
@@ -33,6 +35,28 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
   Map<String, dynamic>? _data;
   bool _loading = true;
   String? _error;
+  List<dynamic>? _unlinked;
+  bool _relinking = false;
+  bool get _isSuperAdmin => widget.user.role == UserRole.superAdmin;
+
+  Future<void> _loadUnlinked() async {
+    if (!_isSuperAdmin) return;
+    final rows = await ApiService.fetchUnlinkedSamples();
+    if (!mounted) return;
+    setState(() => _unlinked = rows);
+  }
+
+  Future<void> _relinkNow() async {
+    setState(() => _relinking = true);
+    final result = await ApiService.relinkUnlinkedSamples();
+    if (!mounted) return;
+    setState(() => _relinking = false);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(result == null
+            ? 'Relink failed: ${ApiService.lastApiDetail ?? 'unknown error'}'
+            : 'Relinked ${result['relinked']} of ${result['total_unlinked']} samples')));
+    await _loadUnlinked();
+  }
 
   @override
   void initState() {
@@ -45,6 +69,7 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
       _initialPo = i.po;
     }
     _loadFilters();
+    _loadUnlinked();
   }
 
   Future<void> _loadFilters() async {
@@ -141,6 +166,10 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         _filterBar(),
         const SizedBox(height: 16),
+        if (_isSuperAdmin) ...[
+          _unlinkedCard(),
+          const SizedBox(height: 12),
+        ],
         if (_error != null) ...[
           Text(_error!, style: const TextStyle(color: Colors.red, fontSize: 13)),
           const SizedBox(height: 8),
@@ -149,6 +178,63 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
         const SizedBox(height: 16),
         Expanded(child: _split()),
       ]),
+    );
+  }
+
+  Widget _unlinkedCard() {
+    final rows = _unlinked ?? const [];
+    final title = _unlinked == null
+        ? 'Unlinked / mismatched samples: loading…'
+        : 'Unlinked / mismatched samples: ${rows.length}';
+    return Card(
+      child: ExpansionTile(
+        leading: const Icon(Icons.link_off, color: Colors.orange),
+        title: Text(title),
+        subtitle: const Text('Admin review — MO_MISMATCH and shift-less samples'),
+        trailing: TextButton.icon(
+          icon: _relinking
+              ? const SizedBox(
+                  width: 14, height: 14,
+                  child: CircularProgressIndicator(strokeWidth: 2))
+              : const Icon(Icons.autorenew),
+          label: const Text('Relink now'),
+          onPressed: _relinking ? null : _relinkNow,
+        ),
+        children: [
+          if (rows.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(12),
+              child: Text('Nothing to review.',
+                  style: TextStyle(color: Colors.grey)),
+            )
+          else
+            SizedBox(
+              height: 220,
+              child: ListView(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                children: [
+                  for (final r in rows.take(100))
+                    ListTile(
+                      dense: true,
+                      leading: Text(
+                        r['link_status']?.toString() ?? '',
+                        style: const TextStyle(fontSize: 11, color: Colors.deepOrange),
+                      ),
+                      title: Text(
+                        '${r['sample_id'] ?? '?'} — ${r['machine_name'] ?? 'machine ${r['machine_id']}'}',
+                        style: const TextStyle(fontSize: 13),
+                      ),
+                      subtitle: Text(
+                        '${r['produced_at'] ?? ''}  MO: ${r['mo_ref'] ?? '—'}  '
+                        'rods: ${r['rods']}',
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+        ],
+      ),
     );
   }
 
