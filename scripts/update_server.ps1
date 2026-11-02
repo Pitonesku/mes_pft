@@ -87,6 +87,17 @@ if (Test-Path $webBuild) {
     if ($LASTEXITCODE -ge 8) { throw "robocopy (web build) failed with exit code $LASTEXITCODE" }
 }
 
+# Sync the tablet APKs into the directory the backend actually scans for
+# auto-updates. main.py's resolve_universal_path() maps a relative
+# APK_RELEASES_DIR to <backend>\app\apk_releases (never the service CWD),
+# so the dev apk_releases/ folder is mirrored there explicitly.
+$srcApkDir = Join-Path $Source 'apk_releases'
+if (Test-Path $srcApkDir) {
+    Write-Host '==> Copying APK releases (apk_releases -> backend\app\apk_releases) ...'
+    Invoke-NativeCommand { & robocopy $srcApkDir (Join-Path $TargetDir 'backend\app\apk_releases') /E /R:2 /W:3 /NFL /NDL /NP }
+    if ($LASTEXITCODE -ge 8) { throw "robocopy (APK releases) failed with exit code $LASTEXITCODE" }
+}
+
 # --- 3. Install any new dependencies ------------------------------------------
 Write-Host '==> Installing dependencies (new/changed) ...'
 Invoke-NativeCommand { & $venvPython -m pip install -r (Join-Path $TargetDir 'backend\requirements.txt') }

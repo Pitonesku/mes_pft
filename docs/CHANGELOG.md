@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.2.0] - 2026-11-02 (build 53) - po->mo rename, Odoo guardrails, A3-A9, web Runs & Audit
 
+### Production updated to 2.2.0 b55 (2026-11-02)
+- Deployed the full v2.2.0 build to the production MES server (backend, migrations 0028-0030, web console b55) via scripts/update_server.ps1.
+- Tablet auto-update now serves build 55 on production: the backend's APK directory is `<backend>/app/apk_releases` (main.py resolves a relative APK_RELEASES_DIR against the app dir, not the service CWD). update_server.ps1 now mirrors the dev apk_releases/ folder into that location on every deploy.
+
 ### Web console update banner fixed (2026-11-02)
 - Fixed the stuck "New version available on the server - reload to update." banner: it compared the running web build against the newest **APK** on the server, so any APK-only release (b54/b55) made it appear forever - pressing Reload re-downloaded the same stale web bundle and nothing changed.
 - The banner now compares the running web build against the **served web bundle** (`/version.json`, same origin, new `ApiService.fetchServedWebVersion()`). It only appears when the server's web bundle is genuinely newer, so Reload always actually updates. APK-only releases no longer trigger it; the APK build number stays visible on the About card (`latestBuild`).
