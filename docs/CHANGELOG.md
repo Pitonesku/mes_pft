@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.2.0] - 2026-11-02 (build 53) - po->mo rename, Odoo guardrails, A3-A9, web Runs & Audit
 
 ### Fixed shift windows + bug reporting (2026-11-02, build 56)
+- NOTE (2026-11-02): this release was REVERTED ON PRODUCTION at the request of the user. Production was rolled back to the previous state: backend + web console = hotfix state (commit 46c0895, web build 55), DB migration 0031 downgraded (bug_reports tables dropped), and the b56 APK removed from the production apk_releases (auto-update serves build 55). The code remains intact on master for a future redeploy.
+
 - **QC by fixed shifts:** the web Quality Control screen now defaults to fixed plant shifts (06:00-14:00 / 14:00-22:00 / 22:00-06:00) computed from each measurement's timestamp, independent of fragile tablet sessions. Opening a shift late (e.g. 21:00), re-logins or app updates can no longer hide measurements - everything measured inside a window always shows under it (`/api/v2/quality?fixed_shift=...`, new `fixed_shifts` in `/quality/filters`; pure window math in `services/shift_windows.py`).
 - **Tablet shift resume:** when a machine already has an open shift, the operator can now RESUME it (re-attach via the new `GET /api/v2/machines/{id}/active-shift`) instead of fragmenting the day into extra sessions.
 - **Bug report button:** new "Report a bug" button in the web console sidebar (under the menu) and in the tablet operator top bar. Reports carry user name, date/time, text (<= 2000 chars) and up to 3 image attachments; stored server-side (migration 0031, `bug_reports` + `bug_report_attachments`). Managers/admins review and resolve them in the new web "Bug Reports" section.
