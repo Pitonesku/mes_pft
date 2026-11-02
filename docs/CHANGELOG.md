@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.2.0] - 2026-11-02 (build 53) - po->mo rename, Odoo guardrails, A3-A9, web Runs & Audit
 
+### Link by clock time to fixed shifts, order = mo_ref OR Sample ID (2026-11-02, late night)
+- **Root cause of unlinked order samples:** the station leaves `mo_ref` empty and the operator types the order number into the Sample ID field (e.g. `2610/110`); the earlier "has an order" test looked at `mo_ref` only (reported 0, really 953 on prod). A sample now has an order when `mo_ref` is set OR its Sample ID equals an existing order number (`shift_resolver.sample_order_ref`); ingest fills an empty `mo_ref` from it (additive).
+- **Linking by time needs no opened session:** when no session covers a measurement, the resolver maps its timestamp to the fixed window (06-14 / 14-22 / 22-06) and links to that window's session; if none exists a closed session covering exactly that window is synthesized (`source='fixed-window'`, no operator), reused afterwards, never duplicated. The fixed window now wins over the 15-minute post-close grace window (a rod at 14:10 is Shift 2, not Shift 1).
+- Synthesized sessions are hidden from the Runs & Audit timeline and carry no runs (nothing is pushed to Odoo).
+- A sample linked by clock to a run-less synthesized session is never flagged MO_MISMATCH; relink repairs such statuses (`status_repaired`).
+- QC PO filter also matches rods by order label, so rods without a production run still show under their order.
+- Production relink: 953 samples with an order linked (49 window sessions created), 905 mislabeled MO_MISMATCH repaired, unlinked-with-order = 0. PO 2610/110 now shows Shift 1: 400, Shift 2: 580, Shift 3: 150 rods (entire PO 1140). 425 backend tests OK.
+
 ### QC "No data from server" fix + order-only relink (2026-11-02, night)
 - **Root cause of "No data from server" whenever a PO was selected:** every /api/v2/quality request computed the certificate-style `report` payload (`compute_order_summary`, ~13.5 s for PO 2610/110) even though only Print Report uses it, so the 30 s client timeout / superseded requests left the screen empty. The payload is now computed ONLY with `include_report=1` / `include_raw=1` (Print Report), plus a fingerprinted 120 s cache (invalidated by any new rod). PO-filtered views dropped from ~13.5 s to 0.06-0.22 s on production (1050 rods for 2610/110 in 0.22 s).
 - Frontend: stale out-of-order responses are ignored (request sequence guard), client timeout raised to 60 s, Print Report requests the heavy payload explicitly.

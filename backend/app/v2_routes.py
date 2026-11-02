@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
-from sqlalchemy import case, func, or_
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -303,7 +303,9 @@ def list_shifts(
     started_before: Optional[datetime] = None,
     db: Session = Depends(get_db),
 ):
-    q = db.query(models.ShiftSession)
+    q = db.query(models.ShiftSession).filter(
+        models.ShiftSession.source != shift_resolver.FIXED_WINDOW_SOURCE
+    )
     if machine_id is not None:
         q = q.filter(models.ShiftSession.machine_id == machine_id)
     if status == "active":
@@ -1138,16 +1140,23 @@ async def ingest_quality(
 
     machine_id = shift_resolver.resolve_machine(db, "quantum_neo", "maker", sample.maker)
     produced_at = local_to_utc(sample.produced_on) or _utcnow()
+    # The operator often types the order number into Sample ID while the station
+    # MO field stays empty: derive the order so the sample matches its run.
+    effective_mo = shift_resolver.sample_order_ref(db, sample.mo_ref, sample.sample_id)
 
     kind, is_non_production = shift_resolver.classify_sample(sample.maker)
     shift_id, link_status = (None, shift_resolver.LINK_NON_PRODUCTION) if is_non_production else shift_resolver.resolve_shift(db, machine_id, produced_at)
     run_id: Optional[int] = None
     if shift_id is not None:
         run_id, run_status = shift_resolver.resolve_run(
-            db, shift_id, produced_at, sample.mo_ref, machine_id=machine_id,
+            db, shift_id, produced_at, effective_mo or sample.mo_ref, machine_id=machine_id,
             sample_id=sample.sample_id,
         )
-        if run_status == shift_resolver.LINK_MO_MISMATCH:
+        if (
+            run_status == shift_resolver.LINK_MO_MISMATCH
+            and link_status != shift_resolver.LINK_FIXED_WINDOW
+            and _shift_has_runs(db, shift_id)
+        ):
             link_status = shift_resolver.LINK_MO_MISMATCH
 
     db_sample = models.QualitySample(
@@ -1155,7 +1164,7 @@ async def ingest_quality(
         link_status=link_status, link_source="auto", kind=kind,
         source_instrument_id=sample.instrument_id,
         source_maker=sample.maker, source_team=sample.team,
-        sample_id=sample.sample_id, mo_ref=sample.mo_ref,
+        sample_id=sample.sample_id, mo_ref=effective_mo or sample.mo_ref,
         brand=sample.brand, operator=sample.operator,
         comments=sample.reserve_1,
         produced_at=produced_at,
@@ -1183,6 +1192,15 @@ async def ingest_quality(
     return {"status": "processed", "sample_id": db_sample.id, "shift_id": shift_id, "rods": len(sample.rods)}
 
 
+def _shift_has_runs(db: Session, shift_id: int) -> bool:
+    return (
+        db.query(models.ProductionRun.id)
+        .filter(models.ProductionRun.shift_id == shift_id)
+        .first()
+        is not None
+    )
+
+
 @router.post("/quality/relink")
 def relink_unlinked(
     db: Session = Depends(get_db),
@@ -1190,25 +1208,31 @@ def relink_unlinked(
 ):
     """(admin) Re-run shift/run resolution over samples that are still unlinked."""
     _require_superadmin(current_user)
-    # Relink only samples that carry an order (MO). Order-less station runs are
-    # never auto-linked by this sweep (they stay visible through the fixed-window
-    # QC view).
-    samples = (
+    # Relink only samples that carry an order: mo_ref set, or a Sample ID that
+    # is an existing order number. Order-less station runs are never auto-linked.
+    fixed_ids = select(models.ShiftSession.id).where(
+        models.ShiftSession.source == shift_resolver.FIXED_WINDOW_SOURCE
+    )
+    repaired = (
         db.query(models.QualitySample)
         .filter(
-            models.QualitySample.shift_id.is_(None),
-            func.btrim(func.coalesce(models.QualitySample.mo_ref, "")) != "",
+            models.QualitySample.link_status == shift_resolver.LINK_MO_MISMATCH,
+            models.QualitySample.shift_id.in_(fixed_ids),
         )
+        .update({"link_status": shift_resolver.LINK_FIXED_WINDOW}, synchronize_session=False)
+    )
+    unlinked = (
+        db.query(models.QualitySample)
+        .filter(models.QualitySample.shift_id.is_(None))
         .all()
     )
-    without_order = (
-        db.query(func.count(models.QualitySample.id))
-        .filter(
-            models.QualitySample.shift_id.is_(None),
-            func.btrim(func.coalesce(models.QualitySample.mo_ref, "")) == "",
-        )
-        .scalar()
-    ) or 0
+    samples = []
+    without_order = 0
+    for s in unlinked:
+        if shift_resolver.sample_order_ref(db, s.mo_ref, s.sample_id):
+            samples.append(s)
+        else:
+            without_order += 1
     relinked = 0
     for s in samples:
         if s.machine_id is None or s.produced_at is None:
@@ -1217,11 +1241,18 @@ def relink_unlinked(
         if shift_id is not None:
             s.shift_id = shift_id
             s.link_status = link_status
+            order = shift_resolver.sample_order_ref(db, s.mo_ref, s.sample_id)
+            if order and not (s.mo_ref or "").strip():
+                s.mo_ref = order  # additive: only fills an empty order reference
             run_id, run_status = shift_resolver.resolve_run(
-                db, shift_id, s.produced_at, s.mo_ref, machine_id=s.machine_id,
+                db, shift_id, s.produced_at, order or s.mo_ref, machine_id=s.machine_id,
                 sample_id=s.sample_id,
             )
-            if run_status == shift_resolver.LINK_MO_MISMATCH:
+            if (
+                run_status == shift_resolver.LINK_MO_MISMATCH
+                and link_status != shift_resolver.LINK_FIXED_WINDOW
+                and _shift_has_runs(db, shift_id)
+            ):
                 s.link_status = shift_resolver.LINK_MO_MISMATCH
             s.run_id = run_id
             db.query(models.QualityMeasurement).filter(
@@ -1233,6 +1264,7 @@ def relink_unlinked(
         "total_unlinked": len(samples),
         "relinked": relinked,
         "without_order": without_order,
+        "status_repaired": repaired,
     }
 
 
@@ -1243,8 +1275,12 @@ def unlinked_summary(
 ):
     """(admin) True totals behind the unlinked-samples card (the list is capped)."""
     _require_superadmin(current_user)
-    has_mo = func.btrim(func.coalesce(models.QualitySample.mo_ref, "")) != ""
     unlinked = models.QualitySample.shift_id.is_(None)
+    po_numbers = select(models.PurchaseOrder.mo_number)
+    has_mo = or_(
+        func.btrim(func.coalesce(models.QualitySample.mo_ref, "")) != "",
+        func.btrim(func.coalesce(models.QualitySample.sample_id, "")).in_(po_numbers),
+    )
     with_order = db.query(func.count(models.QualitySample.id)).filter(unlinked, has_mo).scalar() or 0
     without_order = db.query(func.count(models.QualitySample.id)).filter(unlinked, ~has_mo).scalar() or 0
     mismatch = (
@@ -3508,7 +3544,26 @@ def quality_overview(
         base = base.filter(models.QualityMeasurement.shift_id == shift_id)
     if po_id is not None:
         run_ids = [r[0] for r in db.query(models.ProductionRun.id).filter(models.ProductionRun.po_id == po_id).all()]
-        base = base.filter(models.QualityMeasurement.run_id.in_(run_ids))
+        po_row = db.get(models.PurchaseOrder, po_id)
+        po_label = (po_row.mo_number or "").strip() if po_row is not None else ""
+        if po_label:
+            labelled = (
+                select(models.QualitySample.id)
+                .where(
+                    or_(
+                        func.btrim(func.coalesce(models.QualitySample.sample_id, "")) == po_label,
+                        func.btrim(func.coalesce(models.QualitySample.mo_ref, "")) == po_label,
+                    )
+                )
+            )
+            base = base.filter(
+                or_(
+                    models.QualityMeasurement.run_id.in_(run_ids),
+                    models.QualityMeasurement.sample_id.in_(labelled),
+                )
+            )
+        else:
+            base = base.filter(models.QualityMeasurement.run_id.in_(run_ids))
 
     asc = (models.QualityMeasurement.measured_at, models.QualityMeasurement.sample_id, models.QualityMeasurement.rod_no)
     if window == "rods":

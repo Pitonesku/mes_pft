@@ -74,15 +74,35 @@ class RelinkOrderOnlyTests(DbTestCase):
         with mock.patch.object(v2_routes, "_require_superadmin", return_value=None):
             return v2_routes.unlinked_summary(db=self.db, current_user=self.admin)
 
+    def _relink(self):
+        with mock.patch.object(v2_routes, "_require_superadmin", return_value=None):
+            return v2_routes.relink_unlinked(db=self.db, current_user=self.admin)
+
     def test_relink_skips_samples_without_order(self):
         ts = datetime(2018, 3, 3, 10, 0, tzinfo=timezone.utc)
         no_order = _mk_sample(self.db, self.m1, "", ts)
-        with mock.patch.object(v2_routes, "_require_superadmin", return_value=None):
-            res = v2_routes.relink_unlinked(db=self.db, current_user=self.admin)
+        no_order.sample_id = "B027-free-label"  # not an order number
+        self.db.flush()
+        res = self._relink()
         self.db.refresh(no_order)
         self.assertIsNone(no_order.shift_id)
         self.assertGreaterEqual(res["without_order"], 1)
-        self.assertEqual(res["relinked"], 0)
+
+    def test_relink_links_sample_whose_sample_id_is_an_order(self):
+        # The station leaves mo_ref empty; the operator types the order number
+        # into Sample ID. 2018-03-03 10:00 UTC = 11:00 local -> Shift 1 window.
+        ts = datetime(2018, 3, 3, 10, 0, tzinfo=timezone.utc)
+        s = _mk_sample(self.db, self.m1, "", ts)
+        s.sample_id = self.po_a.mo_number
+        self.db.flush()
+        res = self._relink()
+        self.db.refresh(s)
+        self.assertGreaterEqual(res["relinked"], 1)
+        self.assertIsNotNone(s.shift_id)
+        self.assertEqual(s.link_status, "FIXED_WINDOW")
+        self.assertEqual(s.mo_ref, self.po_a.mo_number)  # additive fill of empty mo_ref
+        sess = self.db.get(models.ShiftSession, s.shift_id)
+        self.assertEqual(sess.shift_name, "Shift 1")
 
 
 if __name__ == "__main__":

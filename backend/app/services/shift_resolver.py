@@ -34,6 +34,7 @@ LINK_NON_PRODUCTION = "NON_PRODUCTION"
 LINK_CLOCK_SKEW = "CLOCK_SKEW"
 LINK_MO_MISMATCH = "MO_MISMATCH"
 LINK_FIXED_WINDOW = "FIXED_WINDOW"
+FIXED_WINDOW_SOURCE = "fixed-window"  # shift_sessions.source of synthesized sessions
 
 DEFAULT_GRACE_MINUTES = 15
 DEFAULT_CLOCK_SKEW_MINUTES = 10
@@ -122,6 +123,16 @@ def resolve_shift(
     if shift:
         return shift.id, LINK_LINKED
 
+    # Fixed factory windows (06-14 / 14-22 / 22-06) take precedence over the
+    # post-close grace window: a rod measured at 14:10 belongs to Shift 2 by the
+    # clock, even though a Shift 1 session closed 10 minutes earlier. When no
+    # session of that window exists (nobody opened a shift on the tablet), a
+    # closed session covering the fixed window is synthesized so the measurement
+    # still links by time.
+    fixed_session = _resolve_by_fixed_window(session, machine_id, ts)
+    if fixed_session is not None:
+        return fixed_session.id, LINK_FIXED_WINDOW
+
     # Grace window: the latest run on this machine that ended within ``grace`` of ts
     # (QC samples pulled right after a close / machine change).
     grace_end = ts - timedelta(minutes=grace_minutes)
@@ -154,21 +165,31 @@ def resolve_shift(
     if shift:
         return shift.id, LINK_LINKED_GRACE
 
-    # Fixed factory windows (06-14 / 14-22 / 22-06): when no session interval
-    # covers the timestamp (e.g. the gap between an auto-closed session and a
-    # late re-opened one), link the sample to the session of the fixed shift
-    # the timestamp belongs to. Machine-matched sessions win; otherwise the
-    # same-name session overlapping that window's date is used.
-    fixed_session = _resolve_by_fixed_window(session, machine_id, ts)
-    if fixed_session is not None:
-        return fixed_session.id, LINK_FIXED_WINDOW
-
     return None, LINK_NO_SHIFT
 
 
-def _resolve_by_fixed_window(session: Session, machine_id: int, ts: datetime):
-    """Map a timestamp to its fixed plant window, then to the shift session with
-    the matching shift name on that window's date. Returns the session or None."""
+def sample_order_ref(session: Session, mo_ref: Optional[str], sample_id: Optional[str]) -> str:
+    """The order (MO) number a sample belongs to.
+
+    The station often leaves ``mo_ref`` empty and the operator types the order
+    number into the Sample ID field, so ``sample_id`` counts as the order when it
+    equals an existing order number. Returns "" when there is none."""
+    ref = (mo_ref or "").strip()
+    if ref:
+        return ref
+    sid = (sample_id or "").strip()
+    if sid and (
+        session.query(models.PurchaseOrder.id)
+        .filter(models.PurchaseOrder.mo_number == sid)
+        .first()
+        is not None
+    ):
+        return sid
+    return ""
+
+
+def _fixed_window_for(session: Session, ts: datetime):
+    """The fixed plant window (name, start, end) containing ``ts``, or None."""
     try:
         from app.config import get_plant_timezone
         from app.services import shift_windows
@@ -180,24 +201,49 @@ def _resolve_by_fixed_window(session: Session, machine_id: int, ts: datetime):
     ]
     if not templates:
         return None
-    win = shift_windows.window_for(templates, ts, get_plant_timezone())
+    return shift_windows.window_for(templates, ts, get_plant_timezone())
+
+
+def _resolve_by_fixed_window(session: Session, machine_id: int, ts: datetime, create: bool = True):
+    """Map a timestamp to its fixed plant window, then to the shift session of
+    that window on that machine.
+
+    An existing session overlapping the window wins (machine-matched first). When
+    none exists and ``create`` is set, a closed session covering exactly the
+    fixed window is synthesized (``source='fixed-window'``, no operator), so a
+    measurement links by clock time even if nobody opened a shift on the tablet.
+    Never duplicates: overlapping sessions of any source are reused."""
+    win = _fixed_window_for(session, ts)
     if win is None:
         return None
+    start_utc = win.start.astimezone(timezone.utc)
+    end_utc = win.end.astimezone(timezone.utc)
     q = session.query(models.ShiftSession).filter(
         models.ShiftSession.shift_name == win.name,
-        models.ShiftSession.started_at < win.end,
-    )
-    q = q.filter(
-        (models.ShiftSession.ended_at.is_(None))
-        | (models.ShiftSession.ended_at > win.start)
+        models.ShiftSession.started_at < end_utc,
+        (models.ShiftSession.ended_at.is_(None)) | (models.ShiftSession.ended_at > start_utc),
     )
     candidates = q.order_by(models.ShiftSession.started_at.desc()).all()
-    if not candidates:
-        return None
     for s in candidates:
         if s.machine_id == machine_id:
             return s
-    return candidates[0]
+    if not create:
+        return candidates[0] if candidates else None
+    synthetic = models.ShiftSession(
+        machine_id=machine_id,
+        operator_id=None,
+        shift_name=win.name,
+        started_at=start_utc,
+        ended_at=end_utc,
+        status="CLOSED",
+        source=FIXED_WINDOW_SOURCE,
+        plant_tz=str(win.start.tzinfo),
+        closed_at=end_utc,
+        time_confidence="derived",
+    )
+    session.add(synthetic)
+    session.flush()
+    return synthetic
 
 
 def _has_machine_run():
