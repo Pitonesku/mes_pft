@@ -304,6 +304,9 @@ def get_reports(start_date: str | None = None, end_date: str | None = None, incl
     result = []
     for report in reports:
         report_item = {col.name: getattr(report, col.name) for col in report.__table__.columns}
+        # po_number alias: migration 0030 renamed the column to mo_number;
+        # legacy clients and schemas.Report still read po_number.
+        report_item['po_number'] = report_item.get('mo_number') or ''
         # Ensure sync_at is returned as UTC ISO string with 'Z' suffix so Flutter can parse timezone correctly
         if report_item.get('sync_at') is not None:
             sync_val = report_item['sync_at']
@@ -387,6 +390,9 @@ def get_last_report_by_machine(machine_name: str, db: Session = Depends(get_db))
         raise HTTPException(status_code=404, detail="No reports found for this machine")
 
     report_item = {col.name: getattr(report, col.name) for col in report.__table__.columns}
+    # po_number alias: migration 0030 renamed the column to mo_number;
+    # legacy clients and schemas.Report still read po_number.
+    report_item['po_number'] = report_item.get('mo_number') or ''
 
     # Include material lists from materials_json if available
     try:
@@ -430,6 +436,9 @@ def get_report_by_id(report_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Report not found")
 
     report_item = {col.name: getattr(r, col.name) for col in r.__table__.columns}
+    # po_number alias: migration 0030 renamed the column to mo_number;
+    # legacy clients and schemas.Report still read po_number.
+    report_item['po_number'] = report_item.get('mo_number') or ''
 
     # Ensure sync_at is returned as UTC ISO string with 'Z' suffix
     if report_item.get('sync_at') is not None:
@@ -1423,6 +1432,9 @@ def get_deleted_reports(
     result = []
     for report in reports:
         report_item = {col.name: getattr(report, col.name) for col in report.__table__.columns}
+        # po_number alias: migration 0030 renamed the column to mo_number;
+        # legacy clients and schemas.Report still read po_number.
+        report_item['po_number'] = report_item.get('mo_number') or ''
         if report_item.get('sync_at') is not None:
             sync_val = report_item['sync_at']
             if hasattr(sync_val, 'isoformat'):

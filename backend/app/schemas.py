@@ -131,6 +131,7 @@ class ReportBase(BaseModel):
     machine_name: str
     operator_name: str
     po_number: str
+    mo_number: Optional[str] = None
     boxes_produced: int
     quarantine_boxes: Optional[int] = 0  # finished boxes pending engineering inspection
     waste_kg: float
