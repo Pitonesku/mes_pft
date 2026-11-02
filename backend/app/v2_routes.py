@@ -1190,11 +1190,25 @@ def relink_unlinked(
 ):
     """(admin) Re-run shift/run resolution over samples that are still unlinked."""
     _require_superadmin(current_user)
+    # Relink only samples that carry an order (MO). Order-less station runs are
+    # never auto-linked by this sweep (they stay visible through the fixed-window
+    # QC view).
     samples = (
         db.query(models.QualitySample)
-        .filter(models.QualitySample.shift_id.is_(None))
+        .filter(
+            models.QualitySample.shift_id.is_(None),
+            func.btrim(func.coalesce(models.QualitySample.mo_ref, "")) != "",
+        )
         .all()
     )
+    without_order = (
+        db.query(func.count(models.QualitySample.id))
+        .filter(
+            models.QualitySample.shift_id.is_(None),
+            func.btrim(func.coalesce(models.QualitySample.mo_ref, "")) == "",
+        )
+        .scalar()
+    ) or 0
     relinked = 0
     for s in samples:
         if s.machine_id is None or s.produced_at is None:
@@ -1215,7 +1229,34 @@ def relink_unlinked(
             ).update({"shift_id": shift_id, "run_id": run_id}, synchronize_session=False)
             relinked += 1
     db.commit()
-    return {"total_unlinked": len(samples), "relinked": relinked}
+    return {
+        "total_unlinked": len(samples),
+        "relinked": relinked,
+        "without_order": without_order,
+    }
+
+
+@router.get("/quality/unlinked-summary")
+def unlinked_summary(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """(admin) True totals behind the unlinked-samples card (the list is capped)."""
+    _require_superadmin(current_user)
+    has_mo = func.btrim(func.coalesce(models.QualitySample.mo_ref, "")) != ""
+    unlinked = models.QualitySample.shift_id.is_(None)
+    with_order = db.query(func.count(models.QualitySample.id)).filter(unlinked, has_mo).scalar() or 0
+    without_order = db.query(func.count(models.QualitySample.id)).filter(unlinked, ~has_mo).scalar() or 0
+    mismatch = (
+        db.query(func.count(models.QualitySample.id))
+        .filter(models.QualitySample.link_status == "MO_MISMATCH")
+        .scalar()
+    ) or 0
+    return {
+        "with_order": with_order,
+        "without_order": without_order,
+        "mo_mismatch": mismatch,
+    }
 
 
 @router.get("/quality/unlinked-samples")
@@ -3287,6 +3328,35 @@ def _quality_header(db: Session, machine, shift, po_id) -> Dict[str, Any]:
     return header
 
 
+_ORDER_SUMMARY_CACHE: Dict[int, tuple] = {}
+_ORDER_SUMMARY_TTL_SECONDS = 120
+
+
+def _cached_order_summary(db: Session, po_id: int) -> Dict[str, Any]:
+    """compute_order_summary for the print-report path with a short TTL cache.
+
+    The fingerprint (rod count + latest measurement id of the order's runs) makes
+    any new measurement invalidate the entry immediately, so the printed
+    certificate is never stale. Odoo finalisation does NOT use this cache."""
+    import time
+
+    run_ids = [r[0] for r in db.query(models.ProductionRun.id).filter(models.ProductionRun.po_id == po_id).all()]
+    if run_ids:
+        n, last_id = db.query(
+            func.count(models.QualityMeasurement.id), func.max(models.QualityMeasurement.id)
+        ).filter(models.QualityMeasurement.run_id.in_(run_ids)).one()
+    else:
+        n, last_id = 0, None
+    fingerprint = (n, last_id, len(run_ids))
+    hit = _ORDER_SUMMARY_CACHE.get(po_id)
+    now = time.monotonic()
+    if hit and hit[0] == fingerprint and now - hit[1] < _ORDER_SUMMARY_TTL_SECONDS:
+        return hit[2]
+    summary = aggregation.compute_order_summary(db, po_id)
+    _ORDER_SUMMARY_CACHE[po_id] = (fingerprint, now, summary)
+    return summary
+
+
 def _quality_report_payload(
     db: Session, header: Dict[str, Any], po_id: Optional[int], shift,
     run_id: Optional[int] = None,
@@ -3318,7 +3388,7 @@ def _quality_report_payload(
         "operator": header.get("operator"),
     }
     if po_id is not None:
-        s = aggregation.compute_order_summary(db, po_id)
+        s = _cached_order_summary(db, po_id)
         return {
             **base,
             "scope": "mo",
@@ -3368,6 +3438,7 @@ def quality_overview(
     fmt: str = Query(default="json"),
     include_raw: bool = Query(default=False),
     fixed_shift: Optional[str] = Query(default=None),
+    include_report: bool = Query(default=False),
     db: Session = Depends(get_db),
 ):
     if window not in ("rods", "shift", "po", "all"):
@@ -3535,7 +3606,13 @@ def quality_overview(
         db_report = db.get(models.ProductionReport, report_id)
         if db_report is not None:
             run_id = db_report.run_id
-    report = _quality_report_payload(db, header, po_id, shift, run_id=run_id)
+    # The certificate-style payload is heavy (compute_order_summary took ~13 s
+    # for a large PO) and only the Print Report dialog needs it: compute it on
+    # demand (include_raw / include_report), never for the regular table + charts.
+    report = (
+        _quality_report_payload(db, header, po_id, shift, run_id=run_id)
+        if (include_raw or include_report) else None
+    )
     raw_rows = [row_of(r) for r in rods] if include_raw else None
 
     return {

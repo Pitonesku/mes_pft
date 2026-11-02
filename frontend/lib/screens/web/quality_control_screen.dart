@@ -55,14 +55,20 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
   bool _loading = true;
   String? _error;
   List<dynamic>? _unlinked;
+  Map<String, dynamic>? _unlinkedSummary;
   bool _relinking = false;
+  int _loadSeq = 0; // ignores stale out-of-order responses on rapid filter changes
   bool get _isSuperAdmin => widget.user.role == UserRole.superAdmin;
 
   Future<void> _loadUnlinked() async {
     if (!_isSuperAdmin) return;
     final rows = await ApiService.fetchUnlinkedSamples();
+    final summary = await ApiService.fetchUnlinkedSummary();
     if (!mounted) return;
-    setState(() => _unlinked = rows);
+    setState(() {
+      _unlinked = rows;
+      _unlinkedSummary = summary;
+    });
   }
 
   Future<void> _relinkNow() async {
@@ -70,12 +76,17 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
     final result = await ApiService.relinkUnlinkedSamples();
     if (!mounted) return;
     setState(() => _relinking = false);
-    final remaining = result == null ? null : (result['total_unlinked'] ?? 0) - (result['relinked'] ?? 0);
+    final withOrder = result == null ? 0 : (result['total_unlinked'] ?? 0) as int;
+    final relinked = result == null ? 0 : (result['relinked'] ?? 0) as int;
+    final withoutOrder = result == null ? 0 : (result['without_order'] ?? 0) as int;
+    final remaining = withOrder - relinked;
     final msg = result == null
         ? 'Relink failed: ${ApiService.lastApiDetail ?? 'unknown error'}'
-        : (remaining != null && remaining > 0
-            ? 'Relinked ${result['relinked']} of ${result['total_unlinked']} samples - $remaining remain (no shift session covers their time)'
-            : 'Relinked ${result['relinked']} of ${result['total_unlinked']} samples');
+        : (withOrder == 0
+            ? 'Nothing to relink: no unlinked samples carry an order. $withoutOrder samples without an order were left untouched.'
+            : 'Relinked $relinked of $withOrder samples with an order'
+                '${remaining > 0 ? ' - $remaining remain (no shift session covers their time)' : ''}'
+                '. $withoutOrder samples without an order were left untouched.');
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
     await _loadUnlinked();
   }
@@ -115,6 +126,7 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
   }
 
   Future<void> _load() async {
+    final seq = ++_loadSeq;
     setState(() { _loading = true; _error = null; });
     final d = await ApiService.fetchQualityData(
       machine: _machine,
@@ -130,7 +142,7 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
           ? null
           : _shiftChoice.value as String,
     );
-    if (!mounted) return;
+    if (!mounted || seq != _loadSeq) return; // a newer request superseded this one
     setState(() {
       _data = d;
       _loading = false;
@@ -194,14 +206,21 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
 
   Widget _unlinkedCard() {
     final rows = _unlinked ?? const [];
+    final s = _unlinkedSummary;
+    final withOrder = (s?['with_order'] ?? 0) as int;
+    final withoutOrder = (s?['without_order'] ?? 0) as int;
+    final mismatch = (s?['mo_mismatch'] ?? 0) as int;
     final title = _unlinked == null
-        ? 'Unlinked / mismatched samples: loading…'
-        : 'Unlinked / mismatched samples: ${rows.length}';
+        ? 'Unlinked / mismatched samples: loading...'
+        : (s == null
+            ? 'Unlinked / mismatched samples: ${rows.length}'
+            : 'Unlinked samples: $withOrder with an order, $withoutOrder without an order'
+                '${mismatch > 0 ? ' - $mismatch MO_MISMATCH' : ''}');
     return Card(
       child: ExpansionTile(
         leading: const Icon(Icons.link_off, color: Colors.orange),
         title: Text(title),
-        subtitle: const Text('Admin review — MO_MISMATCH and shift-less samples'),
+        subtitle: const Text('Relink only processes samples that carry an order. Samples without an order are shown in QC via the fixed shift windows. The list below is capped at 200.'),
         trailing: TextButton.icon(
           icon: _relinking
               ? const SizedBox(
@@ -607,6 +626,7 @@ class _QualityControlScreenState extends State<QualityControlScreen> {
       page: 1,
       pageSize: 50,
       includeRaw: true,
+      includeReport: true,
     );
     if (!mounted) return;
     if (d == null) {

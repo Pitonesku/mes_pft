@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.2.0] - 2026-11-02 (build 53) - po->mo rename, Odoo guardrails, A3-A9, web Runs & Audit
 
+### QC "No data from server" fix + order-only relink (2026-11-02, night)
+- **Root cause of "No data from server" whenever a PO was selected:** every /api/v2/quality request computed the certificate-style `report` payload (`compute_order_summary`, ~13.5 s for PO 2610/110) even though only Print Report uses it, so the 30 s client timeout / superseded requests left the screen empty. The payload is now computed ONLY with `include_report=1` / `include_raw=1` (Print Report), plus a fingerprinted 120 s cache (invalidated by any new rod). PO-filtered views dropped from ~13.5 s to 0.06-0.22 s on production (1050 rods for 2610/110 in 0.22 s).
+- Frontend: stale out-of-order responses are ignored (request sequence guard), client timeout raised to 60 s, Print Report requests the heavy payload explicitly.
+- **Relink processes only samples that carry an order (mo_ref).** Order-less samples are never auto-linked by the sweep and are reported separately (`without_order`). New `GET /api/v2/quality/unlinked-summary` returns the true totals; the QC card shows "N with an order, M without an order" instead of the capped list length (production: 0 with order, 10,434 without).
+- 419 backend tests OK. Deployed to production.
+
 ### Fixed-window linking + 4-entry shift dropdown + report-sync FK guard (2026-11-02, evening)
 - **Relink now links by fixed shift windows:** samples falling in the gap between sessions (e.g. M2 2026-11-02, Shift 1 auto-closed 14:00 local, Shift 2 re-opened 20:23) now link to the session of the fixed shift their timestamp belongs to (`shift_resolver` FIXED_WINDOW fallback, used by both ingest and the relink sweep). Prod relink run: 140 samples linked, including all 22 gap samples -> Shift 2 session 524.
 - **QC Shift dropdown is exactly 4 entries:** All shifts / Current shift / the two other fixed windows. Session entries (and the machine-labeled rows) are gone.

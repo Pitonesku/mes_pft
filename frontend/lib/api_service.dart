@@ -1050,6 +1050,7 @@ class ApiService {
     int page = 1,
     int pageSize = 50,
     bool includeRaw = false,
+    bool includeReport = false,
     String? fixedShift,
   }) async {
     try {
@@ -1066,9 +1067,10 @@ class ApiService {
       if (date != null) qp['date'] = date;
       if (shiftName != null) qp['shift_name'] = shiftName;
       if (includeRaw) qp['include_raw'] = '1';
+      if (includeReport) qp['include_report'] = '1';
       if (fixedShift != null) qp['fixed_shift'] = fixedShift;
       final uri = Uri.parse('$effectiveBaseUrl/v2/quality').replace(queryParameters: qp);
-      final response = await _httpClient.get(uri).timeout(const Duration(seconds: 30));
+      final response = await _httpClient.get(uri).timeout(const Duration(seconds: 60));
       if (response.statusCode == 200) {
         return jsonDecode(response.body) as Map<String, dynamic>;
       }
@@ -2079,6 +2081,23 @@ class ApiService {
   }
 
   /// (admin) Samples still unlinked or flagged (MO_MISMATCH etc.).
+  /// True totals behind the unlinked-samples card (the list itself is capped).
+  static Future<Map<String, dynamic>?> fetchUnlinkedSummary() async {
+    try {
+      final response = await _httpClient
+          .get(Uri.parse('$effectiveBaseUrl/v2/quality/unlinked-summary'),
+              headers: _authHeaders())
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      return null;
+    } catch (e) {
+      AppLog.e("fetchUnlinkedSummary error: $e");
+      return null;
+    }
+  }
+
   static Future<List<dynamic>?> fetchUnlinkedSamples() async {
     try {
       final response = await _httpClient
