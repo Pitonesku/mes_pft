@@ -1,5 +1,5 @@
 import datetime
-from sqlalchemy import Column, Integer, BigInteger, String, Boolean, ForeignKey, DateTime, Date, Numeric, Text, Float
+from sqlalchemy import Column, Integer, BigInteger, String, Boolean, ForeignKey, DateTime, Date, Numeric, Text, Float, LargeBinary
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -808,3 +808,34 @@ class OdooOutbox(Base):
     odoo_model = Column(String(100), nullable=True)
     odoo_id = Column(Integer, nullable=True)
     last_error = Column(Text, nullable=True)
+
+
+class BugReport(Base):
+    """User-submitted bug / suggestion (web console + tablet)."""
+
+    __tablename__ = "bug_reports"
+    id = Column(BigInteger, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    username = Column(String(120), nullable=False)          # snapshot at submit time
+    source = Column(String(20), nullable=False, default="web")  # web | tablet
+    text = Column(String(2000), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    status = Column(String(20), nullable=False, default="NEW")  # NEW | IN_PROGRESS | RESOLVED
+    resolved_by = Column(String(120), nullable=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    resolution_note = Column(String(2000), nullable=True)
+
+    attachments = relationship("BugReportAttachment", back_populates="report",
+                               cascade="all, delete-orphan")
+
+
+class BugReportAttachment(Base):
+    __tablename__ = "bug_report_attachments"
+    id = Column(BigInteger, primary_key=True, index=True)
+    bug_report_id = Column(BigInteger, ForeignKey("bug_reports.id"), nullable=False, index=True)
+    filename = Column(String(255), nullable=False)
+    mime = Column(String(100), nullable=False)
+    size_bytes = Column(Integer, nullable=False)
+    data = Column(LargeBinary, nullable=False)
+
+    report = relationship("BugReport", back_populates="attachments")

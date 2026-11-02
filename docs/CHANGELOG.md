@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.2.0] - 2026-11-02 (build 53) - po->mo rename, Odoo guardrails, A3-A9, web Runs & Audit
 
+### Fixed shift windows + bug reporting (2026-11-02, build 56)
+- **QC by fixed shifts:** the web Quality Control screen now defaults to fixed plant shifts (06:00-14:00 / 14:00-22:00 / 22:00-06:00) computed from each measurement's timestamp, independent of fragile tablet sessions. Opening a shift late (e.g. 21:00), re-logins or app updates can no longer hide measurements - everything measured inside a window always shows under it (`/api/v2/quality?fixed_shift=...`, new `fixed_shifts` in `/quality/filters`; pure window math in `services/shift_windows.py`).
+- **Tablet shift resume:** when a machine already has an open shift, the operator can now RESUME it (re-attach via the new `GET /api/v2/machines/{id}/active-shift`) instead of fragmenting the day into extra sessions.
+- **Bug report button:** new "Report a bug" button in the web console sidebar (under the menu) and in the tablet operator top bar. Reports carry user name, date/time, text (<= 2000 chars) and up to 3 image attachments; stored server-side (migration 0031, `bug_reports` + `bug_report_attachments`). Managers/admins review and resolve them in the new web "Bug Reports" section.
+- Full backend suite: 408 tests OK. Deployed to production; tablets auto-update to build 56.
+
 ### Hotfix: reports invisible (500 on /api/reports) - po_number/mo_number alias (2026-11-02)
 - Fixed: after migration 0030 (po_number -> mo_number rename), GET /api/reports failed with 500 on dev AND production because the endpoints build response dicts from raw table columns (mo_number) while schemas.Report still required po_number. Reports were invisible in the web console and on tablets.
 - The four report endpoints that serialize column dicts (list, by-id, deleted, last-by-machine) now always include BOTH po_number (legacy clients + schema) and mo_number (new clients). schemas.Report gained an optional mo_number field. This also fixed the restored "copy from previous report" flow, whose PO lookup reads po_number from last-by-machine.

@@ -9,6 +9,7 @@ import '../auth_screen.dart';
 import '../../api_service.dart';
 import '../../local_db.dart';
 import '../../widgets/app_status_banner.dart';
+import '../../widgets/report_bug_dialog.dart';
 import 'history_screen.dart';
 import 'manual_quality_checks_screen.dart';
 import 'pending_shifts_screen.dart';
@@ -425,23 +426,48 @@ class _ReportPageState extends State<ReportPage> {
           machineId: machine.id, status: 'active');
       if (!mounted) return;
       if (active != null && active.isNotEmpty) {
-        final take = await showDialog<bool>(
+        final choice = await showDialog<String>(
           context: context,
           builder: (ctx) => AlertDialog(
             title: const Text('Machine already has an open shift'),
             content: const Text(
-                'Another operator has an active shift on this machine. Take over? Their shift will be auto-closed (data kept) so you can start fresh.'),
+                'There is already an active shift on this machine. Resume it to keep logging into the same shift, or take it over (the current shift is auto-closed and you start fresh).'),
             actions: [
               TextButton(
-                  onPressed: () => Navigator.pop(ctx, false),
+                  onPressed: () => Navigator.pop(ctx),
                   child: const Text('Cancel')),
+              OutlinedButton.icon(
+                  onPressed: () => Navigator.pop(ctx, 'resume'),
+                  icon: const Icon(Icons.play_arrow),
+                  label: const Text('Resume Shift')),
               FilledButton(
-                  onPressed: () => Navigator.pop(ctx, true),
+                  onPressed: () => Navigator.pop(ctx, 'takeover'),
                   child: const Text('Take Over')),
             ],
           ),
         );
-        if (take != true) return;
+        if (choice == null) return;
+        if (choice == 'resume') {
+          final detail = await ApiService.fetchMachineActiveShift(machine.id!);
+          if (!mounted) return;
+          if (detail == null) {
+            _toast('Could not fetch the open shift: ${ApiService.lastApiDetail ?? 'unknown error'}');
+            return;
+          }
+          final ctx = ShiftContext(
+            shiftId: detail['id'] as int,
+            machineId: detail['machine_id'] as int?,
+            machineName: machine.name,
+            shiftName: detail['shift_name'] as String?,
+            startedAt: DateTime.tryParse(detail['started_at']?.toString() ?? ''),
+            scheduledEndAt: DateTime.tryParse(detail['scheduled_end_at']?.toString() ?? ''),
+          );
+          await ApiService.saveShiftContext(ctx);
+          if (!mounted) return;
+          _applyShiftContext(ctx, detail);
+          _toast('Shift resumed - measurements stay in the original shift window.');
+          return;
+        }
         takeover = true;
       }
     }
@@ -2516,6 +2542,14 @@ class _ReportPageState extends State<ReportPage> {
                 ),
               );
             },
+          ),
+          IconButton(
+            icon: const Icon(Icons.bug_report_outlined),
+            tooltip: 'Report a bug / suggestion',
+            onPressed: () => showDialog(
+              context: context,
+              builder: (_) => const ReportBugDialog(source: 'tablet'),
+            ),
           ),
           if (_activeShift != null) ...[
             IconButton(

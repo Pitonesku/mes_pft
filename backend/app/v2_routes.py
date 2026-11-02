@@ -48,7 +48,7 @@ from app.quality_stats import (
     merge_triacetin,
     triacetin_status,
 )
-from app.services import aggregation, manual_check_rules, run_corrections, shift_lifecycle, shift_resolver
+from app.services import aggregation, bug_reports as bug_reports_svc, manual_check_rules, run_corrections, shift_lifecycle, shift_resolver, shift_windows
 from app.services import quarantine
 from app.services.manual_test_config import PARAMETERS, effective_config, sanitize_config
 from app.services.lot_number import lot_number
@@ -3031,6 +3031,42 @@ def _machine_manual_test_config(machine: models.Machine) -> Dict[str, Any]:
     }
 
 
+@router.get("/machines/{machine_id}/active-shift")
+def machine_active_shift(machine_id: int, db: Session = Depends(get_db)):
+    """The open shift on this machine (for tablet re-attach after an app update).
+
+    404 when the machine has no open shift session."""
+    _get_or_404(db, models.Machine, machine_id)
+    shift = (
+        db.query(models.ShiftSession)
+        .filter(
+            models.ShiftSession.machine_id == machine_id,
+            models.ShiftSession.ended_at.is_(None),
+        )
+        .order_by(models.ShiftSession.started_at.desc())
+        .first()
+    )
+    if shift is None:
+        raise HTTPException(status_code=404, detail="No open shift on this machine")
+    runs = (
+        db.query(models.ProductionRun)
+        .filter(models.ProductionRun.shift_id == shift.id)
+        .order_by(models.ProductionRun.seq)
+        .all()
+    )
+    summary = (
+        db.query(models.ShiftSummary)
+        .filter(models.ShiftSummary.shift_id == shift.id)
+        .order_by(models.ShiftSummary.version.desc())
+        .first()
+    )
+    return {
+        **_shift_dict(shift),
+        "runs": [_run_dict(r) for r in runs],
+        "summary": summary.payload if summary else None,
+    }
+
+
 @router.get("/machines/{machine_id}/manual-test-config")
 def get_machine_manual_test_config(
     machine_id: int,
@@ -3151,10 +3187,35 @@ def quality_filters(db: Session = Depends(get_db)):
             "label": label,
             "po_ids": sorted(po_by_shift.get(s.id, [])),
         })
+    templates = [
+        (s.name, s.start, s.end)
+        for s in db.query(models.Shift).order_by(models.Shift.id).all()
+    ]
+    now = _utcnow()
+    tz = get_plant_timezone()
+    current = shift_windows.window_for(templates, now, tz)
+    fixed = [
+        {
+            "key": "current",
+            "label": f"Current ({current.name})" if current else "Current",
+            "shift_name": current.name if current else None,
+            "from": current.start.isoformat() if current else None,
+            "to": current.end.isoformat() if current else None,
+        }
+    ]
+    for w in shift_windows.windows_for_day(templates, now, tz):
+        fixed.append({
+            "key": w.name,
+            "label": f"{w.name} ({w.start.strftime('%H:%M')}–{w.end.strftime('%H:%M')})",
+            "shift_name": w.name,
+            "from": w.start.isoformat(),
+            "to": w.end.isoformat(),
+        })
     return {
         "machines": [{"id": m.id, "name": m.name} for m in machines],
         "pos": [{"id": p.id, "po_number": p.mo_number} for p in pos],
         "shifts": shifts,
+        "fixed_shifts": fixed,
     }
 
 
@@ -3306,6 +3367,7 @@ def quality_overview(
     page_size: int = Query(default=50),
     fmt: str = Query(default="json"),
     include_raw: bool = Query(default=False),
+    fixed_shift: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
 ):
     if window not in ("rods", "shift", "po", "all"):
@@ -3327,6 +3389,23 @@ def quality_overview(
             raise HTTPException(status_code=404, detail=f"Machine '{machine}' not found")
         machine_id = m.id
 
+    fixed_window = None
+    if fixed_shift:
+        templates = [
+            (s.name, s.start, s.end)
+            for s in db.query(models.Shift).order_by(models.Shift.id).all()
+        ]
+        if fixed_shift == "current":
+            fixed_window = shift_windows.window_for(templates, _utcnow(), get_plant_timezone())
+        else:
+            fixed_window = shift_windows.window_for_label(templates, fixed_shift, _utcnow(), get_plant_timezone())
+        if fixed_window is None:
+            raise HTTPException(status_code=400, detail=f"Unknown fixed shift '{fixed_shift}'")
+        # Fixed windows replace any session-based narrowing.
+        shift = None
+        shift_id = None
+        report_id = None
+
     shift = _resolve_quality_shift(db, shift_id=shift_id, report_id=report_id, machine_name=machine, date=date, shift_name=shift_name)
     if shift is not None:
         shift_id = shift.id
@@ -3344,6 +3423,11 @@ def quality_overview(
     base = db.query(models.QualityMeasurement)
     if machine_id is not None:
         base = base.filter(models.QualityMeasurement.machine_id == machine_id)
+    if fixed_window is not None:
+        base = base.filter(
+            models.QualityMeasurement.measured_at >= fixed_window.start,
+            models.QualityMeasurement.measured_at < fixed_window.end,
+        )
     if shift is not None:
         in_range = (models.QualityMeasurement.machine_id == (machine_id or shift.machine_id)) & (models.QualityMeasurement.measured_at >= shift.started_at)
         if shift.ended_at is not None:
@@ -3368,7 +3452,9 @@ def quality_overview(
         )
         rods = list(reversed(last))
     elif window == "shift":
-        if shift is None:
+        if fixed_window is not None:
+            rods = base.order_by(*asc).all()
+        elif shift is None:
             q = db.query(models.ShiftSession)
             if machine_id is not None:
                 q = q.filter(models.ShiftSession.machine_id == machine_id)
@@ -3442,6 +3528,8 @@ def quality_overview(
 
     pd_warn, pd_fail, dia_warn, dia_fail = _sd_thresholds(db)
     header = _quality_header(db, machine, shift, po_id)
+    if fixed_window is not None:
+        header["shift_label"] = f"{fixed_window.name} · {fixed_window.start.strftime('%H:%M')}–{fixed_window.end.strftime('%H:%M')}"
     run_id = None
     if report_id is not None:
         db_report = db.get(models.ProductionReport, report_id)
@@ -3451,7 +3539,7 @@ def quality_overview(
     raw_rows = [row_of(r) for r in rods] if include_raw else None
 
     return {
-        "selection": {"machine": machine or "all", "po_id": po_id, "shift_id": shift_id, "window": window, "window_value": window_value},
+        "selection": {"machine": machine or "all", "po_id": po_id, "shift_id": shift_id, "window": window, "window_value": window_value, "fixed_shift": fixed_shift},
         "kpis": {
             "sample_size": stats.get("rods_total", 0),
             "rods_rejected": stats.get("rods_rejected", 0),
@@ -3987,6 +4075,119 @@ def void_manual_check(
     db.commit()
     db.refresh(check)
     return _manual_check_dict(check)
+
+
+# ---------------------------------------------------------------------------
+# Bug / suggestion reports (web console + tablet)
+# ---------------------------------------------------------------------------
+
+class BugAttachmentIn(BaseModel):
+    filename: str = "attachment"
+    mime: str = "application/octet-stream"
+    data_base64: str
+
+
+class BugReportIn(BaseModel):
+    text: str
+    source: str = "web"
+    attachments: Optional[List[BugAttachmentIn]] = None
+
+
+class BugResolveIn(BaseModel):
+    status: str = bug_reports_svc.STATUS_RESOLVED  # IN_PROGRESS | RESOLVED
+    note: Optional[str] = None
+
+
+def _require_bug_reviewer(user: models.User) -> None:
+    role = user.role
+    role_name = (role.role_name or "").lower() if role is not None else ""
+    if role_name not in ("admin", "superadmin", "manager"):
+        raise HTTPException(status_code=403, detail="Manager or admin only")
+
+
+def _bug_report_dict(r: models.BugReport) -> Dict[str, Any]:
+    return {
+        "id": r.id,
+        "username": r.username,
+        "source": r.source,
+        "text": r.text,
+        "created_at": _bud_iso(r.created_at) if r.created_at else None,
+        "status": r.status,
+        "resolved_by": r.resolved_by,
+        "resolved_at": _bud_iso(r.resolved_at) if r.resolved_at else None,
+        "resolution_note": r.resolution_note,
+        "attachments": [
+            {"id": a.id, "filename": a.filename, "mime": a.mime, "size_bytes": a.size_bytes}
+            for a in r.attachments
+        ],
+    }
+
+
+@router.post("/bug-reports")
+def submit_bug_report(
+    payload: BugReportIn,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Any authenticated user submits a bug / suggestion (text <= 2000 chars,
+    up to 3 base64 attachments of <= 4 MB each)."""
+    try:
+        report = bug_reports_svc.create(
+            db, current_user, payload.text, payload.source,
+            [a.model_dump() for a in payload.attachments or []],
+        )
+    except bug_reports_svc.BugReportError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+    db.commit()
+    return {"id": report.id, "status": report.status, "created_at": _bud_iso(report.created_at)}
+
+
+@router.get("/bug-reports")
+def list_bug_reports(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Review board (manager / admin)."""
+    _require_bug_reviewer(current_user)
+    return [_bug_report_dict(r) for r in bug_reports_svc.list_reports(db)]
+
+
+@router.get("/bug-reports/{report_id}/attachments/{attachment_id}")
+def get_bug_attachment(
+    report_id: int,
+    attachment_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    _require_bug_reviewer(current_user)
+    att = (
+        db.query(models.BugReportAttachment)
+        .filter(
+            models.BugReportAttachment.id == attachment_id,
+            models.BugReportAttachment.bug_report_id == report_id,
+        )
+        .first()
+    )
+    if att is None:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    return Response(content=att.data, media_type=att.mime)
+
+
+@router.post("/bug-reports/{report_id}/resolve")
+def resolve_bug_report(
+    report_id: int,
+    payload: BugResolveIn,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    _require_bug_reviewer(current_user)
+    report = _get_or_404(db, models.BugReport, report_id)
+    try:
+        bug_reports_svc.resolve(db, report, current_user, payload.status, payload.note)
+    except bug_reports_svc.BugReportError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+    db.commit()
+    return _bug_report_dict(report)
 
 
 # ---------------------------------------------------------------------------

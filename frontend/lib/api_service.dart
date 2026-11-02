@@ -1050,6 +1050,7 @@ class ApiService {
     int page = 1,
     int pageSize = 50,
     bool includeRaw = false,
+    String? fixedShift,
   }) async {
     try {
       final qp = <String, String>{
@@ -1065,6 +1066,7 @@ class ApiService {
       if (date != null) qp['date'] = date;
       if (shiftName != null) qp['shift_name'] = shiftName;
       if (includeRaw) qp['include_raw'] = '1';
+      if (fixedShift != null) qp['fixed_shift'] = fixedShift;
       final uri = Uri.parse('$effectiveBaseUrl/v2/quality').replace(queryParameters: qp);
       final response = await _httpClient.get(uri).timeout(const Duration(seconds: 30));
       if (response.statusCode == 200) {
@@ -1877,6 +1879,110 @@ class ApiService {
     } catch (e) {
       AppLog.e("fetchShiftDetail error: $e");
       _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  /// The open shift on a machine (tablet re-attach after an app update).
+  /// Returns the same detail shape as [fetchShiftDetail], or null (404/error).
+  static Future<Map<String, dynamic>?> fetchMachineActiveShift(int machineId) async {
+    try {
+      final response = await _httpClient
+          .get(Uri.parse('$effectiveBaseUrl/v2/machines/$machineId/active-shift'),
+              headers: _authHeaders())
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      if (response.statusCode != 404) {
+        _fail(response.statusCode, _detailFrom(response.body));
+      }
+      return null;
+    } catch (e) {
+      AppLog.e("fetchMachineActiveShift error: $e");
+      _fail(null, e.toString());
+      return null;
+    }
+  }
+
+  // --- BUG / SUGGESTION REPORTS -----------------------------------------------
+
+  /// Submit a bug report (text <= 2000 chars, up to 3 base64 attachments).
+  static Future<bool> submitBugReport({
+    required String text,
+    String source = 'web',
+    List<Map<String, String>> attachments = const [],
+  }) async {
+    try {
+      final response = await _httpClient
+          .post(Uri.parse('$effectiveBaseUrl/v2/bug-reports'),
+              headers: _authHeaders(),
+              body: jsonEncode({
+                'text': text,
+                'source': source,
+                'attachments': attachments,
+              }))
+          .timeout(const Duration(seconds: 60));
+      if (response.statusCode == 200) return true;
+      _fail(response.statusCode, _detailFrom(response.body));
+      return false;
+    } catch (e) {
+      AppLog.e("submitBugReport error: $e");
+      _fail(null, e.toString());
+      return false;
+    }
+  }
+
+  /// Review board (manager / admin): all bug reports, newest first.
+  static Future<List<dynamic>?> fetchBugReports() async {
+    try {
+      final response = await _httpClient
+          .get(Uri.parse('$effectiveBaseUrl/v2/bug-reports'), headers: _authHeaders())
+          .timeout(const Duration(seconds: 20));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as List<dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("fetchBugReports error: $e");
+      return null;
+    }
+  }
+
+  /// Raw bytes of one bug-report attachment (for inline preview).
+  static Future<Uint8List?> fetchBugAttachment(int reportId, int attachmentId) async {
+    try {
+      final response = await _httpClient
+          .get(Uri.parse('$effectiveBaseUrl/v2/bug-reports/$reportId/attachments/$attachmentId'),
+              headers: _authHeaders())
+          .timeout(const Duration(seconds: 30));
+      if (response.statusCode == 200) {
+        return response.bodyBytes;
+      }
+      return null;
+    } catch (e) {
+      AppLog.e("fetchBugAttachment error: $e");
+      return null;
+    }
+  }
+
+  /// Set status (IN_PROGRESS | RESOLVED) with an optional note.
+  static Future<Map<String, dynamic>?> resolveBugReport(
+      int reportId, {required String status, String? note}) async {
+    try {
+      final response = await _httpClient
+          .post(Uri.parse('$effectiveBaseUrl/v2/bug-reports/$reportId/resolve'),
+              headers: _authHeaders(),
+              body: jsonEncode({'status': status, 'note': note}))
+          .timeout(const Duration(seconds: 20));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+      _fail(response.statusCode, _detailFrom(response.body));
+      return null;
+    } catch (e) {
+      AppLog.e("resolveBugReport error: $e");
       return null;
     }
   }

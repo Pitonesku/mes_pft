@@ -20,6 +20,8 @@ import 'profile_screen.dart';
 import 'ai_analysis_screen.dart';
 import 'quality/quality_management_screen.dart';
 import 'runs_screen.dart';
+import 'bug_reports_screen.dart';
+import '../../widgets/report_bug_dialog.dart';
 import '../auth_screen.dart';
 
 enum _Section {
@@ -35,6 +37,7 @@ enum _Section {
   settings,
   aiAnalysis,
   profile,
+  bugReports,
 }
 
 class WebShell extends StatefulWidget {
@@ -161,6 +164,7 @@ class _WebShellState extends State<WebShell> {
         _Section.settings => '#/settings',
         _Section.aiAnalysis => '#/ai',
         _Section.profile => '#/profile',
+        _Section.bugReports => '#/bug-reports',
       };
 
   _Section? _sectionFromPath(String path) => switch (path) {
@@ -176,6 +180,7 @@ class _WebShellState extends State<WebShell> {
         '/settings' => _Section.settings,
         '/ai' => _Section.aiAnalysis,
         '/profile' => _Section.profile,
+        '/bug-reports' => _Section.bugReports,
         _ => null,
       };
 
@@ -194,6 +199,7 @@ class _WebShellState extends State<WebShell> {
         _Section.machinesShifts => _isSuperAdmin,
         _Section.settings => _isSuperAdmin,
         _Section.aiAnalysis => _canUseAI,
+        _Section.bugReports => _canUseAI,
         _ => true,
       };
 
@@ -210,8 +216,10 @@ class _WebShellState extends State<WebShell> {
       (_Section.machinesShifts, Icons.precision_manufacturing_outlined, Icons.precision_manufacturing, 'Machines & Shifts'),
       (_Section.settings, Icons.settings_outlined, Icons.settings, 'Settings'),
     ],
-    if (_canUseAI)
+    if (_canUseAI) ...[
       (_Section.aiAnalysis,   Icons.psychology_outlined,        Icons.psychology,             'AI Analysis'),
+      (_Section.bugReports,   Icons.bug_report_outlined,        Icons.bug_report,             'Bug Reports'),
+    ],
     (_Section.profile,        Icons.person_outline,             Icons.person,                 'My Profile'),
   ];
 
@@ -223,6 +231,7 @@ class _WebShellState extends State<WebShell> {
     _Section.quality       => QualityControlScreen(initial: _qualityRequest, user: widget.currentUser),
     _Section.qualityManagement => QualityManagementScreen(user: widget.currentUser),
     _Section.runs           => RunsScreen(user: widget.currentUser),
+    _Section.bugReports     => BugReportsScreen(user: widget.currentUser),
     _Section.users          => UsersScreen(currentUser: widget.currentUser),
     _Section.machinesShifts => MachinesShiftsScreen(user: widget.currentUser),
     _Section.settings      => const SettingsScreen(),
@@ -253,6 +262,33 @@ class _WebShellState extends State<WebShell> {
             ]),
           ),
           Expanded(child: ListView(padding: EdgeInsets.zero, children: [for (final item in _navItems) _navItem(item, wide)])),
+          InkWell(
+            onTap: () => showDialog(
+              context: context,
+              builder: (_) => const ReportBugDialog(source: 'web'),
+            ),
+            child: Container(
+              height: 44,
+              margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              padding: EdgeInsets.symmetric(horizontal: wide ? 16 : 0),
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.06),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                mainAxisAlignment: wide ? MainAxisAlignment.start : MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.bug_report_outlined, color: Colors.white70, size: 22),
+                  if (wide) ...[
+                    const SizedBox(width: 12),
+                    const Expanded(
+                        child: Text('Report a bug',
+                            style: TextStyle(color: Colors.white70, fontSize: 13))),
+                  ],
+                ],
+              ),
+            ),
+          ),
           Padding(
             padding: const EdgeInsets.only(bottom: 12),
             child: IconButton(
