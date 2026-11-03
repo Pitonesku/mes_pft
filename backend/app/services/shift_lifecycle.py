@@ -350,6 +350,25 @@ def link_report_to_run(db: Session, report: models.ProductionReport) -> Optional
             )
         run = q.order_by(models.ProductionRun.seq.desc()).first()
 
+    if run is None and report.shift_id is not None and not po_number:
+        # Self-heal: an order-less report on a shift that ran exactly ONE order
+        # belongs to that order (the tablet lost its context, e.g. after a
+        # shift resume). Backfill the MO additively; never guess for multi-run
+        # shifts.
+        candidates = (
+            db.query(models.ProductionRun)
+            .filter(
+                models.ProductionRun.shift_id == report.shift_id,
+                models.ProductionRun.mo_ref.isnot(None),
+                func.btrim(models.ProductionRun.mo_ref) != "",
+            )
+            .order_by(models.ProductionRun.seq)
+            .all()
+        )
+        if len(candidates) == 1:
+            run = candidates[0]
+            report.mo_number = run.mo_ref
+
     if run is None:
         report.run_id = None
         return None

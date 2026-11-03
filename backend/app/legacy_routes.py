@@ -1036,12 +1036,12 @@ def create_report(
         # Lock the PO row first to serialize concurrent submissions for the same PO,
         # then compute the absolute produced_qty from all reports (excluding soft-deleted).
         po_to_update = db.query(models.PurchaseOrder).filter(
-            models.PurchaseOrder.mo_number == report_data.mo_number
+            models.PurchaseOrder.mo_number == db_report.mo_number
         ).with_for_update().first()
 
         total_sum_query = db.query(func.sum(models.ProductionReport.produced_rods))\
                             .filter(
-                                models.ProductionReport.mo_number == report_data.mo_number,
+                                models.ProductionReport.mo_number == db_report.mo_number,
                                 or_(models.ProductionReport.is_deleted == False, models.ProductionReport.is_deleted == None),
                             )\
                             .scalar()
@@ -1098,7 +1098,7 @@ def create_report(
             diff_marker = ""
 
         text += (
-            f"PO #: {report_data.mo_number}\n"
+            f"PO #: {db_report.mo_number}\n"
             f"Lot #: {getattr(report_data, 'lot_number', '') or ''}\n"
             f"Box type: {report_data.box_type}\n"
             f"Diameter (mm): {report_data.diameter}\n"
@@ -1245,12 +1245,12 @@ def sync_report(
         # 2. Update PO produced_qty (excluding soft-deleted)
         # Lock the PO row first to serialize concurrent submissions for the same PO.
         po_to_update = db.query(models.PurchaseOrder).filter(
-            models.PurchaseOrder.mo_number == report_data.mo_number
+            models.PurchaseOrder.mo_number == db_report.mo_number
         ).with_for_update().first()
 
         total_sum_query = db.query(func.sum(models.ProductionReport.produced_rods))\
                             .filter(
-                                models.ProductionReport.mo_number == report_data.mo_number,
+                                models.ProductionReport.mo_number == db_report.mo_number,
                                 or_(models.ProductionReport.is_deleted == False, models.ProductionReport.is_deleted == None),
                             )\
                             .scalar()
@@ -1285,7 +1285,7 @@ def sync_report(
                 f"Machine #: {report_data.machine_name}\n\n"
             )
         text += (
-            f"PO #: {report_data.mo_number}\n"
+            f"PO #: {db_report.mo_number}\n"
             f"Box produced: {report_data.boxes_produced}\n"
             f"Produced rods: {report_data.produced_rods}\n"
             f"Waste (kg): {report_data.waste_kg}\n"

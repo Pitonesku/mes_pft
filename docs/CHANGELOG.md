@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.2.0] - 2026-11-02 (build 53) - po->mo rename, Odoo guardrails, A3-A9, web Runs & Audit
 
 ### Telegram report: Quality section after machine efficiency (2026-11-02, late night)
+- Self-heal for order-less reports: when a report arrives without an MO but its shift ran exactly ONE order, the run linker now attaches it to that run and backfills mo_number additively (multi-run shifts are never guessed). The Telegram header, PO counters and the Quality section then all work for such reports. Prod report 598 (05:40, PO #: None) repaired: mo=2610/111, run 625, PO 127 produced_qty 0 -> 1,692,000. 3 new tests; 436 total OK.
+
 - Hardening: the order window end is clamped to the run's end (the MO switch), so a late-synced report can never pull in rods of the next order or a later re-run of the same order number. Boundary rod at the switch belongs to the incoming order. 3-orders-in-a-shift + late-sync + boundary tests added (8 section tests, 433 total). Deployed to production.
 
 - The Telegram report message (create_report, sync_report and the bot's digital report) now shows a Quality section after the machine-efficiency line:
